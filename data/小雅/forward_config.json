@@ -1,0 +1,34 @@
+{
+  "forward_rules": [
+    {
+      "name": "rule_all_to_A",
+      "sources": [],
+      "targets": [
+        -1003585759564
+      ],
+      "filter": "all",
+      "exclude_channels": [
+        -1009999999999
+      ],
+      "replace_channel_link": "t.me/satchmopd",
+      "replace_channel_user": "@satchmopd",
+      "replace_submit_user": "@nuan12"
+    },
+    {
+      "name": "沙雕行为鉴赏",
+      "sources": [
+        -1003806482833
+      ],
+      "targets": [
+        -1003878817420
+      ],
+      "filter": "all",
+      "exclude_channels": [
+    
+      ],
+      "replace_channel_link": "t.me/sdxwjs",
+      "replace_channel_user": "@sdxwjs",
+      "replace_submit_user": "@nuan12"
+    }
+  ]
+}

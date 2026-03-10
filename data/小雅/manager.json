@@ -1,0 +1,14 @@
+{
+    "-1003771460278": {
+        "6085551760": {
+            "expire_time": 17730765071,
+            "auto_plant_flower": "兰花",
+            "auto_plant_crop": "向日葵"
+        },
+        "8037987056": {
+            "expire_time": 17718309051,
+            "auto_plant_flower": "郁金香",
+            "auto_plant_crop": "向日葵"
+        }
+    }
+}

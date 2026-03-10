@@ -1,0 +1,35 @@
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+myenv/
+venv/
+.venv/
+
+# Local config and secrets
+.env
+.env.*
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Runtime data / caches / media
+downloads/
+media/
+photos/
+sticker_cache/
+*.log
+
+# OS/editor
+.idea/
+.vscode/

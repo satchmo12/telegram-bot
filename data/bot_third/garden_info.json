@@ -1,0 +1,24 @@
+{
+    "-1002861387822": {
+        "6085551760": {
+            "plots": [
+                {
+                    "type": null,
+                    "planted_time": null,
+                    "alive": true,
+                    "yield_left": 0,
+                    "stolen_by": []
+                },
+                {
+                    "type": null,
+                    "planted_time": null,
+                    "alive": true,
+                    "yield_left": 0,
+                    "stolen_by": []
+                }
+            ],
+            "expansions": 1,
+            "last_expand_time": 1772529758
+        }
+    }
+}

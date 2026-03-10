@@ -1,0 +1,355 @@
+{
+    "-1003771460278": {
+        "8037987056": {
+            "land": [
+                {
+                    "type": "羊",
+                    "start_time": 1772671051,
+                    "produce_time": 1773147800,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "羊",
+                    "start_time": 1772671051,
+                    "produce_time": 1773147800,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "羊",
+                    "start_time": 1772671051,
+                    "produce_time": 1773147800,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "羊",
+                    "start_time": 1772671051,
+                    "produce_time": 1773147800,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "羊",
+                    "start_time": 1772671051,
+                    "produce_time": 1773147800,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "羊",
+                    "start_time": 1772671051,
+                    "produce_time": 1773147800,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "羊",
+                    "start_time": 1772671051,
+                    "produce_time": 1773147800,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "鸡",
+                    "start_time": 1772990309,
+                    "produce_time": 1773142700,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "鸡",
+                    "start_time": 1772990309,
+                    "produce_time": 1773142700,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "鸡",
+                    "start_time": 1772990309,
+                    "produce_time": 1773142700,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "鸡",
+                    "start_time": 1772990309,
+                    "produce_time": 1773142700,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "牛",
+                    "start_time": 1772866560,
+                    "produce_time": 1773149000,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "牛",
+                    "start_time": 1772866578,
+                    "produce_time": 1773149000,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "牛",
+                    "start_time": 1772866578,
+                    "produce_time": 1773149000,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "牛",
+                    "start_time": 1772866578,
+                    "produce_time": 1773149000,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "牛",
+                    "start_time": 1772866578,
+                    "produce_time": 1773149000,
+                    "alive": true,
+                    "yield_left": 10
+                }
+            ],
+            "expansions": 16,
+            "last_expand_time": 1771737913
+        },
+        "6085551760": {
+            "land": [
+                {
+                    "type": "牛",
+                    "start_time": 1773115645,
+                    "produce_time": 1773137408,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "牛",
+                    "start_time": 1773115645,
+                    "produce_time": 1773137408,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "鸡",
+                    "start_time": 1773119234,
+                    "produce_time": 1773152483,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "鸡",
+                    "start_time": 1773119234,
+                    "produce_time": 1773152483,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "鸡",
+                    "start_time": 1773119234,
+                    "produce_time": 1773152483,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "羊",
+                    "start_time": 1772343709,
+                    "produce_time": 1773119215,
+                    "alive": true,
+                    "yield_left": 10,
+                    "stolen_by": []
+                },
+                {
+                    "type": "羊",
+                    "start_time": 1772343709,
+                    "produce_time": 1773119215,
+                    "alive": true,
+                    "yield_left": 10,
+                    "stolen_by": []
+                },
+                {
+                    "type": "羊",
+                    "start_time": 1772343709,
+                    "produce_time": 1773119215,
+                    "alive": true,
+                    "yield_left": 10,
+                    "stolen_by": []
+                },
+                {
+                    "type": "羊",
+                    "start_time": 1772343709,
+                    "produce_time": 1773119215,
+                    "alive": true,
+                    "yield_left": 10,
+                    "stolen_by": []
+                },
+                {
+                    "type": "羊",
+                    "start_time": 1772343709,
+                    "produce_time": 1773119215,
+                    "alive": true,
+                    "yield_left": 10,
+                    "stolen_by": []
+                },
+                {
+                    "type": "牛",
+                    "start_time": 1773115645,
+                    "produce_time": 1773137408,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "鸡",
+                    "start_time": 1772865206,
+                    "produce_time": 1773148400,
+                    "alive": true,
+                    "yield_left": 10,
+                    "stolen_by": []
+                }
+            ],
+            "expansions": 11,
+            "last_expand_time": 1772865200
+        }
+    },
+    "-1002861387822": {
+        "6085551760": {
+            "land": [
+                {
+                    "type": null,
+                    "start_time": null,
+                    "produce_time": null,
+                    "alive": true,
+                    "yield_left": 0,
+                    "stolen_by": []
+                },
+                {
+                    "type": null,
+                    "start_time": null,
+                    "produce_time": null,
+                    "alive": true,
+                    "yield_left": 0,
+                    "stolen_by": []
+                }
+            ],
+            "expansions": 1,
+            "last_expand_time": 1772381801
+        }
+    },
+    "-1003648060909": {
+        "6085551760": {
+            "land": [
+                {
+                    "type": "猪",
+                    "start_time": 1772949479,
+                    "produce_time": 1772949479,
+                    "alive": true,
+                    "yield_left": 10
+                },
+                {
+                    "type": "猪",
+                    "start_time": 1772949479,
+                    "produce_time": 1772949479,
+                    "alive": true,
+                    "yield_left": 10
+                }
+            ],
+            "expansions": 1,
+            "last_expand_time": 1772949459
+        }
+    },
+    "-1003755482356": {
+        "5637548469": {
+            "land": [
+                {
+                    "type": "鸡",
+                    "start_time": 1773015137,
+                    "produce_time": 1773106439,
+                    "alive": true,
+                    "yield_left": 10,
+                    "stolen_by": []
+                },
+                {
+                    "type": "鸡",
+                    "start_time": 1773015137,
+                    "produce_time": 1773106439,
+                    "alive": true,
+                    "yield_left": 10,
+                    "stolen_by": []
+                }
+            ],
+            "expansions": 1,
+            "last_expand_time": 1773015131
+        },
+        "8173530865": {
+            "land": [
+                {
+                    "type": "牛",
+                    "start_time": 1773077267,
+                    "produce_time": 1773106401,
+                    "alive": true,
+                    "yield_left": 10,
+                    "stolen_by": []
+                },
+                {
+                    "type": "猪",
+                    "start_time": 1773088713,
+                    "produce_time": 1773088713,
+                    "alive": true,
+                    "yield_left": 10
+                }
+            ],
+            "expansions": 1,
+            "last_expand_time": 1773077179
+        },
+        "6085551760": {
+            "land": [
+                {
+                    "type": null,
+                    "start_time": null,
+                    "produce_time": null,
+                    "alive": true,
+                    "yield_left": 0,
+                    "stolen_by": []
+                },
+                {
+                    "type": null,
+                    "start_time": null,
+                    "produce_time": null,
+                    "alive": true,
+                    "yield_left": 0,
+                    "stolen_by": []
+                }
+            ],
+            "expansions": 1,
+            "last_expand_time": 1773081742
+        }
+    },
+    "-1003266766385": {
+        "6085551760": {
+            "land": [
+                {
+                    "type": null,
+                    "start_time": null,
+                    "produce_time": null,
+                    "alive": true,
+                    "yield_left": 0,
+                    "stolen_by": []
+                },
+                {
+                    "type": null,
+                    "start_time": null,
+                    "produce_time": null,
+                    "alive": true,
+                    "yield_left": 0,
+                    "stolen_by": []
+                }
+            ],
+            "expansions": 1,
+            "last_expand_time": 1773054604
+        }
+    }
+}

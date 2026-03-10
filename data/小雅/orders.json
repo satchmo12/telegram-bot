@@ -1,0 +1,97 @@
+{
+    "-1003771460278": {
+        "date": "2026-03-10",
+        "orders": [
+            {
+                "id": 1,
+                "crop": "牛肉",
+                "amount": 30,
+                "reward": 6000,
+                "completed_users": [
+                    "8037987056"
+                ]
+            },
+            {
+                "id": 2,
+                "crop": "向日葵",
+                "amount": 20,
+                "reward": 2000,
+                "completed_users": [
+                    "8037987056"
+                ]
+            },
+            {
+                "id": 3,
+                "crop": "草莓蛋挞",
+                "amount": 30,
+                "reward": 13800,
+                "completed_users": [
+                    "8037987056"
+                ]
+            },
+            {
+                "id": 4,
+                "crop": "西瓜",
+                "amount": 20,
+                "reward": 3200,
+                "completed_users": [
+                    "8037987056"
+                ]
+            },
+            {
+                "id": 5,
+                "crop": "玫瑰",
+                "amount": 20,
+                "reward": 1800,
+                "completed_users": [
+                    "8037987056"
+                ]
+            },
+            {
+                "id": 6,
+                "crop": "牛奶",
+                "amount": 10,
+                "reward": 1000,
+                "completed_users": [
+                    "8037987056"
+                ]
+            },
+            {
+                "id": 7,
+                "crop": "兰花",
+                "amount": 15,
+                "reward": 1350,
+                "completed_users": [
+                    "8037987056"
+                ]
+            },
+            {
+                "id": 8,
+                "crop": "满天星",
+                "amount": 30,
+                "reward": 1800,
+                "completed_users": [
+                    "8037987056"
+                ]
+            },
+            {
+                "id": 9,
+                "crop": "蔗糖",
+                "amount": 10,
+                "reward": 6400,
+                "completed_users": [
+                    "8037987056"
+                ]
+            },
+            {
+                "id": 10,
+                "crop": "毛线",
+                "amount": 20,
+                "reward": 96000,
+                "completed_users": [
+                    "8037987056"
+                ]
+            }
+        ]
+    }
+}

@@ -1,0 +1,67 @@
+{
+    "messages": [
+        {
+            "message_id": 38897,
+            "user_id": 5555744830,
+            "user_name": "（⚠️有人冒充我⚠️） 我就冒充久伴",
+            "text": "/start",
+            "timestamp": 1772407017,
+            "date": "2026-03-01",
+            "datetime": "2026-03-01 23:16:57"
+        },
+        {
+            "message_id": 38899,
+            "user_id": 5555744830,
+            "user_name": "（⚠️有人冒充我⚠️） 我就冒充久伴",
+            "text": "/restart",
+            "timestamp": 1772407052,
+            "date": "2026-03-01",
+            "datetime": "2026-03-01 23:17:32"
+        },
+        {
+            "message_id": 38900,
+            "user_id": 5555744830,
+            "user_name": "（⚠️有人冒充我⚠️） 我就冒充久伴",
+            "text": "/start_menu",
+            "timestamp": 1772407055,
+            "date": "2026-03-01",
+            "datetime": "2026-03-01 23:17:35"
+        },
+        {
+            "message_id": 38902,
+            "user_id": 5555744830,
+            "user_name": "（⚠️有人冒充我⚠️） 我就冒充久伴",
+            "text": "/group",
+            "timestamp": 1772407062,
+            "date": "2026-03-01",
+            "datetime": "2026-03-01 23:17:42"
+        },
+        {
+            "message_id": 38904,
+            "user_id": 5555744830,
+            "user_name": "（⚠️有人冒充我⚠️） 我就冒充久伴",
+            "text": "/restart",
+            "timestamp": 1772407076,
+            "date": "2026-03-01",
+            "datetime": "2026-03-01 23:17:56"
+        },
+        {
+            "message_id": 38905,
+            "user_id": 5555744830,
+            "user_name": "（⚠️有人冒充我⚠️） 我就冒充久伴",
+            "text": "group",
+            "timestamp": 1772407103,
+            "date": "2026-03-01",
+            "datetime": "2026-03-01 23:18:23"
+        },
+        {
+            "message_id": 38908,
+            "user_id": 5555744830,
+            "user_name": "（⚠️有人冒充我⚠️） 我就冒充久伴",
+            "text": "/start_menu",
+            "timestamp": 1772407109,
+            "date": "2026-03-01",
+            "datetime": "2026-03-01 23:18:29"
+        }
+    ]
+}
