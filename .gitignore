@@ -25,7 +25,6 @@ venv/
 
 # Runtime data / caches / media
 downloads/
-media/
 photos/
 sticker_cache/
 *.log
