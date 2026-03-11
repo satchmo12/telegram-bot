@@ -72,9 +72,15 @@ INTIMACY_ACTION_POINTS = {
     "亲亲": 2,
     "抱抱": 2,
     "举高高": 3,
+    "摸头": 2,
+    "撒娇": 2,
 }
 INTIMACY_ACTION_COOLDOWN = 300  # 5 分钟
 BABY_FEED_COOLDOWN = 3600  # 1 小时
+BABY_STARVE_SECONDS = 86400  # 24 小时
+DONGFANG_INTIMACY_POINTS = 5
+BABY_BIRTH_INTIMACY_POINTS = 6
+BABY_DEATH_INTIMACY_PENALTY = 50
 
 dongfang_cooldown = {}  # (chat_id, uid) -> timestamp
 
@@ -150,6 +156,89 @@ def _format_since(ts: int) -> str:
     if delta < 86400:
         return f"{delta // 3600} 小时前"
     return f"{delta // 86400} 天前"
+
+
+def _baby_growth_stage(feed_count: int) -> str:
+    if feed_count >= 10:
+        return "少年"
+    if feed_count >= 6:
+        return "幼童"
+    if feed_count >= 3:
+        return "学步"
+    if feed_count >= 1:
+        return "新生"
+    return "初生"
+
+
+def _parse_birthday_ts(birthday: str) -> int:
+    if not birthday:
+        return 0
+    try:
+        dt = datetime.strptime(birthday, "%Y-%m-%d")
+        return int(dt.timestamp())
+    except Exception:
+        return 0
+
+
+def _get_born_ts(child: dict) -> int:
+    born_ts = int(child.get("born_ts", 0) or 0)
+    if born_ts:
+        return born_ts
+    return _parse_birthday_ts(str(child.get("birthday", "")))
+
+
+def _find_child_by_id(children: list, child_id: str):
+    for c in children:
+        if _ensure_child_id(c) == child_id:
+            return c
+    return None
+
+
+def _sync_child_fields(group: dict, lover_id: str, child_id: str, fields: dict):
+    if not lover_id:
+        return
+    partner_info = group.setdefault(str(lover_id), {})
+    partner_children = partner_info.setdefault("children", [])
+    partner_child = _find_child_by_id(partner_children, child_id)
+    if partner_child:
+        partner_child.update(fields)
+
+
+def _apply_intimacy(group: dict, uid: str, lover_id: str, delta: int):
+    for pid in (uid, lover_id):
+        if not pid:
+            continue
+        pdata = group.setdefault(str(pid), {})
+        pdata["intimacy"] = int(pdata.get("intimacy", 0) or 0) + delta
+
+
+def _maybe_handle_starve(
+    group: dict, uid: str, lover_id: str, child: dict, now_ts: int
+):
+    if child.get("dead"):
+        return False
+    last_fed = int(child.get("last_fed", 0) or 0)
+    born_ts = _get_born_ts(child)
+    base_ts = last_fed or born_ts
+    if not base_ts:
+        return False
+    if now_ts - base_ts < BABY_STARVE_SECONDS:
+        return False
+
+    child_id = _ensure_child_id(child)
+    child["dead"] = True
+    child["death_ts"] = now_ts
+    if not child.get("death_handled"):
+        child["death_handled"] = True
+        _apply_intimacy(group, uid, lover_id, -BABY_DEATH_INTIMACY_PENALTY)
+
+    _sync_child_fields(
+        group,
+        lover_id,
+        child_id,
+        {"dead": True, "death_ts": now_ts, "death_handled": True},
+    )
+    return True
 
 
 @register_command("求婚")
@@ -475,12 +564,14 @@ async def dongfang(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await safe_reply(update, context, "🕰️ 洞房刚结束，休息一下吧~")
 
     dongfang_cooldown[cd_key] = now
+    _apply_intimacy(group, uid, tid, DONGFANG_INTIMACY_POINTS)
+    _save_marry_data(context, data)
 
     # 基础描述（不露骨）
     await safe_reply(
         update,
         context,
-        f"💞 {_user_ref(user, is_silent)} 与 {_user_ref(target, is_silent)} 共度了一个浪漫的夜晚……",
+        f"💞 {_user_ref(user, is_silent)} 与 {_user_ref(target, is_silent)} 共度了一个浪漫的夜晚……（亲密度 +{DONGFANG_INTIMACY_POINTS}）",
         html=True,
     )
 
@@ -491,7 +582,9 @@ async def dongfang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 👶 生宝宝
     baby_name = random.choice(["小团子", "小星星", "小奶糖", "小糯米", "小月亮"])
     today = datetime.now().strftime("%Y-%m-%d")
+    now_ts = int(datetime.now().timestamp())
     baby_id = _new_baby_id()
+    baby_gender = random.choice(["男宝宝", "女宝宝"])
 
     for pid in (uid, tid):
         pdata = group.setdefault(pid, {})
@@ -500,17 +593,21 @@ async def dongfang(update: Update, context: ContextTypes.DEFAULT_TYPE):
             {
                 "id": baby_id,
                 "name": baby_name,
+                "gender": baby_gender,
                 "birthday": today,
+                "born_ts": now_ts,
                 "parents": [uid, tid],
             }
         )
 
+    _apply_intimacy(group, uid, tid, BABY_BIRTH_INTIMACY_POINTS)
     _save_marry_data(context, data)
 
     await safe_reply(
         update,
         context,
-        f"👶✨ 喜讯！{_user_ref(user, is_silent)} 和 {_user_ref(target, is_silent)} 迎来了宝宝 **{baby_name}**！",
+        f"👶✨ 喜讯！{_user_ref(user, is_silent)} 和 {_user_ref(target, is_silent)} 迎来了{baby_gender} **{baby_name}**！"
+        f"（亲密度 +{BABY_BIRTH_INTIMACY_POINTS}）",
         html=True,
     )
 
@@ -527,10 +624,12 @@ async def children(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not children:
         return
-        return await safe_reply(update, context, "👶 你目前还没有宝宝。")
+        # return await safe_reply(update, context, "👶 你目前还没有宝宝。")
 
     msg = "👶 你的宝宝们：\n"
     changed = False
+    now_ts = int(datetime.now().timestamp())
+    lover_id = data.get(chat_id, {}).get(uid, {}).get("lover_id")
     for i, c in enumerate(children, 1):
         if not str(c.get("id", "")).strip():
             c["id"] = _new_baby_id()
@@ -538,9 +637,19 @@ async def children(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cid = str(c.get("id", ""))
         short_id = cid[-6:] if cid else "------"
         last_fed = int(c.get("last_fed", 0) or 0)
+        feed_count = int(c.get("feed_count", 0) or 0)
+        if _maybe_handle_starve(data.get(chat_id, {}), uid, lover_id, c, now_ts):
+            changed = True
+        growth = c.get("growth_stage") or _baby_growth_stage(feed_count)
+        if c.get("growth_stage") != growth:
+            c["growth_stage"] = growth
+            _sync_child_fields(data.get(chat_id, {}), lover_id, cid, {"growth_stage": growth})
+            changed = True
+        gender = c.get("gender", "未知")
+        status = "夭折" if c.get("dead") else "健康"
         msg += (
-            f"{i}. {c.get('name', '未命名')}（出生：{c.get('birthday', '未知')}，"
-            f"ID:{short_id}，喂养：{_format_since(last_fed)}）\n"
+            f"{i}. {c.get('name', '未命名')}（{gender}，{status}，成长：{growth}，"
+            f"出生：{c.get('birthday', '未知')}，ID:{short_id}，喂养：{_format_since(last_fed)}）\n"
         )
 
     if changed:
@@ -636,6 +745,12 @@ async def feed_child(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await safe_reply(update, context, f"❗ {err}")
 
     now_ts = int(datetime.now().timestamp())
+    if _maybe_handle_starve(group, uid, lover_id, target, now_ts):
+        _save_marry_data(context, data)
+        return await safe_reply(update, context, "💔 宝宝已经夭折，无法喂养。")
+    if target.get("dead"):
+        return await safe_reply(update, context, "💔 宝宝已经夭折，无法喂养。")
+
     last_fed = int(target.get("last_fed", 0) or 0)
     if last_fed and now_ts - last_fed < BABY_FEED_COOLDOWN:
         remain = BABY_FEED_COOLDOWN - (now_ts - last_fed)
@@ -643,6 +758,7 @@ async def feed_child(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     target["last_fed"] = now_ts
     target["feed_count"] = int(target.get("feed_count", 0) or 0) + 1
+    target["growth_stage"] = _baby_growth_stage(int(target["feed_count"]))
     child_id = _ensure_child_id(target)
 
     if lover_id:
@@ -652,10 +768,15 @@ async def feed_child(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if _ensure_child_id(c) == child_id:
                 c["last_fed"] = now_ts
                 c["feed_count"] = int(c.get("feed_count", 0) or 0) + 1
+                c["growth_stage"] = _baby_growth_stage(int(c["feed_count"]))
                 break
 
     _save_marry_data(context, data)
-    await safe_reply(update, context, f"🍼 已喂养宝宝：{target.get('name', '未命名')}")
+    await safe_reply(
+        update,
+        context,
+        f"🍼 已喂养宝宝：{target.get('name', '未命名')}，成长为 {target.get('growth_stage')}",
+    )
 
 
 @register_command("情侣亲密榜", "亲密榜")
@@ -665,6 +786,7 @@ async def intimacy_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = _load_marry_data(context)
     group = data.get(chat_id, {})
     if not group:
+        
         return await safe_reply(update, context, "当前没有情侣数据。")
 
     pairs = []
