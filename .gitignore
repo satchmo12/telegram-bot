@@ -33,3 +33,4 @@ sticker_cache/
 # OS/editor
 .idea/
 .vscode/
+/data
