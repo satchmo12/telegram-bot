@@ -174,11 +174,11 @@
         "bot_in_group": true
     },
     "-1003180073577": {
-        "title": "新澳门六合彩交流群",
+        "title": "-1003180073577",
         "username": "adc88812345",
-        "type": "supergroup",
+        "type": "group",
         "enabled": true,
-        "bot_in_group": true,
+        "bot_in_group": false,
         "verify": false,
         "silent": false,
         "ad_filter": false,

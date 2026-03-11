@@ -334,31 +334,63 @@ async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def leave_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_super_admin(update.effective_user.id):
-        chat = update.effective_chat
-        # 确保是在群组中触发
-        if update.effective_chat.type in ["group", "supergroup"]:
+    if not is_super_admin(update.effective_user.id):
+        return
 
-            groups = load_json(GROUPS_FILE)
-            if not isinstance(groups, dict):
-                groups = {}
+    chat = update.effective_chat
+    chat_id = None
 
-            chat_id = str(chat.id)
-            cfg = groups.get(chat_id, {})
-            if not isinstance(cfg, dict):
-                cfg = {}
-            cfg["title"] = chat.title or cfg.get("title", "")
-            cfg["username"] = chat.username or cfg.get("username", "")
-            cfg["type"] = chat.type
-            cfg["bot_in_group"] = False
-            groups[chat_id] = cfg
-            save_json(GROUPS_FILE, groups)
-            print(f"👋 已标记离群: {chat.title} ({chat.id})")
+    # 1️⃣ 如果是在群里执行
+    if chat.type in ["group", "supergroup"]:
+        chat_id = chat.id
+        chat_title = chat.title or ""
 
-            await update.message.reply_text("👋 再见，我要离开这个群了！")
-            await context.bot.leave_chat(update.effective_chat.id)
-        else:
-            await update.message.reply_text("这个命令只能在群里使用。")
+    # 2️⃣ 如果是在私聊执行，需要传群ID
+    elif chat.type == "private":
+        if not context.args:
+            await update.message.reply_text("请提供群ID，例如：/leave -1001234567890")
+            return
+
+        try:
+            chat_id = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("群ID格式错误。")
+            return
+
+        chat_title = str(chat_id)
+
+    else:
+        await update.message.reply_text("无法识别的聊天类型。")
+        return
+
+    # 读取群配置
+    groups = load_json(GROUPS_FILE)
+    if not isinstance(groups, dict):
+        groups = {}
+
+    cfg = groups.get(str(chat_id), {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    cfg["title"] = chat_title or cfg.get("title", "")
+    cfg["type"] = "group"
+    cfg["bot_in_group"] = False
+    groups[str(chat_id)] = cfg
+
+    save_json(GROUPS_FILE, groups)
+
+    print(f"👋 已标记离群: {chat_title} ({chat_id})")
+
+    # 私聊时回复给管理员
+    if chat.type == "private":
+        await update.message.reply_text(f"👋 已尝试退出群: {chat_id}")
+    else:
+        await update.message.reply_text("👋 再见，我要离开这个群了！")
+
+    try:
+        await context.bot.leave_chat(chat_id)
+    except Exception as e:
+        await update.message.reply_text(f"退出群失败: {e}")
 
 
 async def post_init_setup(app):

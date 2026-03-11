@@ -71,20 +71,21 @@
         "enabled": true,
         "verify": false,
         "silent": true,
-        "ad_filter": false,
+        "ad_filter": true,
         "manor": true,
         "welcome": true,
         "learning_enabled": true,
         "reply_enabled": true,
         "active_speak_enabled": false,
         "active_speak_interval_min": 1,
-        "ad_push_enabled": true,
+        "ad_push_enabled": false,
         "ad_push_mode": "interval",
         "ad_push_interval_min": 120,
         "ad_push_text": "",
         "ad_push_times": "",
         "bot_in_group": true,
-        "friends": true
+        "friends": true,
+        "chengyu_game": true
     },
     "-1002738424346": {
         "title": "休闲农场",
@@ -132,7 +133,7 @@
     },
     "-1003648060909": {
         "title": "东南亚【商界领航者联盟】",
-        "username": "l3l4m",
+        "username": "u10000",
         "type": "supergroup",
         "enabled": true,
         "verify": false,
@@ -244,11 +245,11 @@
         "bot_in_group": true
     },
     "-1003180073577": {
-        "title": "新澳门六合彩交流群",
+        "title": "-1003180073577",
         "username": "adc88812345",
-        "type": "supergroup",
+        "type": "group",
         "enabled": true,
-        "bot_in_group": true,
+        "bot_in_group": false,
         "verify": false,
         "silent": false,
         "ad_filter": false,

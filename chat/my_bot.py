@@ -910,6 +910,8 @@ async def speaking_to(context: ContextTypes.DEFAULT_TYPE):
             continue
         if not cfg.get("enabled", True):
             continue
+        if not cfg.get("bot_in_group", True):
+            continue
         if not bool(cfg.get(GROUP_KEY_ACTIVE_SPEAK, False)):
             continue
 
