@@ -198,7 +198,7 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"👋 欢迎使用 {bot_name}\n"
         f"当前启用功能：{feature_text}\n\n"
-        "提示：群配置请私聊发送「群配置」。"
+        "提示：群配置请私聊发送「群配置」 高级功能「频道配置」。"
     )
 
 
@@ -227,7 +227,12 @@ def create_app(bot_cfg: dict):
     owner_id = bot_cfg["owner_id"]
     bot_name = bot_cfg["name"]
 
-    request = HTTPXRequest(connect_timeout=10.0, read_timeout=30.0)
+    request = HTTPXRequest(
+        connect_timeout=10.0,
+        read_timeout=30.0,
+        connection_pool_size=100,
+        pool_timeout=20.0,
+    )
 
     app = ApplicationBuilder().token(token).request(request).build()
 

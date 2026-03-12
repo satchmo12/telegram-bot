@@ -485,15 +485,24 @@ async def delete_worker(bot: Bot):
 
 # 安全回复
 async def safe_reply(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, html: bool = False
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    html: bool = False,
+    reply_markup=None,
 ):
     try:
         parse_mode = ParseMode.HTML if html else None
         if update.message and bot_reply:
-            msg = await update.message.reply_text(text, parse_mode=parse_mode)
+            msg = await update.message.reply_text(
+                text, parse_mode=parse_mode, reply_markup=reply_markup
+            )
         else:
             msg = await context.bot.send_message(
-                chat_id=update.effective_chat.id, text=text, parse_mode=parse_mode
+                chat_id=update.effective_chat.id,
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
             )
         # 后台启动删除任务，不阻塞 safe_reply
         if msg:

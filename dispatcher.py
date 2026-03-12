@@ -16,6 +16,7 @@ from chat.my_bot import on_text
 from translate.my_deep_translator import auto_translate
 from slave.action_handler import apply_action
 from utils import safe_reply
+from channel.channel_config import handle_channel_config_text
 
 
 from telegram import Update
@@ -49,6 +50,9 @@ async def handle_text_dispatcher(update: Update, context: ContextTypes.DEFAULT_T
     try:
         # 优雅分发命令
         if await dispatch_command(update, context):
+            return
+        # 频道配置引导输入
+        if await handle_channel_config_text(update, context):
             return
         # 自定义命令
         if await apply_action(update, context):

@@ -1,5 +1,6 @@
 from channel.channel_force import register_handle_force_handlers
 from channel.reply_to_channel import register_reply_to_channel_handlers
+from channel.channel_config import register_channel_config_handlers
 from game.checkin import register_checkin_handlers
 from group.admin import register_admin_handlers
 from group.group_care import register_group_care_handlers
@@ -45,6 +46,7 @@ def register_group_handlers(app):
     if is_feature_enabled(app, "talk_stats"):
         register_talk_handlers(app)
     register_reply_to_channel_handlers(app)
+    register_channel_config_handlers(app)
 
     # 需要较后注册的群路由
     if is_feature_enabled(app, "user_tracker"):

@@ -1,35 +1,64 @@
 import asyncio
 import re
-from telegram import Update, InputMediaPhoto, InputMediaVideo
+from datetime import datetime
+from telegram import Update, InputMediaPhoto, InputMediaVideo, InputMediaDocument
 from telegram.ext import MessageHandler, ContextTypes, filters
-from utils import load_json
+from utils import load_json, is_super_admin
 
 MEDIA_GROUP_CACHE = {}
 MEDIA_GROUP_TASKS = {}
 MEDIA_GROUP_WAIT_SECONDS = 1.2
 
+SUBSCRIPTION_FILE = "data/subscriptions.json"
+
+
+def _is_active_subscription_by_user_id(user_id: str) -> bool:
+    if not user_id:
+        return False
+    data = load_json(SUBSCRIPTION_FILE)
+    if not isinstance(data, dict):
+        return False
+    record = data.get("users", {}).get(str(user_id))
+    if not isinstance(record, dict):
+        return False
+    expires_at = record.get("expires_at")
+    if not expires_at:
+        return False
+    try:
+        exp = datetime.strptime(expires_at, "%Y-%m-%d").date()
+        return exp >= datetime.now().date()
+    except Exception:
+        return False
+
 def replace_links_and_submit(text: str, rule: dict) -> str:
     if not text:
         return text
 
-    replace_link = str(rule.get("replace_channel_link", "")).strip()
+    replace_link = str(rule.get("replace_channel_user", "")).strip()
+    replace_channel_user = str(rule.get("replace_group_name", "")).strip()
     replace_user = str(rule.get("replace_submit_user", "")).strip()
 
     original_text = text
+    # 若固定宣传文案不是独立行，前置一个换行以分隔正文
+    # “关注”前留一空行，且确保“关注”后不被拆行
+    text = re.sub(r"关注\s*\n+", "关注", text)
+    text = re.sub(r"^(关注)", r"\n\1", text)
+    text = re.sub(r"(?<!^)(?<!\n)(关注\s*东南亚新闻大事件频道|东南亚新闻大事件频道)", r"\n\1", text)
     if replace_link:
-        # 统一为 t.me/xxx 或 t.me/xxx/123 形式，兼容带 http(s) 的原链接
-        replace_link = re.sub(r"^https?://", "", replace_link, flags=re.I).rstrip("/")
-        # 匹配任意 Telegram 链接（含 t.me/+邀请码、joinchat、深层路径）
-        # 例如:
-        # - https://t.me/abc
-        # - t.me/abc/123
-        # - https://t.me/+AbCdEf
-        # - https://t.me/joinchat/xxxx
-        text = re.sub(
-            r"(?i)(?:https?://)?t\.me/[^\s)\]}>]+",
-            f"https://{replace_link}",
-            text,
-        )
+        if not replace_link.startswith("@"):
+            # 统一为 t.me/xxx 或 t.me/xxx/123 形式，兼容带 http(s) 的原链接
+            replace_link = re.sub(r"^https?://", "", replace_link, flags=re.I).rstrip("/")
+            # 匹配任意 Telegram 链接（含 t.me/+邀请码、joinchat、深层路径）
+            # 例如:
+            # - https://t.me/abc
+            # - t.me/abc/123
+            # - https://t.me/+AbCdEf
+            # - https://t.me/joinchat/xxxx
+            text = re.sub(
+                r"(?i)(?:https?://)?t\.me/[^\s)\]}>]+",
+                f"https://{replace_link}",
+                text,
+            )
 
     if replace_user:
         if not replace_user.startswith("@"):
@@ -45,8 +74,46 @@ def replace_links_and_submit(text: str, rule: dict) -> str:
             text,
             flags=re.I,
         )
-         # 统一替换所有 @用户名
-        text = re.sub(r"(?<![A-Za-z0-9_])@[A-Za-z0-9_]{3,}", replace_user, text)
+
+    if replace_channel_user:
+        if not replace_channel_user.startswith("@"):
+            replace_channel_user = f"@{replace_channel_user}"
+        # 替换“聊天/交友群”等标签后的用户名
+        text = re.sub(
+            r"((?:聊天交友群|聊天群|交友群|交流群|群)[^\n]{0,20}?)[@＠]\s*[A-Za-z0-9_]{3,}",
+            rf"\1{replace_channel_user}",
+            text,
+            flags=re.I,
+        )
+
+    if replace_link:
+        # 如果 replace_link 本身是 @用户名，用在“关注...频道”标签后
+        if replace_link.startswith("@"):
+            text = re.sub(
+                r"((?:关注[^\n]{0,40}?频道|订阅[^\n]{0,40}?频道)[^\n]{0,20}?)[@＠]\s*[A-Za-z0-9_]{3,}",
+                rf"\1{replace_link}",
+                text,
+                flags=re.I,
+            )
+            # 兜底：直接匹配“东南亚新闻大事件频道”后的 @用户名
+            text = re.sub(
+                r"(东南亚新闻大事件频道[^\n]{0,20}?)[@＠]\s*[A-Za-z0-9_]{3,}",
+                rf"\1{replace_link}",
+                text,
+                flags=re.I,
+            )
+
+    # 规范空格与分隔符，避免“频道名没有更改且没有空格”的情况
+    text = re.sub(
+        r"(频道[^\n]{0,40}?)(?:：|:|➡️|➡)?\s*(@[A-Za-z0-9_]{3,})",
+        r"\1➡️  \2",
+        text,
+    )
+    text = re.sub(
+        r"((?:东南亚讨论群|东南亚聊天交友群|聊天交友群|聊天群|交友群|交流群)[^\n]{0,20}?@[A-Za-z0-9_]{3,})\s*投稿曝光",
+        r"\1 投稿曝光",
+        text,
+    )
     return text
 
 def _get_media_group_key(msg, rule_idx: int) -> tuple[int, str, int]:
@@ -76,6 +143,8 @@ async def process_media_group(
             media_list.append(InputMediaPhoto(media=msg.photo[-1].file_id, caption=caption))
         elif msg.video:
             media_list.append(InputMediaVideo(media=msg.video.file_id, caption=caption))
+        elif msg.document and getattr(msg.document, "mime_type", "") == "image/gif":
+            media_list.append(InputMediaDocument(media=msg.document.file_id, caption=caption))
 
     for target_id in targets:
         try:
@@ -131,17 +200,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     config = load_json("data/forward_config.json")
-    forward_rules = config.get("forward_rules", [])
+    forward_rules = config.get("forward_rules", []) if isinstance(config, dict) else []
+
+    user_config = load_json("data/forward_config_users.json")
+    if isinstance(user_config, dict):
+        users = user_config.get("users", {})
+        if isinstance(users, dict):
+            for user_id, ucfg in users.items():
+                if not isinstance(ucfg, dict):
+                    continue
+                if not (is_super_admin(user_id) or _is_active_subscription_by_user_id(user_id)):
+                    continue
+                rules = ucfg.get("forward_rules")
+                if isinstance(rules, list):
+                    forward_rules.extend(rules)
 
     for idx, rule in enumerate(forward_rules):
         sources = set(rule.get("sources", []))
         exclude_channels = set(rule.get("exclude_channels", []))
+        filter_type = str(rule.get("filter", "all") or "all").lower()
+        if filter_type not in {"all", "text", "photo", "video"}:
+            filter_type = "all"
 
         if sources and source_channel_ids.isdisjoint(sources):
             continue
         if exclude_channels and not source_channel_ids.isdisjoint(exclude_channels):
             continue
         if msg.reply_to_message:
+            continue
+
+        # 搬运类型过滤
+        has_gif = bool(getattr(msg, "animation", None)) or (
+            getattr(msg, "document", None) and getattr(msg.document, "mime_type", "") == "image/gif"
+        )
+        if filter_type == "text" and (
+            msg.photo or msg.video or has_gif or getattr(msg, "media_group_id", None)
+        ):
+            continue
+        if filter_type == "photo" and not (msg.photo or has_gif):
+            continue
+        if filter_type == "video" and not (msg.video or has_gif):
             continue
 
         # === MediaGroup 处理 ===
@@ -173,6 +271,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except Exception as e:
                     print(f"⚠️ 单张图片搬运失败: {e}")
+            continue
+        elif msg.animation:
+            caption = replace_links_and_submit(msg.caption or "", rule) if msg.caption else None
+            for target_id in targets:
+                try:
+                    await context.bot.send_animation(
+                        chat_id=target_id,
+                        animation=msg.animation.file_id,
+                        caption=caption,
+                    )
+                except Exception as e:
+                    print(f"⚠️ GIF 动图搬运失败: {e}")
+            continue
+        elif msg.document and getattr(msg.document, "mime_type", "") == "image/gif":
+            caption = replace_links_and_submit(msg.caption or "", rule) if msg.caption else None
+            for target_id in targets:
+                try:
+                    await context.bot.send_document(
+                        chat_id=target_id,
+                        document=msg.document.file_id,
+                        caption=caption,
+                    )
+                except Exception as e:
+                    print(f"⚠️ GIF 文档搬运失败: {e}")
             continue
         elif msg.video:
             caption = replace_links_and_submit(msg.caption or "", rule) if msg.caption else None
