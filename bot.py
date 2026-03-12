@@ -184,6 +184,32 @@ async def owner_reply_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bind_runtime_bot_context(context)
+    msg = update.message
+    if msg:
+        sender_chat = getattr(msg, "sender_chat", None)
+        if sender_chat and getattr(sender_chat, "type", None) and sender_chat.type.name == "CHANNEL":
+            username = getattr(sender_chat, "username", "") or ""
+            title = getattr(sender_chat, "title", "") or ""
+            channel_id = f"<code>{sender_chat.id}</code>"
+            if username:
+                text = f"✅ 频道ID：{channel_id} 点击红色数字拷贝\n频道用户名：@{username}\n频道名：{title}"
+            else:
+                text = f"✅ 频道ID：{channel_id}\n频道名：{title}"
+            await msg.reply_text(text, parse_mode="HTML")
+            return
+
+        forward_origin = getattr(msg, "forward_origin", None)
+        origin_chat = getattr(forward_origin, "chat", None) if forward_origin else None
+        if origin_chat and getattr(origin_chat, "type", None) and origin_chat.type.name == "CHANNEL":
+            username = getattr(origin_chat, "username", "") or ""
+            title = getattr(origin_chat, "title", "") or ""
+            channel_id = f"<code>{origin_chat.id}</code>"
+            if username:
+                text = f"✅ 频道ID：{channel_id} 点击红色数字拷贝\n频道用户名：@{username}\n频道名：{title}"
+            else:
+                text = f"✅ 频道ID：{channel_id}\n频道名：{title}"
+            await msg.reply_text(text, parse_mode="HTML")
+            return
     await forward_to_owner(update, context)
 
 
@@ -313,9 +339,10 @@ async def set_bot_commands(app):
         commands.append(BotCommand(cmd, desc))
 
     # 你可以在这里加普通用户命令
+    commands.append(BotCommand("start", "功能简介"))
+    commands.append(BotCommand("group", "群设置"))
+    commands.append(BotCommand("channel_config", "频道设置"))
     commands.append(BotCommand("start_menu", "游戏菜单"))
-    commands.append(BotCommand("group", "群开关"))
-
     await app.bot.set_my_commands(commands)
 
 

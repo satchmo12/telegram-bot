@@ -153,18 +153,11 @@ async def channel_config_entry(update: Update, context: ContextTypes.DEFAULT_TYP
     if ok is not True:
         return
 
-    keyboard = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("➕ 新建配置", callback_data=f"{CALLBACK_PREFIX}:new")],
-            [InlineKeyboardButton("📄 查看现有", callback_data=f"{CALLBACK_PREFIX}:list")],
-            [InlineKeyboardButton("❌ 取消", callback_data=f"{CALLBACK_PREFIX}:cancel")],
-        ]
-    )
     await safe_reply(
         update,
         context,
         "请选择操作：\n\n“新建配置”会按步骤引导填写频道名称、ID、搬运类型、用户名等。",
-        reply_markup=keyboard,
+        reply_markup=_build_main_menu_keyboard(),
     )
 
 
@@ -285,6 +278,27 @@ def _build_filter_keyboard():
     return InlineKeyboardMarkup(rows)
 
 
+def _build_contact_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton("✅ 显示", callback_data=f"{CALLBACK_PREFIX}:contact:yes"),
+            InlineKeyboardButton("🚫 不显示", callback_data=f"{CALLBACK_PREFIX}:contact:no"),
+        ]
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def _build_cancel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:back"),
+                InlineKeyboardButton("❌ 取消", callback_data=f"{CALLBACK_PREFIX}:cancel"),
+            ]
+        ]
+    )
+
+
 def _build_edit_filter_keyboard(index: int) -> InlineKeyboardMarkup:
     rows = [
         [
@@ -304,6 +318,7 @@ def _build_main_menu_keyboard() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("➕ 新建配置", callback_data=f"{CALLBACK_PREFIX}:new")],
             [InlineKeyboardButton("📄 查看现有", callback_data=f"{CALLBACK_PREFIX}:list")],
+            [InlineKeyboardButton("❓ 帮助", callback_data=f"{CALLBACK_PREFIX}:help")],
             [InlineKeyboardButton("❌ 取消", callback_data=f"{CALLBACK_PREFIX}:cancel")],
         ]
     )
@@ -316,6 +331,7 @@ def _build_edit_menu_keyboard(index: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("✏️ 搬运频道ID", callback_data=f"{CALLBACK_PREFIX}:field:{index}:source_id")],
             [InlineKeyboardButton("✏️ 目标频道ID", callback_data=f"{CALLBACK_PREFIX}:field:{index}:target_id")],
             [InlineKeyboardButton("✏️ 搬运类型", callback_data=f"{CALLBACK_PREFIX}:field:{index}:filter")],
+            [InlineKeyboardButton("✏️ 显示联系方式", callback_data=f"{CALLBACK_PREFIX}:field:{index}:show_contact")],
             [InlineKeyboardButton("✏️ 频道用户名", callback_data=f"{CALLBACK_PREFIX}:field:{index}:channel_user")],
             [InlineKeyboardButton("✏️ 群名", callback_data=f"{CALLBACK_PREFIX}:field:{index}:group_name")],
             [InlineKeyboardButton("✏️ 投稿用户名", callback_data=f"{CALLBACK_PREFIX}:field:{index}:submit_user")],
@@ -325,12 +341,14 @@ def _build_edit_menu_keyboard(index: int) -> InlineKeyboardMarkup:
 
 
 def _format_draft_summary(draft: dict) -> str:
+    show_contact = bool(draft.get("show_contact", True))
     return (
         "请确认配置：\n"
         f"频道名称：{draft.get('name', '')}\n"
         f"搬运频道ID：{draft.get('source_id', '')}\n"
         f"目标频道ID：{draft.get('target_id', '')}\n"
         f"搬运类型：{FILTER_LABELS.get(draft.get('filter', 'all'), draft.get('filter', 'all'))}\n"
+        f"显示联系方式：{'是' if show_contact else '否'}\n"
         f"频道用户名：{draft.get('channel_user', '')}\n"
         f"群名：{draft.get('group_name', '')}\n"
         f"投稿用户名：{draft.get('submit_user', '')}"
@@ -344,6 +362,7 @@ def _save_forward_rule(draft: dict, user_id: str) -> None:
         "targets": [draft.get("target_id")],
         "filter": draft.get("filter", "all"),
         "exclude_channels": [],
+        "show_contact": bool(draft.get("show_contact", True)),
         "replace_channel_user": draft.get("channel_user", ""),
         "replace_group_name": draft.get("group_name", ""),
         "replace_submit_user": draft.get("submit_user", ""),
@@ -360,6 +379,8 @@ def _update_rule_field(user_id: str, index: int, field: str, value) -> bool:
     rule = rules[index]
     if field in {"name", "filter", "replace_channel_user", "replace_group_name", "replace_submit_user"}:
         rule[field] = value
+    elif field == "show_contact":
+        rule["show_contact"] = bool(value)
     elif field == "source_id":
         rule["sources"] = [value]
     elif field == "target_id":
@@ -405,7 +426,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"⚠️ 订阅会员最多可配置 {SUBSCRIBER_MAX_RULES} 条规则。"
                 )
         _start_new_wizard(context, user_id)
-        return await query.edit_message_text("请输入频道名称：")
+        return await query.edit_message_text("请输入频道名称：", reply_markup=_build_cancel_keyboard())
 
     if action == "list":
         user_id = str(update.effective_user.id)
@@ -426,7 +447,12 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     InlineKeyboardButton(f"🗑 删除 {idx}", callback_data=f"{CALLBACK_PREFIX}:del:{idx-1}"),
                 ]
             )
-        keyboard_rows.append([InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:back")])
+        keyboard_rows.append(
+            [
+                InlineKeyboardButton("❓ 帮助", callback_data=f"{CALLBACK_PREFIX}:help"),
+                InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:back"),
+            ]
+        )
         return await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard_rows))
 
     if action == "cancel":
@@ -439,21 +465,89 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=_build_main_menu_keyboard(),
         )
 
+    if action == "help":
+        help_text = (
+            "📌 频道配置帮助\n"
+            "1. 获取频道ID：私聊机器人转发一条频道消息，机器人会回复频道ID。\n"
+            "2. 搬运频道ID：填写来源频道ID（如 -1001234567890）。\n"
+            "3. 目标频道ID：填写要发布的目标频道ID。\n"
+            "4. 搬运类型：全部/文本/图片/视频。\n"
+            "5. 联系方式：选择显示或不显示；不显示会跳过用户名配置。\n"
+            "6. 频道用户名/群名/投稿用户名：用于替换文本中的联系方式。\n"
+        )
+        return await query.edit_message_text(help_text, reply_markup=_build_main_menu_keyboard())
+
     if action == "filter" and len(parts) >= 3:
         state = context.user_data.get("channel_config")
         if not state:
             return await query.edit_message_text("请先点击“新建配置”。")
         fval = parts[2]
         state["draft"]["filter"] = fval
-        state["stage"] = "channel_user"
-        return await query.edit_message_text("请输入频道用户名（如 @sdxwjs）：")
+        state["stage"] = "contact"
+        return await query.edit_message_text(
+            "是否显示底部联系方式？",
+            reply_markup=InlineKeyboardMarkup(
+                _build_contact_keyboard().inline_keyboard + _build_cancel_keyboard().inline_keyboard
+            ),
+        )
+
+    if action == "contact" and len(parts) >= 3:
+        state = context.user_data.get("channel_config")
+        if not state:
+            return await query.edit_message_text("请先点击“新建配置”。")
+        show_contact = parts[2] != "no"
+        if state.get("stage") == "edit_show_contact":
+            user_id = str(update.effective_user.id)
+            idx = int(state.get("draft", {}).get("edit_index", -1))
+            ok = _update_rule_field(user_id, idx, "show_contact", show_contact)
+            if not ok:
+                return await query.edit_message_text("❗ 更新失败，请重试。")
+            rules = _get_user_rules(user_id)
+            rule = rules[idx]
+            draft = state.get("draft", {})
+            draft.update(
+                {
+                    "name": rule.get("name", ""),
+                    "source_id": (rule.get("sources") or [""])[0],
+                    "target_id": (rule.get("targets") or [""])[0],
+                    "filter": rule.get("filter", "all"),
+                    "show_contact": bool(rule.get("show_contact", True)),
+                    "channel_user": rule.get("replace_channel_user", ""),
+                    "group_name": rule.get("replace_group_name", ""),
+                    "submit_user": rule.get("replace_submit_user", ""),
+                    "edit_index": idx,
+                }
+            )
+            state["stage"] = "edit_menu"
+            return await query.edit_message_text(
+                "✅ 已更新显示设置。\n\n" + _format_draft_summary(draft),
+                reply_markup=_build_edit_menu_keyboard(idx),
+            )
+
+        state["draft"]["show_contact"] = show_contact
+        if show_contact:
+            state["stage"] = "channel_user"
+            return await query.edit_message_text("请输入频道用户名（如 @sdxwjs）：", reply_markup=_build_cancel_keyboard())
+        state["draft"]["channel_user"] = ""
+        state["draft"]["group_name"] = ""
+        state["draft"]["submit_user"] = ""
+        state["stage"] = "confirm"
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("✅ 保存", callback_data=f"{CALLBACK_PREFIX}:save")],
+                [InlineKeyboardButton("❌ 取消", callback_data=f"{CALLBACK_PREFIX}:cancel")],
+            ]
+        )
+        return await query.edit_message_text(_format_draft_summary(state["draft"]), reply_markup=keyboard)
 
     if action == "save":
         state = context.user_data.get("channel_config")
         if not state:
             return await query.edit_message_text("没有待保存的配置。")
         draft = state.get("draft", {})
-        required = ["name", "source_id", "target_id", "filter", "channel_user", "group_name", "submit_user"]
+        required = ["name", "source_id", "target_id", "filter", "show_contact"]
+        if draft.get("show_contact", True):
+            required += ["channel_user", "group_name", "submit_user"]
         if any(not draft.get(k) for k in required):
             return await query.edit_message_text("配置未完整，请重新开始。")
         user_id = str(update.effective_user.id)
@@ -496,6 +590,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "source_id": (rule.get("sources") or [""])[0],
             "target_id": (rule.get("targets") or [""])[0],
             "filter": rule.get("filter", "all"),
+            "show_contact": bool(rule.get("show_contact", True)),
             "channel_user": rule.get("replace_channel_user", ""),
             "group_name": rule.get("replace_group_name", ""),
             "submit_user": rule.get("replace_submit_user", ""),
@@ -522,6 +617,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state["draft"]["edit_index"] = idx
         if field == "filter":
             return await query.edit_message_text("请选择新的搬运类型：", reply_markup=_build_edit_filter_keyboard(idx))
+        if field == "show_contact":
+            return await query.edit_message_text("是否显示底部联系方式？", reply_markup=_build_contact_keyboard())
         label_map = {
             "name": "请输入新的频道名称：",
             "source_id": "请输入新的搬运频道ID（数字ID）：",
@@ -551,6 +648,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "source_id": (rule.get("sources") or [""])[0],
             "target_id": (rule.get("targets") or [""])[0],
             "filter": rule.get("filter", "all"),
+            "show_contact": bool(rule.get("show_contact", True)),
             "channel_user": rule.get("replace_channel_user", ""),
             "group_name": rule.get("replace_group_name", ""),
             "submit_user": rule.get("replace_submit_user", ""),
@@ -582,43 +680,62 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if stage == "name":
         draft["name"] = text
         state["stage"] = "source_id"
-        await update.message.reply_text("请输入搬运频道ID（数字ID，如 -1001234567890）：")
+        await update.message.reply_text("请输入搬运频道ID（数字ID，如 -1001234567890）：", reply_markup=_build_cancel_keyboard())
         return True
 
     if stage == "source_id":
         try:
             draft["source_id"] = int(text)
         except Exception:
-            await update.message.reply_text("❗ 请输入正确的频道ID（数字）。")
+            await update.message.reply_text("❗ 请输入正确的频道ID（数字）。", reply_markup=_build_cancel_keyboard())
             return True
         state["stage"] = "target_id"
-        await update.message.reply_text("请输入目标频道ID（数字ID，如 -1001234567890）：")
+        await update.message.reply_text("请输入目标频道ID（数字ID，如 -1001234567890）：", reply_markup=_build_cancel_keyboard())
         return True
 
     if stage == "target_id":
         try:
             draft["target_id"] = int(text)
         except Exception:
-            await update.message.reply_text("❗ 请输入正确的频道ID（数字）。")
+            await update.message.reply_text("❗ 请输入正确的频道ID（数字）。", reply_markup=_build_cancel_keyboard())
             return True
         state["stage"] = "filter"
-        await update.message.reply_text("请选择搬运类型：", reply_markup=_build_filter_keyboard())
+        await update.message.reply_text(
+            "请选择搬运类型：",
+            reply_markup=InlineKeyboardMarkup(
+                _build_filter_keyboard().inline_keyboard + _build_cancel_keyboard().inline_keyboard
+            ),
+        )
         return True
 
     if stage == "filter":
-        await update.message.reply_text("请点击按钮选择搬运类型。", reply_markup=_build_filter_keyboard())
+        await update.message.reply_text(
+            "请点击按钮选择搬运类型。",
+            reply_markup=InlineKeyboardMarkup(
+                _build_filter_keyboard().inline_keyboard + _build_cancel_keyboard().inline_keyboard
+            ),
+        )
+        return True
+
+    if stage == "contact":
+        await update.message.reply_text(
+            "是否显示底部联系方式？",
+            reply_markup=InlineKeyboardMarkup(
+                _build_contact_keyboard().inline_keyboard + _build_cancel_keyboard().inline_keyboard
+            ),
+        )
         return True
 
     if stage == "channel_user":
         draft["channel_user"] = _format_username(text)
         state["stage"] = "group_name"
-        await update.message.reply_text("请输入群名（群用户名，如 @dubai_mm）：")
+        await update.message.reply_text("请输入群名（群用户名，如 @dubai_mm）：", reply_markup=_build_cancel_keyboard())
         return True
 
     if stage == "group_name":
         draft["group_name"] = _format_username(text)
         state["stage"] = "submit_user"
-        await update.message.reply_text("请输入投稿用户名（如 @nuan12）：")
+        await update.message.reply_text("请输入投稿用户名（如 @nuan12）：", reply_markup=_build_cancel_keyboard())
         return True
 
     if stage == "submit_user":
@@ -637,6 +754,9 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         field = stage[len("edit_") :]
         user_id = str(draft.get("owner_id") or update.effective_user.id)
         idx = int(draft.get("edit_index", -1))
+        if field == "show_contact":
+            await update.message.reply_text("请点击按钮选择是否显示联系方式。", reply_markup=_build_contact_keyboard())
+            return True
         value = text
         if field in {"channel_user", "group_name", "submit_user"}:
             value = _format_username(text)

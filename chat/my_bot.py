@@ -211,11 +211,20 @@ def weighted_choice(answers_dict: dict) -> str:
 
 
 def _normalize_keywords(raw_keywords) -> list[str]:
-    if not isinstance(raw_keywords, list):
+    keywords = []
+    if isinstance(raw_keywords, list):
+        keywords = raw_keywords
+    elif isinstance(raw_keywords, dict):
+        # 兼容多群配置：{chat_id: [kw1, kw2, ...]}
+        for _, value in raw_keywords.items():
+            if isinstance(value, list):
+                keywords.extend(value)
+    else:
         return []
+
     return [
         kw.strip().lower()
-        for kw in raw_keywords
+        for kw in keywords
         if isinstance(kw, str) and kw.strip()
     ]
 

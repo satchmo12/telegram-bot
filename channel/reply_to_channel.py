@@ -27,23 +27,20 @@ def _parse_target_chat(raw: str):
     return None
 
 
-def _build_forward_text(update: Update) -> str:
-    msg = update.message
-    chat = update.effective_chat
-    user = update.effective_user
-    content = (msg.text or msg.caption or "").strip()
-    return (
-        f"📨 群回复转发\n"
-        f"🏷 群：{chat.title or chat.id}\n"
-        f"👤 用户：{user.full_name} ({user.id})\n\n"
-        f"{content}"
-    )
-
-@register_command("转发频道")
 async def _forward_message_to_channel(
     src_msg, update: Update, context: ContextTypes.DEFAULT_TYPE, target_chat
 ):
-    text = _build_forward_text(update)
+    try:
+        await context.bot.copy_message(
+            chat_id=target_chat,
+            from_chat_id=src_msg.chat.id,
+            message_id=src_msg.message_id,
+        )
+        return
+    except Exception:
+        pass
+
+    text = (src_msg.text or src_msg.caption or "").strip()
 
     if src_msg.photo:
         await context.bot.send_photo(
@@ -81,7 +78,8 @@ async def _forward_message_to_channel(
         )
         return
     if src_msg.sticker:
-        await context.bot.send_message(chat_id=target_chat, text=text)
+        if text:
+            await context.bot.send_message(chat_id=target_chat, text=text)
         await context.bot.send_sticker(chat_id=target_chat, sticker=src_msg.sticker.file_id)
         return
     if src_msg.text:

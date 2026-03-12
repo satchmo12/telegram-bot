@@ -243,35 +243,43 @@ async def add_ad_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 判断是否是回复消息
     if update.message.reply_to_message and update.message.reply_to_message.text:
-        new_kw = update.message.reply_to_message.text.strip()
+        raw_kw = update.message.reply_to_message.text.strip()
     else:
         # 否则从命令参数获取
         if not context.args:
             await safe_reply(update, context,
-                "❗用法：添加广告词 <关键词> 或回复一条消息"
+                "❗用法：添加广告词 <关键词1 关键词2 ...> 或回复一条消息"
             )
             return
-        new_kw = " ".join(context.args).strip()
+        raw_kw = " ".join(context.args).strip()
 
-    if not new_kw:
-        # await safe_reply(update, context,"❗关键词不能为空")
+    if not raw_kw:
         return
+
+    new_keywords = [kw for kw in raw_kw.split() if kw.strip()]
 
     all_data = get_ad_keywords(context)
     AD_KEYWORDS = get_group_ad_keywords(context, chat_id)
 
-    if new_kw in AD_KEYWORDS:
-        await safe_reply(update, context,f"⚠️ 广告词『{new_kw}』已存在")
-        return
+    added = []
+    existed = []
+    for kw in new_keywords:
+        if kw in AD_KEYWORDS:
+            existed.append(kw)
+            continue
+        AD_KEYWORDS.append(kw)
+        added.append(kw)
 
-    # 添加新广告词
-    AD_KEYWORDS.append(new_kw)
     # 去重 + 排序保存
     AD_KEYWORDS = sorted(list(set(AD_KEYWORDS)))
     all_data[chat_id] = AD_KEYWORDS
     save_ad_keywords(context, all_data)
-
-    await safe_reply(update, context,f"✅ 已添加广告词：『{new_kw}』")
+    msg_lines = []
+    if added:
+        msg_lines.append("✅ 已添加广告词：" + " ".join([f"『{x}』" for x in added]))
+    if existed:
+        msg_lines.append("⚠️ 已存在广告词：" + " ".join([f"『{x}』" for x in existed]))
+    await safe_reply(update, context, "\n".join(msg_lines) if msg_lines else "⚠️ 未添加任何广告词")
 
 
 @register_command("删除广告词")

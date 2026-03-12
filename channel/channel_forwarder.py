@@ -34,6 +34,8 @@ def replace_links_and_submit(text: str, rule: dict) -> str:
     if not text:
         return text
 
+    show_contact = rule.get("show_contact", True)
+
     replace_link = str(rule.get("replace_channel_user", "")).strip()
     replace_channel_user = str(rule.get("replace_group_name", "")).strip()
     replace_user = str(rule.get("replace_submit_user", "")).strip()
@@ -114,6 +116,22 @@ def replace_links_and_submit(text: str, rule: dict) -> str:
         r"\1 投稿曝光",
         text,
     )
+
+    if not show_contact:
+        # 去除联系方式相关内容：从出现联系方式提示的行开始，截断后续
+        contact_line_re = re.compile(
+            r"(关注|订阅).{0,10}频道|频道➡️|聊天交友群|讨论群|投稿|爆料|澄清|联系|商务|便民信息|互助群|二手群|TG中文包|签证查询",
+            re.I,
+        )
+        lines = text.splitlines()
+        cutoff = None
+        for idx, line in enumerate(lines):
+            if contact_line_re.search(line):
+                cutoff = idx
+                break
+        if cutoff is not None:
+            lines = lines[:cutoff]
+        text = "\n".join([ln for ln in lines if ln.strip()]).strip()
     return text
 
 def _get_media_group_key(msg, rule_idx: int) -> tuple[int, str, int]:
@@ -200,7 +218,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     config = load_json("data/forward_config.json")
-    forward_rules = config.get("forward_rules", []) if isinstance(config, dict) else []
+    base_rules = config.get("forward_rules", []) if isinstance(config, dict) else []
+    forward_rules = list(base_rules) if isinstance(base_rules, list) else []
 
     user_config = load_json("data/forward_config_users.json")
     if isinstance(user_config, dict):
@@ -213,7 +232,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     continue
                 rules = ucfg.get("forward_rules")
                 if isinstance(rules, list):
-                    forward_rules.extend(rules)
+                    forward_rules.extend(list(rules))
+
+    # 去重：同一来源/目标/类型的规则优先保留后加入的（订阅用户覆盖默认）
+    def _rule_key(rule: dict) -> tuple:
+        sources = tuple(rule.get("sources", []) or [])
+        targets = tuple(rule.get("targets", []) or [])
+        ftype = str(rule.get("filter", "all") or "all").lower()
+        return (sources, targets, ftype)
+
+    deduped = {}
+    for rule in forward_rules:
+        deduped[_rule_key(rule)] = rule
+    forward_rules = list(deduped.values())
 
     for idx, rule in enumerate(forward_rules):
         sources = set(rule.get("sources", []))
@@ -316,8 +347,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     print(f"⚠️ 单条文本搬运失败: {e}")
             continue
-
-
 
 # 注册
 def register_handle_message_handlers(app):
