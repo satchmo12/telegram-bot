@@ -1,8 +1,11 @@
 import asyncio
+import json
+import os
+import re
+import tempfile
 from telegram import Update
 import telegram
 from telegram.ext import ContextTypes
-import re
 from utils import (
     AD_KEYWORDS_FILE,
     delete_later,
@@ -82,6 +85,65 @@ def get_group_ad_keywords(
         return list(legacy)
 
     return []
+
+
+def _normalize_keywords(items: list[str]) -> list[str]:
+    cleaned = []
+    for kw in items:
+        if not isinstance(kw, str):
+            continue
+        kw = kw.strip()
+        if not kw:
+            continue
+        cleaned.append(kw)
+    return sorted(list(set(cleaned)))
+
+
+def _parse_keywords_text(text: str) -> list[str]:
+    if not isinstance(text, str) or not text.strip():
+        return []
+    parts = re.split(r"[,\s]+", text.strip())
+    return _normalize_keywords(parts)
+
+
+def _parse_import_payload(raw_text: str, chat_id: str) -> list[str]:
+    """
+    支持:
+    - JSON list: ["a", "b"]
+    - JSON dict: {"-100xxx": ["a", "b"]}
+    - 纯文本: a b c / 换行 / 逗号分隔
+    """
+    text = (raw_text or "").strip()
+    if not text:
+        return []
+
+    if text.startswith("[") or text.startswith("{"):
+        try:
+            data = json.loads(text)
+        except Exception:
+            return _parse_keywords_text(text)
+        if isinstance(data, list):
+            return _normalize_keywords(data)
+        if isinstance(data, dict):
+            group_list = data.get(str(chat_id))
+            if isinstance(group_list, list):
+                return _normalize_keywords(group_list)
+            return []
+    return _parse_keywords_text(text)
+
+
+def _format_keywords_page(items: list[str], page: int, per_page: int) -> str:
+    total = len(items)
+    pages = max(1, (total + per_page - 1) // per_page)
+    page = max(1, min(page, pages))
+    start = (page - 1) * per_page
+    end = start + per_page
+    lines = [f"广告词总数：{total} | 第 {page}/{pages} 页", ""]
+    for i, kw in enumerate(items[start:end], start=start + 1):
+        lines.append(f"{i}. {kw}")
+    if page < pages:
+        lines.append(f"\n➡️ 发送「群广告词 查看 {page + 1}」查看下一页")
+    return "\n".join(lines)
 
 
 def get_whitelist(context: ContextTypes.DEFAULT_TYPE):
@@ -317,6 +379,99 @@ async def remove_ad_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_ad_keywords(context, all_data)
 
     await safe_reply(update, context,f"✅ 已删除广告词：『{del_kw}』")
+
+
+@register_command("群广告词", "查看广告词")
+async def group_ad_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not await is_admin(update, context):
+        return
+    chat_id = str(update.effective_chat.id)
+
+    args = context.args or []
+    action = args[0] if args else "查看"
+
+    if action in ("查看", "看", "列表"):
+        page = 1
+        if len(args) > 1 and str(args[1]).isdigit():
+            page = int(args[1])
+        keywords = get_group_ad_keywords(context, chat_id)
+        if not keywords:
+            return await safe_reply(update, context, "当前群广告词为空。")
+        text = _format_keywords_page(keywords, page, per_page=50)
+        return await safe_reply(update, context, text)
+
+    if action == "导出":
+        keywords = get_group_ad_keywords(context, chat_id)
+        if not keywords:
+            return await safe_reply(update, context, "当前群广告词为空，无法导出。")
+        filename = f"ad_keywords_{chat_id}.json"
+        temp_path = os.path.join(tempfile.gettempdir(), filename)
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(keywords, f, ensure_ascii=False, indent=2)
+        with open(temp_path, "rb") as f:
+            await context.bot.send_document(chat_id=update.effective_chat.id, document=f)
+        return
+
+    if action == "导入":
+        inline_text = " ".join(args[1:]).strip() if len(args) > 1 else ""
+        source_text = ""
+        cleanup_path = None
+
+        if inline_text:
+            source_text = inline_text
+        elif update.message and update.message.reply_to_message:
+            replied = update.message.reply_to_message
+            if replied.text:
+                source_text = replied.text
+            elif replied.document:
+                doc = replied.document
+                file = await context.bot.get_file(doc.file_id)
+                suffix = ""
+                if doc.file_name and "." in doc.file_name:
+                    suffix = "." + doc.file_name.rsplit(".", 1)[-1]
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+                cleanup_path = tmp.name
+                tmp.close()
+                await file.download_to_drive(custom_path=cleanup_path)
+                with open(cleanup_path, "r", encoding="utf-8") as f:
+                    source_text = f.read()
+
+        if cleanup_path:
+            try:
+                os.remove(cleanup_path)
+            except Exception:
+                pass
+
+        if not source_text:
+            return await safe_reply(
+                update,
+                context,
+                "❗用法：群广告词 导入 <关键词...> 或回复一条消息/文件后发送「群广告词 导入」",
+            )
+
+        incoming = _parse_import_payload(source_text, chat_id)
+        if not incoming:
+            return await safe_reply(update, context, "⚠️ 未识别到可导入的广告词。")
+
+        all_data = get_ad_keywords(context)
+        current = get_group_ad_keywords(context, chat_id)
+        merged = _normalize_keywords(current + incoming)
+        all_data[chat_id] = merged
+        save_ad_keywords(context, all_data)
+
+        added_count = len(merged) - len(current)
+        return await safe_reply(
+            update, context, f"✅ 导入完成：新增 {added_count} 个，总数 {len(merged)}。"
+        )
+
+    return await safe_reply(
+        update,
+        context,
+        "❗用法：群广告词 查看 [页码]\n"
+        "群广告词 导出\n"
+        "群广告词 导入 <关键词...>（或回复文本/文件）",
+    )
 
 
 @register_command("添加白名单")

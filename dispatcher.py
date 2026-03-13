@@ -16,6 +16,7 @@ from chat.my_bot import on_text
 from translate.my_deep_translator import auto_translate
 from slave.action_handler import apply_action
 from utils import safe_reply
+from feature_flags import is_feature_enabled
 from channel.channel_config import handle_channel_config_text
 
 
@@ -24,13 +25,15 @@ from telegram.ext import ContextTypes
 
 async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 可以并行执行
-    await asyncio.gather(
-        check_and_restrict_scam_user(update, context),  # 检测违规账号
-        check_for_ads(update, context),  # 广告暂时关掉
+    tasks = [
+        check_and_restrict_scam_user(update, context),
+        check_for_ads(update, context),
         log_group(update, context),
-        watch_special_users(update, context),  # 群内特别关心
-        handle_message(update, context),  # 频道转发
-    )
+        watch_special_users(update, context),
+    ]
+    if is_feature_enabled(context.application, "channel_forward"):
+        tasks.append(handle_message(update, context))
+    await asyncio.gather(*tasks)
 
     await handle_text_dispatcher(update, context)
 

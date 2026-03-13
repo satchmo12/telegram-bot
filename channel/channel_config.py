@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import re
+from typing import Optional
 from datetime import datetime, timedelta
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
@@ -112,10 +113,12 @@ def _get_user_rules(user_id: str) -> list:
     return rules if isinstance(rules, list) else []
 
 
-def _set_user_rules(user_id: str, rules: list) -> None:
+def _set_user_rules(user_id: str, rules: list, username: Optional[str] = None) -> None:
     data = _load_user_forward_config()
     user_cfg = data.get("users", {}).get(user_id, {})
     user_cfg["forward_rules"] = rules
+    if username:
+        user_cfg["username"] = username
     data.setdefault("users", {})[user_id] = user_cfg
     _save_user_forward_config(data)
 
@@ -235,18 +238,19 @@ async def add_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await safe_reply(update, context, "❗ 时间格式示例：30 或 2026-12-31")
 
     data = _load_subscriptions()
+    norm_username = _normalize_username(username) if username else ""
     record = {
         "expires_at": exp_date.strftime("%Y-%m-%d"),
     }
-    if username:
-        record["username"] = username
+    if norm_username:
+        record["username"] = norm_username
     if user_id:
         record["user_id"] = user_id
 
     if user_id:
         data.setdefault("users", {})[user_id] = record
-    if username:
-        data.setdefault("usernames", {})[username] = record
+    if norm_username:
+        data.setdefault("usernames", {})[norm_username] = record
 
     _save_subscriptions(data)
     label = f"@{username}" if username else user_id
@@ -355,7 +359,7 @@ def _format_draft_summary(draft: dict) -> str:
     )
 
 
-def _save_forward_rule(draft: dict, user_id: str) -> None:
+def _save_forward_rule(draft: dict, user_id: str, username: Optional[str] = None) -> None:
     rule = {
         "name": draft.get("name", ""),
         "sources": [draft.get("source_id")],
@@ -369,7 +373,7 @@ def _save_forward_rule(draft: dict, user_id: str) -> None:
     }
     rules = _get_user_rules(user_id)
     rules.append(rule)
-    _set_user_rules(user_id, rules)
+    _set_user_rules(user_id, rules, username=username)
 
 
 def _update_rule_field(user_id: str, index: int, field: str, value) -> bool:
@@ -426,6 +430,9 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"⚠️ 订阅会员最多可配置 {SUBSCRIBER_MAX_RULES} 条规则。"
                 )
         _start_new_wizard(context, user_id)
+        context.user_data["channel_config"]["draft"]["owner_username"] = (
+            update.effective_user.username or ""
+        )
         return await query.edit_message_text("请输入频道名称：", reply_markup=_build_cancel_keyboard())
 
     if action == "list":
@@ -551,7 +558,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if any(not draft.get(k) for k in required):
             return await query.edit_message_text("配置未完整，请重新开始。")
         user_id = str(update.effective_user.id)
-        _save_forward_rule(draft, user_id)
+        _save_forward_rule(draft, user_id, username=draft.get("owner_username"))
         _clear_wizard(context)
         return await query.edit_message_text(
             "✅ 已保存频道配置。",
@@ -568,7 +575,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if idx < 0 or idx >= len(rules):
             return await query.edit_message_text("❗ 无效的删除序号。")
         removed = rules.pop(idx)
-        _set_user_rules(user_id, rules)
+        user_cfg = _load_user_forward_config().get("users", {}).get(user_id, {})
+        _set_user_rules(user_id, rules, username=user_cfg.get("username") if isinstance(user_cfg, dict) else None)
         name = removed.get("name", "")
         return await query.edit_message_text(
             f"✅ 已删除配置：{name}",

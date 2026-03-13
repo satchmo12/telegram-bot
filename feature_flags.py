@@ -49,6 +49,7 @@ ALL_FEATURES: Set[str] = {
     "talk_stats",
     "user_tracker",
     "menu",
+    "channel_forward",
 }
 
 

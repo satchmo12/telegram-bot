@@ -224,7 +224,7 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"👋 欢迎使用 {bot_name}\n"
         f"当前启用功能：{feature_text}\n\n"
-        "提示：群配置请私聊发送「群配置」 高级功能「频道配置」。"
+        "提示：群配置请私聊发送「群配置」/group \n 高级功能「频道配置」/channel_config 。"
     )
 
 
@@ -348,21 +348,22 @@ async def set_bot_commands(app):
 
 # ===== 重启命令（超级管理员使用） =====
 async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_super_admin(update.effective_user.id):
-        await update.message.reply_text("♻️ 正在重启机器人...")
+    if int(update.effective_user.id) != 6085551760:
+        return
+    await update.message.reply_text("♻️ 正在重启机器人...")
 
-        # 重启前清理广告词
-        await cleaned_word()
-        # # 1️⃣ 先结束所有正在进行的成语接龙
-        # for chat_id in group_list.keys():
-        #     fake_update = Update(
-        #         update_id=chat_id, message=update.message  # 使用当前消息上下文
-        #     )
-        #     # 调用 end_chengyu，传入 fake_update 和 context
-        #     await end_chengyu(fake_update, context)
+    # 重启前清理广告词
+    await cleaned_word()
+    # # 1️⃣ 先结束所有正在进行的成语接龙
+    # for chat_id in group_list.keys():
+    #     fake_update = Update(
+    #         update_id=chat_id, message=update.message  # 使用当前消息上下文
+    #     )
+    #     # 调用 end_chengyu，传入 fake_update 和 context
+    #     await end_chengyu(fake_update, context)
 
-        python = sys.executable
-        os.execv(python, [python] + sys.argv)
+    python = sys.executable
+    os.execv(python, [python] + sys.argv)
 
 
 async def leave_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

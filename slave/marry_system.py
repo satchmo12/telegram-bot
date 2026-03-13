@@ -779,6 +779,74 @@ async def feed_child(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+@register_command("一键喂养")
+@feature_required(FEATURE_FRIENDS)
+async def feed_all_children(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
+    uid = str(update.effective_user.id)
+    chat_id = str(update.effective_chat.id)
+
+    data = _load_marry_data(context)
+    group = data.setdefault(chat_id, {})
+    my_info = group.setdefault(uid, {})
+    my_children = my_info.setdefault("children", [])
+    lover_id = my_info.get("lover_id")
+
+    if not my_children:
+        return await safe_reply(update, context, "👶 你目前还没有宝宝。")
+
+    now_ts = int(datetime.now().timestamp())
+    fed = []
+    skipped = []
+    dead = 0
+
+    for child in my_children:
+        if _maybe_handle_starve(group, uid, lover_id, child, now_ts):
+            dead += 1
+            continue
+        if child.get("dead"):
+            dead += 1
+            continue
+
+        last_fed = int(child.get("last_fed", 0) or 0)
+        if last_fed and now_ts - last_fed < BABY_FEED_COOLDOWN:
+            remain = BABY_FEED_COOLDOWN - (now_ts - last_fed)
+            skipped.append(f"{child.get('name', '未命名')}({remain}s)")
+            continue
+
+        child["last_fed"] = now_ts
+        child["feed_count"] = int(child.get("feed_count", 0) or 0) + 1
+        child["growth_stage"] = _baby_growth_stage(int(child["feed_count"]))
+        child_id = _ensure_child_id(child)
+        _sync_child_fields(
+            group,
+            str(lover_id) if lover_id else "",
+            child_id,
+            {
+                "last_fed": now_ts,
+                "feed_count": int(child.get("feed_count", 0) or 0),
+                "growth_stage": child.get("growth_stage"),
+            },
+        )
+        fed.append(child.get("name", "未命名"))
+
+    _save_marry_data(context, data)
+
+    lines = []
+    if fed:
+        lines.append("🍼 已喂养：" + "，".join(fed))
+    if skipped:
+        lines.append("⏳ 冷却中：" + "，".join(skipped))
+    if dead:
+        lines.append(f"💔 已夭折：{dead} 个")
+    if not lines:
+        lines.append("当前没有可喂养的宝宝。")
+
+    await safe_reply(update, context, "\n".join(lines))
+
+
 @register_command("情侣亲密榜", "亲密榜")
 @feature_required(FEATURE_FRIENDS)
 async def intimacy_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):

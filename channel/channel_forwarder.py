@@ -1,24 +1,32 @@
 import asyncio
 import re
+from typing import Optional
 from datetime import datetime
 from telegram import Update, InputMediaPhoto, InputMediaVideo, InputMediaDocument
+import telegram
 from telegram.ext import MessageHandler, ContextTypes, filters
 from utils import load_json, is_super_admin
 
 MEDIA_GROUP_CACHE = {}
 MEDIA_GROUP_TASKS = {}
 MEDIA_GROUP_WAIT_SECONDS = 1.2
+RATE_LIMIT_MIN_INTERVAL_SEC = 1.0
+RATE_LIMIT_MAX_RETRY = 3
+TARGET_LOCKS = {}
+TARGET_LAST_TS = {}
 
 SUBSCRIPTION_FILE = "data/subscriptions.json"
 
 
-def _is_active_subscription_by_user_id(user_id: str) -> bool:
+def _is_active_subscription(user_id: str, username: Optional[str] = None) -> bool:
     if not user_id:
         return False
     data = load_json(SUBSCRIPTION_FILE)
     if not isinstance(data, dict):
         return False
     record = data.get("users", {}).get(str(user_id))
+    if not isinstance(record, dict) and username:
+        record = data.get("usernames", {}).get(str(username).lstrip("@").lower())
     if not isinstance(record, dict):
         return False
     expires_at = record.get("expires_at")
@@ -140,6 +148,53 @@ def _get_media_group_key(msg, rule_idx: int) -> tuple[int, str, int]:
     return (msg.chat.id, str(msg.media_group_id), int(rule_idx))
 
 
+def _get_source_id_from_msg(msg) -> str:
+    try:
+        return (
+            getattr(getattr(msg, "sender_chat", None), "id", None)
+            or getattr(
+                getattr(getattr(msg, "forward_origin", None), "chat", None),
+                "id",
+                None,
+            )
+            or "unknown"
+        )
+    except Exception:
+        return "unknown"
+
+
+def _get_target_lock(target_id: int) -> asyncio.Lock:
+    lock = TARGET_LOCKS.get(target_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        TARGET_LOCKS[target_id] = lock
+    return lock
+
+
+async def _send_with_retry(
+    target_id: int, send_coro, *, kind: str, src: str
+):
+    lock = _get_target_lock(target_id)
+    async with lock:
+        for attempt in range(1, RATE_LIMIT_MAX_RETRY + 1):
+            try:
+                now = asyncio.get_event_loop().time()
+                last = TARGET_LAST_TS.get(target_id, 0)
+                wait = RATE_LIMIT_MIN_INTERVAL_SEC - (now - last)
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                TARGET_LAST_TS[target_id] = asyncio.get_event_loop().time()
+                return await send_coro()
+            except telegram.error.RetryAfter as e:
+                delay = max(1, int(getattr(e, "retry_after", 1)))
+                await asyncio.sleep(delay)
+            except telegram.error.TimedOut:
+                await asyncio.sleep(1)
+            except Exception as e:
+                print(f"⚠️ {kind}搬运失败: {e} (来源: {src} → 目标: {target_id})")
+                return None
+
+
 async def process_media_group(
     group_msgs, targets, rule, context: ContextTypes.DEFAULT_TYPE
 ):
@@ -164,22 +219,16 @@ async def process_media_group(
         elif msg.document and getattr(msg.document, "mime_type", "") == "image/gif":
             media_list.append(InputMediaDocument(media=msg.document.file_id, caption=caption))
 
+    src = _get_source_id_from_msg(group_msgs[0]) if group_msgs else "unknown"
     for target_id in targets:
-        try:
-            if media_list:
-                await context.bot.send_media_group(chat_id=target_id, media=media_list)
-        except Exception as e:
-            src = "unknown"
-            try:
-                first_msg = group_msgs[0]
-                src = (
-                    getattr(getattr(first_msg, "sender_chat", None), "id", None)
-                    or getattr(getattr(getattr(first_msg, "forward_origin", None), "chat", None), "id", None)
-                    or "unknown"
-                )
-            except Exception:
-                pass
-            print(f"⚠️ MediaGroup 搬运失败: {e} (来源: {src} → 目标: {target_id})")
+        if not media_list:
+            continue
+        await _send_with_retry(
+            target_id,
+            lambda: context.bot.send_media_group(chat_id=target_id, media=media_list),
+            kind="MediaGroup ",
+            src=str(src),
+        )
 
 
 async def _flush_media_group(
@@ -228,9 +277,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for user_id, ucfg in users.items():
                 if not isinstance(ucfg, dict):
                     continue
-                if not (is_super_admin(user_id) or _is_active_subscription_by_user_id(user_id)):
-                    continue
                 rules = ucfg.get("forward_rules")
+                guess_username = ucfg.get("username", "")
+                if not guess_username and isinstance(rules, list) and rules:
+                    raw = str(rules[0].get("replace_submit_user", "") or "")
+                    guess_username = raw.lstrip("@")
+                if not (is_super_admin(user_id) or _is_active_subscription(user_id, guess_username)):
+                    continue
                 if isinstance(rules, list):
                     forward_rules.extend(list(rules))
 
@@ -291,61 +344,72 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # === 单条消息处理 ===
         targets = rule.get("targets", [])
         text = getattr(msg, "text", None) or getattr(msg, "caption", None)
+        src = _get_source_id_from_msg(msg)
         if msg.photo:
             caption = replace_links_and_submit(msg.caption or "", rule) if msg.caption else None
             for target_id in targets:
-                try:
-                    await context.bot.send_photo(
+                await _send_with_retry(
+                    target_id,
+                    lambda: context.bot.send_photo(
                         chat_id=target_id,
                         photo=msg.photo[-1].file_id,
                         caption=caption,
-                    )
-                except Exception as e:
-                    print(f"⚠️ 单张图片搬运失败: {e}")
+                    ),
+                    kind="单张图片",
+                    src=str(src),
+                )
             continue
         elif msg.animation:
             caption = replace_links_and_submit(msg.caption or "", rule) if msg.caption else None
             for target_id in targets:
-                try:
-                    await context.bot.send_animation(
+                await _send_with_retry(
+                    target_id,
+                    lambda: context.bot.send_animation(
                         chat_id=target_id,
                         animation=msg.animation.file_id,
                         caption=caption,
-                    )
-                except Exception as e:
-                    print(f"⚠️ GIF 动图搬运失败: {e}")
+                    ),
+                    kind="GIF 动图",
+                    src=str(src),
+                )
             continue
         elif msg.document and getattr(msg.document, "mime_type", "") == "image/gif":
             caption = replace_links_and_submit(msg.caption or "", rule) if msg.caption else None
             for target_id in targets:
-                try:
-                    await context.bot.send_document(
+                await _send_with_retry(
+                    target_id,
+                    lambda: context.bot.send_document(
                         chat_id=target_id,
                         document=msg.document.file_id,
                         caption=caption,
-                    )
-                except Exception as e:
-                    print(f"⚠️ GIF 文档搬运失败: {e}")
+                    ),
+                    kind="GIF 文档",
+                    src=str(src),
+                )
             continue
         elif msg.video:
             caption = replace_links_and_submit(msg.caption or "", rule) if msg.caption else None
             for target_id in targets:
-                try:
-                    await context.bot.send_video(
+                await _send_with_retry(
+                    target_id,
+                    lambda: context.bot.send_video(
                         chat_id=target_id,
                         video=msg.video.file_id,
                         caption=caption,
-                    )
-                except Exception as e:
-                    print(f"⚠️ 单条视频搬运失败: {e}")
+                    ),
+                    kind="单条视频",
+                    src=str(src),
+                )
             continue
         elif text:
             text = replace_links_and_submit(text, rule)
             for target_id in targets:
-                try:
-                    await context.bot.send_message(chat_id=target_id, text=text)
-                except Exception as e:
-                    print(f"⚠️ 单条文本搬运失败: {e}")
+                await _send_with_retry(
+                    target_id,
+                    lambda: context.bot.send_message(chat_id=target_id, text=text),
+                    kind="单条文本",
+                    src=str(src),
+                )
             continue
 
 # 注册
