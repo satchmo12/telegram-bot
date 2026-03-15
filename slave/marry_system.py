@@ -9,7 +9,7 @@ from telegram.ext import CommandHandler, ContextTypes
 from telegram.helpers import mention_html
 
 from command_router import FEATURE_FRIENDS, feature_required, register_command
-from info.economy import INFO_FILE, ensure_user_exists
+from info.economy import INFO_FILE, ensure_user_exists, get_balance, change_balance, get_nickname
 from slave.status_warnings import (
     LOVER_MARRIED_WARNINGS,
     LOVER_SPONSORED_WARNINGS,
@@ -83,6 +83,21 @@ BABY_BIRTH_INTIMACY_POINTS = 6
 BABY_DEATH_INTIMACY_PENALTY = 50
 
 dongfang_cooldown = {}  # (chat_id, uid) -> timestamp
+
+BABY_SHOP_ITEMS = {
+    "奶粉": {"price": 50},
+    "饼干": {"price": 30},
+    "辣条": {"price": 40},
+    "果泥": {"price": 35},
+}
+
+# 宝宝用品效果（可调整）
+BABY_ITEM_EFFECTS = {
+    "奶粉": {"health": 3, "mood": 1, "growth": 1},
+    "饼干": {"health": 1, "mood": 2, "growth": 1},
+    "辣条": {"health": -1, "mood": 3, "growth": 0},
+    "果泥": {"health": 2, "mood": 2, "growth": 1},
+}
 
 
 def _is_chat_silent(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> bool:
@@ -202,6 +217,43 @@ def _sync_child_fields(group: dict, lover_id: str, child_id: str, fields: dict):
     partner_child = _find_child_by_id(partner_children, child_id)
     if partner_child:
         partner_child.update(fields)
+
+
+def _apply_baby_item_effect(child: dict, item_name: str):
+    effects = BABY_ITEM_EFFECTS.get(item_name, {})
+    if not effects:
+        return
+    health = int(child.get("health", 50) or 0)
+    mood = int(child.get("mood", 50) or 0)
+    health = max(0, min(100, health + int(effects.get("health", 0))))
+    mood = max(0, min(100, mood + int(effects.get("mood", 0))))
+    child["health"] = health
+    child["mood"] = mood
+    growth_bonus = int(effects.get("growth", 0))
+    if growth_bonus:
+        child["feed_count"] = int(child.get("feed_count", 0) or 0) + growth_bonus
+
+
+def _get_baby_inventory(group: dict, uid: str) -> dict:
+    info = group.setdefault(str(uid), {})
+    inv = info.setdefault("baby_items", {})
+    return inv if isinstance(inv, dict) else {}
+
+
+def _consume_baby_item(group: dict, uid: str, item_name: str, qty: int = 1) -> bool:
+    inv = _get_baby_inventory(group, uid)
+    current = int(inv.get(item_name, 0) or 0)
+    if current < qty:
+        return False
+    inv[item_name] = current - qty
+    if inv[item_name] <= 0:
+        inv.pop(item_name, None)
+    return True
+
+
+def _add_baby_item(group: dict, uid: str, item_name: str, qty: int = 1):
+    inv = _get_baby_inventory(group, uid)
+    inv[item_name] = int(inv.get(item_name, 0) or 0) + qty
 
 
 def _apply_intimacy(group: dict, uid: str, lover_id: str, delta: int):
@@ -647,9 +699,12 @@ async def children(update: Update, context: ContextTypes.DEFAULT_TYPE):
             changed = True
         gender = c.get("gender", "未知")
         status = "夭折" if c.get("dead") else "健康"
+        health = c.get("health", 50)
+        mood = c.get("mood", 50)
         msg += (
             f"{i}. {c.get('name', '未命名')}（{gender}，{status}，成长：{growth}，"
-            f"出生：{c.get('birthday', '未知')}，ID:{short_id}，喂养：{_format_since(last_fed)}）\n"
+            f"健康：{health}，心情：{mood}，出生：{c.get('birthday', '未知')}，"
+            f"ID:{short_id}，喂养：{_format_since(last_fed)}）\n"
         )
 
     if changed:
@@ -718,6 +773,84 @@ async def rename_child(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+@register_command("宝宝商店")
+@feature_required(FEATURE_FRIENDS)
+async def baby_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lines = ["🍼 宝宝商店："]
+    for name, info in BABY_SHOP_ITEMS.items():
+        effects = BABY_ITEM_EFFECTS.get(name, {})
+        health = int(effects.get("health", 0))
+        mood = int(effects.get("mood", 0))
+        growth = int(effects.get("growth", 0))
+        effect_parts = []
+        if health:
+            effect_parts.append(f"健康{health:+d}")
+        if mood:
+            effect_parts.append(f"心情{mood:+d}")
+        if growth:
+            effect_parts.append(f"成长+{growth}")
+        effect_text = (" / " + " ".join(effect_parts)) if effect_parts else ""
+        lines.append(f"{name} - {info['price']} 金币{effect_text}")
+    lines.append("\n用法：宝宝购买 商品名 [数量]")
+    await safe_reply(update, context, "\n".join(lines))
+
+
+@register_command("宝宝购买")
+@feature_required(FEATURE_FRIENDS)
+async def baby_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+    user = update.effective_user
+    uid = str(user.id)
+    chat_id = str(update.effective_chat.id)
+
+    if not context.args:
+        return await safe_reply(update, context, "用法：宝宝购买 商品名 [数量]")
+
+    item_name = str(context.args[0]).strip()
+    if item_name not in BABY_SHOP_ITEMS:
+        return await safe_reply(update, context, "❗ 商品不存在，请先查看「宝宝商店」。")
+    try:
+        qty = int(context.args[1]) if len(context.args) > 1 else 1
+        if qty <= 0:
+            raise ValueError
+    except ValueError:
+        return await safe_reply(update, context, "❗ 购买数量必须是正整数。")
+
+    total_cost = int(BABY_SHOP_ITEMS[item_name]["price"] * qty)
+    balance = get_balance(chat_id, uid)
+    if balance < total_cost:
+        return await safe_reply(
+            update, context, f"❌ 金币不足，需要 {total_cost}，当前 {balance}。"
+        )
+
+    change_balance(chat_id, uid, -total_cost)
+    data = _load_marry_data(context)
+    group = data.setdefault(chat_id, {})
+    _add_baby_item(group, uid, item_name, qty)
+    _save_marry_data(context, data)
+
+    await safe_reply(
+        update, context, f"✅ 成功购买 {item_name} ×{qty}，花费 {total_cost} 金币。"
+    )
+
+
+@register_command("宝宝背包")
+@feature_required(FEATURE_FRIENDS)
+async def baby_bag(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    chat_id = str(update.effective_chat.id)
+    data = _load_marry_data(context)
+    group = data.get(chat_id, {})
+    inv = _get_baby_inventory(group, uid)
+    if not inv:
+        return await safe_reply(update, context, "宝宝背包为空。")
+    lines = ["🎒 宝宝背包："]
+    for name, qty in inv.items():
+        lines.append(f"{name} ×{qty}")
+    await safe_reply(update, context, "\n".join(lines))
+
+
 @register_command("宝宝喂养", "喂养宝宝")
 @feature_required(FEATURE_FRIENDS)
 async def feed_child(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -728,9 +861,14 @@ async def feed_child(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
 
     if not context.args:
-        return await safe_reply(update, context, "用法：宝宝喂养 编号\n例如：宝宝喂养 1")
+        return await safe_reply(
+            update, context, "用法：宝宝喂养 编号 商品名\n例如：宝宝喂养 1 奶粉"
+        )
 
     selector = str(context.args[0]).strip()
+    item_name = str(context.args[1]).strip() if len(context.args) > 1 else "奶粉"
+    if item_name not in BABY_SHOP_ITEMS:
+        return await safe_reply(update, context, "❗ 商品不存在，请先查看「宝宝商店」。")
     data = _load_marry_data(context)
     group = data.setdefault(chat_id, {})
     my_info = group.setdefault(uid, {})
@@ -756,8 +894,12 @@ async def feed_child(update: Update, context: ContextTypes.DEFAULT_TYPE):
         remain = BABY_FEED_COOLDOWN - (now_ts - last_fed)
         return await safe_reply(update, context, f"🍼 宝宝刚喂过，{remain} 秒后再试。")
 
+    if not _consume_baby_item(group, uid, item_name, 1):
+        return await safe_reply(update, context, f"❌ {item_name} 不足，请先「宝宝购买」。")
+
     target["last_fed"] = now_ts
     target["feed_count"] = int(target.get("feed_count", 0) or 0) + 1
+    _apply_baby_item_effect(target, item_name)
     target["growth_stage"] = _baby_growth_stage(int(target["feed_count"]))
     child_id = _ensure_child_id(target)
 
@@ -768,6 +910,7 @@ async def feed_child(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if _ensure_child_id(c) == child_id:
                 c["last_fed"] = now_ts
                 c["feed_count"] = int(c.get("feed_count", 0) or 0) + 1
+                _apply_baby_item_effect(c, item_name)
                 c["growth_stage"] = _baby_growth_stage(int(c["feed_count"]))
                 break
 
@@ -775,7 +918,7 @@ async def feed_child(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_reply(
         update,
         context,
-        f"🍼 已喂养宝宝：{target.get('name', '未命名')}，成长为 {target.get('growth_stage')}",
+        f"🍼 已使用 {item_name} 喂养宝宝：{target.get('name', '未命名')}，成长为 {target.get('growth_stage')}（健康 {target.get('health', 50)}，心情 {target.get('mood', 50)}）",
     )
 
 
@@ -787,6 +930,10 @@ async def feed_all_children(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     uid = str(update.effective_user.id)
     chat_id = str(update.effective_chat.id)
+
+    item_name = str(context.args[0]).strip() if context.args else "奶粉"
+    if item_name not in BABY_SHOP_ITEMS:
+        return await safe_reply(update, context, "❗ 商品不存在，请先查看「宝宝商店」。")
 
     data = _load_marry_data(context)
     group = data.setdefault(chat_id, {})
@@ -816,8 +963,13 @@ async def feed_all_children(update: Update, context: ContextTypes.DEFAULT_TYPE):
             skipped.append(f"{child.get('name', '未命名')}({remain}s)")
             continue
 
+        if not _consume_baby_item(group, uid, item_name, 1):
+            skipped.append("物品不足")
+            break
+
         child["last_fed"] = now_ts
         child["feed_count"] = int(child.get("feed_count", 0) or 0) + 1
+        _apply_baby_item_effect(child, item_name)
         child["growth_stage"] = _baby_growth_stage(int(child["feed_count"]))
         child_id = _ensure_child_id(child)
         _sync_child_fields(
@@ -828,6 +980,8 @@ async def feed_all_children(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "last_fed": now_ts,
                 "feed_count": int(child.get("feed_count", 0) or 0),
                 "growth_stage": child.get("growth_stage"),
+                "health": child.get("health", 50),
+                "mood": child.get("mood", 50),
             },
         )
         fed.append(child.get("name", "未命名"))
@@ -836,7 +990,7 @@ async def feed_all_children(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = []
     if fed:
-        lines.append("🍼 已喂养：" + "，".join(fed))
+        lines.append(f"🍼 已使用 {item_name} 喂养：" + "，".join(fed))
     if skipped:
         lines.append("⏳ 冷却中：" + "，".join(skipped))
     if dead:
@@ -879,8 +1033,10 @@ async def intimacy_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     top = pairs[:10]
     lines = ["情侣亲密值榜单 Top10："]
     for i, (a_id, b_id, val) in enumerate(top, 1):
-        a_name = _mention_or_name(a_id, "用户", _is_chat_silent(context, chat_id))
-        b_name = _mention_or_name(b_id, "用户", _is_chat_silent(context, chat_id))
+        a_raw = get_nickname(chat_id, a_id)
+        b_raw = get_nickname(chat_id, b_id)
+        a_name = _mention_or_name(a_id, a_raw, _is_chat_silent(context, chat_id))
+        b_name = _mention_or_name(b_id, b_raw, _is_chat_silent(context, chat_id))
         lines.append(f"{i}. {a_name} ❤ {b_name}：{val}")
 
     await safe_reply(update, context, "\n".join(lines), html=True)

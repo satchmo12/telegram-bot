@@ -146,6 +146,21 @@ def _format_keywords_page(items: list[str], page: int, per_page: int) -> str:
     return "\n".join(lines)
 
 
+def _merge_all_keywords(context: ContextTypes.DEFAULT_TYPE) -> list[str]:
+    data = get_ad_keywords(context)
+    merged = []
+    if isinstance(data, dict):
+        legacy = data.get("__legacy__")
+        if isinstance(legacy, list):
+            merged.extend(legacy)
+        for k, v in data.items():
+            if k == "__legacy__":
+                continue
+            if isinstance(v, list):
+                merged.extend(v)
+    return _normalize_keywords(merged)
+
+
 def get_whitelist(context: ContextTypes.DEFAULT_TYPE):
     """只读取按群白名单新结构：{chat_id: {user_id: {...}}}。"""
     raw = load_json(get_bot_path(context, WHITELIST_FILE))
@@ -412,6 +427,17 @@ async def group_ad_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(temp_path, "rb") as f:
             await context.bot.send_document(chat_id=update.effective_chat.id, document=f)
         return
+    if action in ("合并导出", "合并"):
+        keywords = _merge_all_keywords(context)
+        if not keywords:
+            return await safe_reply(update, context, "当前广告词为空，无法导出。")
+        filename = "ad_keywords_merged.json"
+        temp_path = os.path.join(tempfile.gettempdir(), filename)
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(keywords, f, ensure_ascii=False, indent=2)
+        with open(temp_path, "rb") as f:
+            await context.bot.send_document(chat_id=update.effective_chat.id, document=f)
+        return
 
     if action == "导入":
         inline_text = " ".join(args[1:]).strip() if len(args) > 1 else ""
@@ -470,6 +496,7 @@ async def group_ad_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context,
         "❗用法：群广告词 查看 [页码]\n"
         "群广告词 导出\n"
+        "群广告词 合并导出\n"
         "群广告词 导入 <关键词...>（或回复文本/文件）",
     )
 

@@ -24,6 +24,8 @@ from utils import SLAVE_FILE, get_group_whitelist, load_json, safe_reply, save_j
 MAX_PRICE = 1000000  # 最高身价限制
 MIN_PRICE = 100  # 最低身价限制
 MAX_INCREASE = 1000  # 单次最高涨价幅度
+MAX_WORK_HOURS = 4
+WORK_REWARD_RATE = 0.10
 
 
 # 计算奴隶身价
@@ -64,6 +66,31 @@ def calculate_new_price(old_price):
         new_price = MIN_PRICE
 
     return new_price
+
+
+def _get_slave_work_info(info: dict) -> dict:
+    work = info.get("work")
+    return work if isinstance(work, dict) else {}
+
+
+def _is_slave_working(info: dict) -> bool:
+    work = _get_slave_work_info(info)
+    if not work:
+        return False
+    start_ts = int(work.get("start_ts", 0) or 0)
+    hours = float(work.get("hours", 0) or 0)
+    if not start_ts or hours <= 0:
+        return False
+    end_ts = start_ts + int(hours * 3600)
+    return datetime.now().timestamp() < end_ts
+
+
+def _calc_work_reward(hours: float, price: int) -> int:
+    return int(hours * price * WORK_REWARD_RATE)
+
+
+def _get_owned_slaves(group: dict, owner_id: str) -> list[tuple[str, dict]]:
+    return [(sid, info) for sid, info in group.items() if info.get("owner") == owner_id]
 
 
 # /buy 回复某人购买奴隶
@@ -349,6 +376,114 @@ async def my_slave(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_reply(update, context, "\n".join(lines), html=(not is_silent))
 
 
+@register_command("奴隶干活", "派遣干活")
+@feature_required(FEATURE_FRIENDS)
+async def assign_slave_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    owner = update.effective_user
+    chat_id = str(update.effective_chat.id)
+    owner_id = str(owner.id)
+
+    data = load_json(SLAVE_FILE)
+    group = data.get(chat_id, {})
+
+    hours = 1.0
+    if context.args:
+        try:
+            hours = float(context.args[0])
+        except ValueError:
+            return await safe_reply(update, context, "用法：奴隶干活 [小时数(1-4)]")
+    hours = max(0.5, min(MAX_WORK_HOURS, hours))
+
+    targets = []
+    if update.message and update.message.reply_to_message:
+        target = update.message.reply_to_message.from_user
+        slave_id = str(target.id)
+        info = group.get(slave_id)
+        if not info or info.get("owner") != owner_id:
+            return await safe_reply(update, context, "你不是此人的主人，无法派遣。")
+        targets = [(slave_id, info, target.full_name)]
+    else:
+        targets = [(sid, info, info.get("nickname", sid)) for sid, info in _get_owned_slaves(group, owner_id)]
+        if not targets:
+            return await safe_reply(update, context, "你目前没有任何奴隶。")
+
+    started = []
+    skipped = []
+    now_ts = int(datetime.now().timestamp())
+    for sid, info, name in targets:
+        if _is_slave_working(info):
+            skipped.append(name)
+            continue
+        info["work"] = {
+            "start_ts": now_ts,
+            "hours": hours,
+        }
+        started.append(name)
+
+    save_json(SLAVE_FILE, data)
+    lines = []
+    if started:
+        lines.append(f"✅ 已派遣 {len(started)} 名奴隶去干活 {hours} 小时。")
+    if skipped:
+        lines.append("⏳ 已在工作中：" + "，".join(skipped))
+    await safe_reply(update, context, "\n".join(lines) if lines else "没有可派遣的奴隶。")
+
+
+@register_command("结束干活", "提前结束干活")
+@feature_required(FEATURE_FRIENDS)
+async def finish_slave_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    owner = update.effective_user
+    chat_id = str(update.effective_chat.id)
+    owner_id = str(owner.id)
+
+    data = load_json(SLAVE_FILE)
+    group = data.get(chat_id, {})
+    targets = []
+    if update.message and update.message.reply_to_message:
+        target = update.message.reply_to_message.from_user
+        slave_id = str(target.id)
+        info = group.get(slave_id)
+        if not info or info.get("owner") != owner_id:
+            return await safe_reply(update, context, "你不是此人的主人，无法结束。")
+        targets = [(slave_id, info, target.full_name)]
+    else:
+        targets = [(sid, info, info.get("nickname", sid)) for sid, info in _get_owned_slaves(group, owner_id)]
+        if not targets:
+            return await safe_reply(update, context, "你目前没有任何奴隶。")
+
+    total_reward = 0
+    finished = []
+    skipped = []
+    now_ts = datetime.now().timestamp()
+    for sid, info, name in targets:
+        work = _get_slave_work_info(info)
+        if not work:
+            skipped.append(name)
+            continue
+        start_ts = int(work.get("start_ts", 0) or 0)
+        hours_plan = float(work.get("hours", 0) or 0)
+        if not start_ts or hours_plan <= 0:
+            info.pop("work", None)
+            skipped.append(name)
+            continue
+        elapsed_hours = max(0.0, min(hours_plan, (now_ts - start_ts) / 3600.0))
+        reward = _calc_work_reward(elapsed_hours, int(info.get("price", 0) or 0))
+        info.pop("work", None)
+        total_reward += reward
+        finished.append((name, elapsed_hours, reward))
+
+    save_json(SLAVE_FILE, data)
+    if total_reward > 0:
+        change_balance(chat_id, owner_id, total_reward)
+
+    lines = []
+    if finished:
+        lines.append(f"✅ 已结束 {len(finished)} 名奴隶的工作，总获得 {total_reward} 金币。")
+    if skipped:
+        lines.append("⏳ 无工作记录：" + "，".join(skipped))
+    await safe_reply(update, context, "\n".join(lines) if lines else "没有可结束的工作。")
+
+
 @register_command(
     "折磨奴隶",
     "唱歌",
@@ -394,6 +529,8 @@ async def slave_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
     info = group.get(slave_id)
     if not info or info["owner"] != buyer_id:
         return await safe_reply(update, context, "你不是此人的主人，不能让他干活。")
+    if _is_slave_working(info):
+        return await safe_reply(update, context, "该奴隶正在工作中，不能折磨。")
 
     user_info = get_user_data(chat_id, user_id)
 
@@ -415,7 +552,7 @@ async def slave_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "跳舞": f"💃 {target.full_name} 给你跳了一支钢管舞，你很开心。",
         "唱歌": f"🎤 {target.full_name} 唱了一首十八摸，你笑出了声。",
         "按摩": f"💆 {target.full_name} 给你按摩了一小时，你快活似神仙。",
-        "睡觉": f"🛏️ {target.full_name} 陪你睡了一觉，做了七十次，你很满足。",
+        "睡觉": f"🛏️ {target.full_name} 陪你睡了一觉，做了七次，你很满足。",
         "洗澡": f"🛁 {target.full_name} 亲自给你搓背洗澡，还撒了花瓣和香水泡泡。",
         "捶背": f"👊 {target.full_name} 用小拳拳锤你背，直锤到你骨头发麻。",
         "讲故事": f"📖 {target.full_name} 给你讲了个18禁的睡前故事，你彻夜难眠。",
@@ -443,6 +580,87 @@ async def slave_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         random_text = random.choice(list(actions.values())) + f"心情+2"
         return await safe_reply(update, context, f"{random_text}")
+
+
+@register_command("奴隶战斗")
+@feature_required(FEATURE_FRIENDS)
+async def slave_battle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.reply_to_message:
+        return await safe_reply(update, context, "请回复你要挑战的用户。")
+
+    attacker = update.effective_user
+    defender = update.message.reply_to_message.from_user
+    chat_id = str(update.effective_chat.id)
+    attacker_id = str(attacker.id)
+    defender_id = str(defender.id)
+
+    if attacker_id == defender_id:
+        return await safe_reply(update, context, "你不能和自己战斗。")
+
+    data = load_json(SLAVE_FILE)
+    group = data.get(chat_id, {})
+
+    attacker_info = group.get(attacker_id, {})
+    defender_info = group.get(defender_id, {})
+
+    if attacker_info.get("owner") == defender_id:
+        return await safe_reply(update, context, "你不能和你的主人战斗。")
+    if defender_info.get("owner") == attacker_id:
+        return await safe_reply(update, context, "你不能和你的奴隶战斗。")
+
+    attacker_slaves = _get_owned_slaves(group, attacker_id)
+    defender_slaves = _get_owned_slaves(group, defender_id)
+
+    if not attacker_slaves or not defender_slaves:
+        return await safe_reply(update, context, "双方必须都有奴隶才能战斗。")
+
+    atk_total = sum(int(info.get("price", 0) or 0) for _, info in attacker_slaves)
+    def_total = sum(int(info.get("price", 0) or 0) for _, info in defender_slaves)
+    atk_power = atk_total + len(attacker_slaves) * 50
+    def_power = def_total + len(defender_slaves) * 50
+    if atk_power <= 0 or def_power <= 0:
+        return await safe_reply(update, context, "战力不足，无法开战。")
+
+    win_rate = atk_power / (atk_power + def_power)
+    attacker_win = random.random() < win_rate
+
+    winner = attacker if attacker_win else defender
+    loser = defender if attacker_win else attacker
+    winner_id = attacker_id if attacker_win else defender_id
+    loser_id = defender_id if attacker_win else attacker_id
+
+    loser_slaves = defender_slaves if attacker_win else attacker_slaves
+    loser_total = def_total if attacker_win else atk_total
+
+    reward_text = ""
+    if loser_slaves and random.random() < 0.3:
+        stolen_id, stolen_info = random.choice(loser_slaves)
+        stolen_info["owner"] = winner_id
+        stolen_info["ownername"] = winner.full_name
+        history = stolen_info.get("history", [])
+        history.append(
+            {
+                "from": loser.full_name,
+                "to": winner.full_name,
+                "to_id": winner_id,
+                "price": stolen_info.get("price", 0),
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
+        stolen_info["history"] = history
+        reward_text = f"掠夺了对方奴隶 {stolen_info.get('nickname', stolen_id)}"
+    else:
+        coins = max(1, int(loser_total * 0.05))
+        change_balance(chat_id, winner_id, coins)
+        reward_text = f"获得金币 {coins}"
+
+    save_json(SLAVE_FILE, data)
+
+    await safe_reply(
+        update,
+        context,
+        f"⚔️ 战斗结束！胜利者：{winner.full_name}。{reward_text}。",
+    )
 
 
 @register_command("身价排行")
