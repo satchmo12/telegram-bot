@@ -1,10 +1,11 @@
 import os
 import time
+import json
 from telegram import Update
 from telegram.ext import CommandHandler, MessageHandler, ContextTypes, filters
 from command_router import register_command
 from info.economy import ensure_user_exists
-from utils import get_group_whitelist, is_admin, load_json, save_json, safe_reply
+from utils import get_group_whitelist, is_admin, is_super_admin, load_json, save_json, safe_reply
 
 USER_DIR = "data/group_users"
 os.makedirs(USER_DIR, exist_ok=True)
@@ -23,6 +24,100 @@ def load_users(chat_id):
 def save_users(chat_id, users):
     path = get_group_file(chat_id)
     save_json(path, users)
+
+
+def _merge_user_records(dst: dict, src: dict) -> dict:
+    if not isinstance(dst, dict):
+        return src if isinstance(src, dict) else {}
+    if not isinstance(src, dict):
+        return dst
+    merged = dict(dst)
+    dst_seen = int(dst.get("last_seen", 0) or 0)
+    src_seen = int(src.get("last_seen", 0) or 0)
+
+    def _pick(field: str) -> str:
+        if src_seen > dst_seen:
+            return src.get(field) or dst.get(field) or ""
+        return dst.get(field) or src.get(field) or ""
+
+    merged["full_name"] = _pick("full_name")
+    merged["username"] = _pick("username")
+    merged["last_seen"] = max(dst_seen, src_seen)
+
+    history = []
+    for v in (dst.get("username_history") or []) + (src.get("username_history") or []):
+        if v and v not in history:
+            history.append(v)
+    merged["username_history"] = history
+    return merged
+
+
+def _load_json_raw(path: str):
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_json_raw(path: str, data: dict):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _merge_group_user_files(src_dir: str, dst_dir: str) -> tuple[int, int, int]:
+    if not os.path.isdir(src_dir):
+        return 0, 0, 0
+    os.makedirs(dst_dir, exist_ok=True)
+    files = [f for f in os.listdir(src_dir) if f.endswith(".json")]
+    merged_files = 0
+    merged_users = 0
+    created_files = 0
+    for fname in files:
+        src_path = os.path.join(src_dir, fname)
+        dst_path = os.path.join(dst_dir, fname)
+        src_data = _load_json_raw(src_path)
+        if not isinstance(src_data, dict):
+            continue
+        dst_data = _load_json_raw(dst_path)
+        dst_data = dst_data if isinstance(dst_data, dict) else {}
+        if not dst_data:
+            created_files += 1
+        changed = False
+        for uid, info in src_data.items():
+            before = dst_data.get(uid)
+            merged = _merge_user_records(before if isinstance(before, dict) else {}, info)
+            if merged != before:
+                dst_data[uid] = merged
+                changed = True
+            if before is None:
+                merged_users += 1
+        if changed:
+            _save_json_raw(dst_path, dst_data)
+            merged_files += 1
+    return merged_files, created_files, merged_users
+
+
+def _merge_all_group_user_dirs(root_dir: str, dst_dir: str) -> tuple[int, int, int, int]:
+    if not os.path.isdir(root_dir):
+        return 0, 0, 0, 0
+    total_merged_files = 0
+    total_created_files = 0
+    total_merged_users = 0
+    scanned_dirs = 0
+    for name in os.listdir(root_dir):
+        src_dir = os.path.join(root_dir, name, "group_users")
+        if not os.path.isdir(src_dir):
+            continue
+        scanned_dirs += 1
+        mf, cf, mu = _merge_group_user_files(src_dir, dst_dir)
+        total_merged_files += mf
+        total_created_files += cf
+        total_merged_users += mu
+    return total_merged_files, total_created_files, total_merged_users, scanned_dirs
 
 
 async def record_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -152,6 +247,25 @@ async def list_group_user_links(update: Update, context: ContextTypes.DEFAULT_TY
             msg += f"- {info}：无 username\n"
 
     await safe_reply(update, context, msg)
+
+
+@register_command("合并用户")
+async def merge_group_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_super_admin(update.effective_user.id):
+        return await safe_reply(update, context, "❌ 只有超级管理员才能使用此命令。")
+    dst_dir = "data/group_users"
+    merged_files, created_files, merged_users, scanned_dirs = _merge_all_group_user_dirs("data", dst_dir)
+    await safe_reply(
+        update,
+        context,
+        "✅ 合并完成\n"
+        f"来源目录：data/*/group_users\n"
+        f"目标目录：{dst_dir}\n"
+        f"扫描目录数：{scanned_dirs}\n"
+        f"更新文件数：{merged_files}\n"
+        f"新建文件数：{created_files}\n"
+        f"新增用户数：{merged_users}",
+    )
 
 
 def register_user_tracker_handlers(app):

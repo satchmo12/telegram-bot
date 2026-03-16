@@ -209,7 +209,7 @@ def _get_today_chat_items(chat_id: str) -> list[str]:
 
 
 # ---------------- 今天群聊 ----------------
-@register_command("今天群聊")
+# @register_command("今天群聊")
 async def cmd_today_group_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg:

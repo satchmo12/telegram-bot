@@ -247,9 +247,14 @@ async def _open_group_panel(
         cfg = {}
 
     await query.answer()
+    keyboard = _build_group_panel_keyboard(chat_id_str, cfg)
+    if context.user_data.get("start_panel"):
+        rows = list(keyboard.inline_keyboard)
+        rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
+        keyboard = InlineKeyboardMarkup(rows)
     await query.edit_message_text(
         text=_build_group_panel_text(chat_id_str, cfg),
-        reply_markup=_build_group_panel_keyboard(chat_id_str, cfg),
+        reply_markup=keyboard,
         parse_mode="HTML",
     )
 
@@ -494,6 +499,10 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         keyboard = _build_group_list_keyboard(visible_data)
         if not keyboard.inline_keyboard:
             return await query.edit_message_text("暂无可配置的群记录。")
+        if context.user_data.get("start_panel"):
+            rows = list(keyboard.inline_keyboard)
+            rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
+            keyboard = InlineKeyboardMarkup(rows)
         return await query.edit_message_text("请选择要配置的群：", reply_markup=keyboard)
 
     if action == "open" and len(parts) >= 3:

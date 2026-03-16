@@ -34,3 +34,4 @@ sticker_cache/
 .idea/
 .vscode/
 /data
+/sessions

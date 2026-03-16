@@ -14,6 +14,7 @@ from group.talk_stats import register_talk_handlers
 from group.verify import register_verification_handlers
 from menu import register_menu_handlers
 from feature_flags import is_feature_enabled
+from channel.telethon_login import register_telethon_login_handlers
 
 
 def register_group_handlers(app):
@@ -47,6 +48,7 @@ def register_group_handlers(app):
         register_talk_handlers(app)
     register_reply_to_channel_handlers(app)
     register_channel_config_handlers(app)
+    register_telethon_login_handlers(app)
 
     # 需要较后注册的群路由
     if is_feature_enabled(app, "user_tracker"):

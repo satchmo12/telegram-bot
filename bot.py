@@ -6,12 +6,13 @@ import logging
 from datetime import time
 from dotenv import load_dotenv
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
     CommandHandler,
     TypeHandler,
+    CallbackQueryHandler,
     filters,
     ContextTypes,
 )
@@ -23,6 +24,8 @@ from group.group_logger import GROUPS_FILE
 from forward.message_forward import forward_to_owner, reply_from_owner
 from modules import register_all_handlers  # 注册各功能模块
 from dispatcher import message_router  # 最终文本处理路由器
+from channel.telethon_forwarder import start_telethon_forwarder_job
+from channel.telethon_login import _clear_login_state
 
 from chat.my_bot import cleaned_word
 from run_daily import (
@@ -187,27 +190,41 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
     msg = update.message
     if msg:
         sender_chat = getattr(msg, "sender_chat", None)
-        if sender_chat and getattr(sender_chat, "type", None) and sender_chat.type.name == "CHANNEL":
-            username = getattr(sender_chat, "username", "") or ""
-            title = getattr(sender_chat, "title", "") or ""
-            channel_id = f"<code>{sender_chat.id}</code>"
-            if username:
-                text = f"✅ 频道ID：{channel_id} 点击红色数字拷贝\n频道用户名：@{username}\n频道名：{title}"
-            else:
-                text = f"✅ 频道ID：{channel_id}\n频道名：{title}"
-            await msg.reply_text(text, parse_mode="HTML")
-            return
-
         forward_origin = getattr(msg, "forward_origin", None)
         origin_chat = getattr(forward_origin, "chat", None) if forward_origin else None
-        if origin_chat and getattr(origin_chat, "type", None) and origin_chat.type.name == "CHANNEL":
-            username = getattr(origin_chat, "username", "") or ""
-            title = getattr(origin_chat, "title", "") or ""
-            channel_id = f"<code>{origin_chat.id}</code>"
+
+        channel = None
+        if (
+            sender_chat
+            and getattr(sender_chat, "type", None)
+            and sender_chat.type.name == "CHANNEL"
+        ):
+            channel = sender_chat
+        elif (
+            origin_chat
+            and getattr(origin_chat, "type", None)
+            and origin_chat.type.name == "CHANNEL"
+        ):
+            channel = origin_chat
+
+        if channel:
+            username = getattr(channel, "username", "") or ""
+            title = getattr(channel, "title", "") or ""
+            channel_id = f"<code>{channel.id}</code>"
+            origin_msg_id = (
+                getattr(forward_origin, "message_id", None) if forward_origin else None
+            )
+            msg_id_val = origin_msg_id if origin_msg_id is not None else msg.message_id
+            msg_id = f"<code>{msg_id_val}</code>"
             if username:
-                text = f"✅ 频道ID：{channel_id} 点击红色数字拷贝\n频道用户名：@{username}\n频道名：{title}"
+                text = (
+                    f"✅ 频道ID：{channel_id} 点击红色数字拷贝\n"
+                    f"消息ID：{msg_id}\n"
+                    f"频道用户名：@{username}\n"
+                    f"频道名：{title}"
+                )
             else:
-                text = f"✅ 频道ID：{channel_id}\n频道名：{title}"
+                text = f"✅ 频道ID：{channel_id}\n消息ID：{msg_id}\n频道名：{title}"
             await msg.reply_text(text, parse_mode="HTML")
             return
     await forward_to_owner(update, context)
@@ -221,11 +238,60 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_name = context.application.bot_data.get("name", "机器人")
     features = sorted(context.application.bot_data.get("enabled_features", []))
     feature_text = ", ".join(features[:20]) if features else "默认功能"
-    await update.message.reply_text(
-        f"👋 欢迎使用 {bot_name}\n"
-        f"当前启用功能：{feature_text}\n\n"
-        "提示：群配置请私聊发送「群配置」/group \n 高级功能「频道配置」/channel_config 。"
+    context.user_data["start_panel"] = {
+        "bot_name": bot_name,
+        "feature_text": feature_text,
+    }
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("群配置", callback_data="gcfg:list")],
+            [InlineKeyboardButton("频道配置", callback_data="chcfg:back")],
+            [InlineKeyboardButton("查看登录", callback_data="tlogin:list")],
+            [InlineKeyboardButton("登录小号", callback_data="tlogin:login")],
+        ]
     )
+    await update.message.reply_text(
+        f"👋 欢迎使用 {bot_name}\n",
+        # f"当前启用功能：{feature_text}\n\n",
+        reply_markup=keyboard,
+    )
+
+
+async def start_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    if not query.data.startswith("start:"):
+        return
+    await query.answer()
+
+    panel = context.user_data.get("start_panel", {})
+    bot_name = panel.get("bot_name", context.application.bot_data.get("name", "机器人"))
+    action = query.data.split(":", 1)[1]
+    if action != "back":
+        return
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("群配置", callback_data="gcfg:list")],
+            [InlineKeyboardButton("频道配置", callback_data="chcfg:back")],
+            [InlineKeyboardButton("查看登录", callback_data="tlogin:list")],
+            [InlineKeyboardButton("登录小号", callback_data="tlogin:login")],
+        ]
+    )
+    return await query.edit_message_text(
+        f"👋 欢迎使用 {bot_name}\n",
+        reply_markup=keyboard,
+    )
+
+
+async def clear_login_prompt_on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not update.effective_user:
+        return
+    data = query.data or ""
+    if data.startswith("tlogin:login"):
+        return
+    await _clear_login_state(str(update.effective_user.id), context)
 
 
 async def daily_master_job_wrapper(context: ContextTypes.DEFAULT_TYPE):
@@ -287,6 +353,8 @@ def create_app(bot_cfg: dict):
             private_forward_router,
         )
     )
+    app.add_handler(CallbackQueryHandler(clear_login_prompt_on_callback), group=-900)
+    app.add_handler(CallbackQueryHandler(start_panel_callback, pattern=r"^start:"))
 
     # ===== 注册所有功能模块 =====
     register_all_handlers(app)
@@ -307,14 +375,13 @@ def create_app(bot_cfg: dict):
     )
 
     app.job_queue.run_repeating(hour_master_job_wrapper, interval=7200, first=0)
-    app.job_queue.run_repeating(
-        ten_minute_master_job_wrapper, interval=60, first=60
-    )
+    app.job_queue.run_repeating(ten_minute_master_job_wrapper, interval=60, first=60)
 
     app.job_queue.run_repeating(
         five_minute_master_job_wrapper,
         interval=300,
     )
+    app.job_queue.run_once(start_telethon_forwarder_job, when=0)
 
     app.add_error_handler(error_handler)
 

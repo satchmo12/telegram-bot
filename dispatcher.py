@@ -18,6 +18,7 @@ from slave.action_handler import apply_action
 from utils import safe_reply
 from feature_flags import is_feature_enabled
 from channel.channel_config import handle_channel_config_text
+from channel.telethon_login import handle_telethon_login_text
 
 
 from telegram import Update
@@ -54,6 +55,9 @@ async def handle_text_dispatcher(update: Update, context: ContextTypes.DEFAULT_T
         # 优雅分发命令
         if await dispatch_command(update, context):
             return
+        # 协议号登录流程
+        if await handle_telethon_login_text(update, context):
+            return
         # 频道配置引导输入
         if await handle_channel_config_text(update, context):
             return
@@ -77,7 +81,7 @@ async def handle_text_dispatcher(update: Update, context: ContextTypes.DEFAULT_T
         
         await ai_auto_reply(update, context)  # ai问答
 
-        await handle_text_message(update, context)  # 群聊天记录
+        # await handle_text_message(update, context)  # 群聊天记录
         # 会中断后面的
 
         # await on_text(update, context)

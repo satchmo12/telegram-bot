@@ -292,7 +292,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sources = tuple(rule.get("sources", []) or [])
         targets = tuple(rule.get("targets", []) or [])
         ftype = str(rule.get("filter", "all") or "all").lower()
-        return (sources, targets, ftype)
+        mode = str(rule.get("mode", "listen") or "listen").lower()
+        return (sources, targets, ftype, mode)
 
     deduped = {}
     for rule in forward_rules:
@@ -300,6 +301,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     forward_rules = list(deduped.values())
 
     for idx, rule in enumerate(forward_rules):
+        if not bool(rule.get("enabled", True)):
+            continue
+        mode = str(rule.get("mode", "listen") or "listen").lower()
+        if mode != "listen":
+            continue
         sources = set(rule.get("sources", []))
         exclude_channels = set(rule.get("exclude_channels", []))
         filter_type = str(rule.get("filter", "all") or "all").lower()
@@ -338,7 +344,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 task.cancel()
             MEDIA_GROUP_TASKS[group_key] = asyncio.create_task(
                 _flush_media_group(group_key, rule.get("targets", []), rule, context)
-            )
+                )
             continue
 
         # === 单条消息处理 ===
@@ -359,58 +365,107 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     src=str(src),
                 )
             continue
-        elif msg.animation:
-            caption = replace_links_and_submit(msg.caption or "", rule) if msg.caption else None
-            for target_id in targets:
-                await _send_with_retry(
-                    target_id,
-                    lambda: context.bot.send_animation(
-                        chat_id=target_id,
-                        animation=msg.animation.file_id,
-                        caption=caption,
-                    ),
-                    kind="GIF 动图",
-                    src=str(src),
-                )
+
+
+async def handle_user_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg:
+        return
+
+    # 用户自己转发：排除频道自动转发
+    if getattr(msg, "is_automatic_forward", False):
+        return
+
+    source_channel_ids = set()
+    sender_chat = getattr(msg, "sender_chat", None)
+    if sender_chat and getattr(sender_chat, "type", None) and sender_chat.type.name == "CHANNEL":
+        source_channel_ids.add(sender_chat.id)
+
+    forward_origin = getattr(msg, "forward_origin", None)
+    origin_chat = getattr(forward_origin, "chat", None) if forward_origin else None
+    if origin_chat and getattr(origin_chat, "type", None) and origin_chat.type.name == "CHANNEL":
+        source_channel_ids.add(origin_chat.id)
+
+    if not source_channel_ids:
+        return
+
+    config = load_json("data/forward_config.json")
+    base_rules = config.get("forward_rules", []) if isinstance(config, dict) else []
+    forward_rules = list(base_rules) if isinstance(base_rules, list) else []
+
+    user_config = load_json("data/forward_config_users.json")
+    if isinstance(user_config, dict):
+        users = user_config.get("users", {})
+        if isinstance(users, dict):
+            for user_id, ucfg in users.items():
+                if not isinstance(ucfg, dict):
+                    continue
+                rules = ucfg.get("forward_rules")
+                guess_username = ucfg.get("username", "")
+                if not guess_username and isinstance(rules, list) and rules:
+                    raw = str(rules[0].get("replace_submit_user", "") or "")
+                    guess_username = raw.lstrip("@")
+                if not (is_super_admin(user_id) or _is_active_subscription(user_id, guess_username)):
+                    continue
+                if isinstance(rules, list):
+                    forward_rules.extend(list(rules))
+
+    def _rule_key(rule: dict) -> tuple:
+        sources = tuple(rule.get("sources", []) or [])
+        targets = tuple(rule.get("targets", []) or [])
+        ftype = str(rule.get("filter", "all") or "all").lower()
+        mode = str(rule.get("mode", "listen") or "listen").lower()
+        return (sources, targets, ftype, mode)
+
+    deduped = {}
+    for rule in forward_rules:
+        deduped[_rule_key(rule)] = rule
+    forward_rules = list(deduped.values())
+
+    for rule in forward_rules:
+        if not bool(rule.get("enabled", True)):
             continue
-        elif msg.document and getattr(msg.document, "mime_type", "") == "image/gif":
-            caption = replace_links_and_submit(msg.caption or "", rule) if msg.caption else None
-            for target_id in targets:
-                await _send_with_retry(
-                    target_id,
-                    lambda: context.bot.send_document(
-                        chat_id=target_id,
-                        document=msg.document.file_id,
-                        caption=caption,
-                    ),
-                    kind="GIF 文档",
-                    src=str(src),
-                )
+        mode = str(rule.get("mode", "listen") or "listen").lower()
+        if mode != "listen":
             continue
-        elif msg.video:
-            caption = replace_links_and_submit(msg.caption or "", rule) if msg.caption else None
-            for target_id in targets:
-                await _send_with_retry(
-                    target_id,
-                    lambda: context.bot.send_video(
-                        chat_id=target_id,
-                        video=msg.video.file_id,
-                        caption=caption,
-                    ),
-                    kind="单条视频",
-                    src=str(src),
-                )
+        sources = set(rule.get("sources", []))
+        exclude_channels = set(rule.get("exclude_channels", []))
+        filter_type = str(rule.get("filter", "all") or "all").lower()
+        if filter_type not in {"all", "text", "photo", "video"}:
+            filter_type = "all"
+
+        if sources and source_channel_ids.isdisjoint(sources):
             continue
-        elif text:
-            text = replace_links_and_submit(text, rule)
-            for target_id in targets:
-                await _send_with_retry(
-                    target_id,
-                    lambda: context.bot.send_message(chat_id=target_id, text=text),
-                    kind="单条文本",
-                    src=str(src),
-                )
+        if exclude_channels and not source_channel_ids.isdisjoint(exclude_channels):
             continue
+        if msg.reply_to_message:
+            continue
+
+        has_gif = bool(getattr(msg, "animation", None)) or (
+            getattr(msg, "document", None) and getattr(msg.document, "mime_type", "") == "image/gif"
+        )
+        if filter_type == "text" and (
+            msg.photo or msg.video or has_gif or getattr(msg, "media_group_id", None)
+        ):
+            continue
+        if filter_type == "photo" and not (msg.photo or has_gif):
+            continue
+        if filter_type == "video" and not (msg.video or has_gif):
+            continue
+
+        targets = rule.get("targets", [])
+        src = _get_source_id_from_msg(msg)
+        for target_id in targets:
+            await _send_with_retry(
+                target_id,
+                lambda: context.bot.copy_message(
+                    chat_id=target_id,
+                    from_chat_id=msg.chat.id,
+                    message_id=msg.message_id,
+                ),
+                kind="用户转发",
+                src=str(src),
+            )
 
 # 注册
 def register_handle_message_handlers(app):
