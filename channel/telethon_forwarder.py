@@ -56,21 +56,58 @@ def _join_with_suffix(text: str, suffix: str) -> str:
     return f"{base}\n\n{extra}"
 
 
+def _is_subscripted_generics_error(err: Exception) -> bool:
+    return "Subscripted generics cannot be used with class and instance checks" in str(err)
+
+
+def _normalize_entities(entities):
+    if not entities:
+        return None
+    if isinstance(entities, list):
+        return entities
+    try:
+        return list(entities)
+    except Exception:
+        return None
+
+
+async def _send_message_safe(client, target_id, text: str, *, entities=None, file=None):
+    normalized = _normalize_entities(entities)
+    try:
+        if normalized:
+            return await client.send_message(
+                target_id, text, file=file, formatting_entities=normalized
+            )
+        return await client.send_message(target_id, text, file=file)
+    except TypeError as e:
+        if normalized and _is_subscripted_generics_error(e):
+            return await client.send_message(target_id, text, file=file)
+        raise
+
+
+async def _send_file_safe(client, target_id, files, *, caption: str = "", entities=None):
+    normalized = _normalize_entities(entities)
+    try:
+        if normalized:
+            return await client.send_file(
+                target_id, files, caption=caption, formatting_entities=normalized
+            )
+        return await client.send_file(target_id, files, caption=caption)
+    except TypeError as e:
+        if normalized and _is_subscripted_generics_error(e):
+            return await client.send_file(target_id, files, caption=caption)
+        raise
+
+
 async def _send_text_split(client, target_id, text: str, *, entities=None, limit: int = 4096):
     payload = text or ""
     if len(payload) <= limit:
-        if entities:
-            await client.send_message(target_id, payload, formatting_entities=entities)
-        else:
-            await client.send_message(target_id, payload)
+        await _send_message_safe(client, target_id, payload, entities=entities)
         return
     first = payload[:limit]
     rest = payload[limit:]
-    if entities:
-        await client.send_message(target_id, first, formatting_entities=entities)
-    else:
-        await client.send_message(target_id, first)
-    await client.send_message(target_id, rest)
+    await _send_message_safe(client, target_id, first, entities=entities)
+    await _send_message_safe(client, target_id, rest)
 
 
 def _load_session_owners() -> dict:
@@ -650,44 +687,50 @@ async def _ensure_client(session_name: str, api_id: int, api_hash: str):
                         if apply_processing:
                             if processed_text and len(processed_text) > 1024:
                                 # 方案1/3：单条文本（若文本里有链接，Telegram 会出预览）
-                                await client.send_message(
+                                await _send_message_safe(
+                                    client,
                                     target_id,
                                     processed_text,
-                                    formatting_entities=processed_entities,
+                                    entities=processed_entities,
                                 )
                             else:
-                                await client.send_message(
+                                await _send_message_safe(
+                                    client,
                                     target_id,
                                     processed_text or "",
                                     file=message.media,
-                                    formatting_entities=processed_entities,
+                                    entities=processed_entities,
                                 )
                         else:
                             if raw_text and len(raw_text) > 1024:
-                                await client.send_message(
+                                await _send_message_safe(
+                                    client,
                                     target_id,
                                     raw_text,
-                                    formatting_entities=message.entities,
+                                    entities=message.entities,
                                 )
                             else:
-                                await client.send_message(
+                                await _send_message_safe(
+                                    client,
                                     target_id,
                                     raw_text,
                                     file=message.media,
-                                    formatting_entities=message.entities,
+                                    entities=message.entities,
                                 )
                     else:
                         if apply_processing:
-                            await client.send_message(
+                            await _send_message_safe(
+                                client,
                                 target_id,
                                 processed_text,
-                                formatting_entities=processed_entities,
+                                entities=processed_entities,
                             )
                         else:
-                            await client.send_message(
+                            await _send_message_safe(
+                                client,
                                 target_id,
                                 raw_text,
-                                formatting_entities=message.entities,
+                                entities=message.entities,
                             )
                     _append_recent_id(state, key, int(message.id))
                     _set_history_max_id(state, key, int(message.id))
@@ -767,31 +810,35 @@ async def _ensure_client(session_name: str, api_id: int, api_hash: str):
                 try:
                     if apply_processing:
                         if processed_caption and len(processed_caption) > 1024:
-                            await client.send_message(
+                            await _send_message_safe(
+                                client,
                                 target_id,
                                 processed_caption,
-                                formatting_entities=processed_caption_entities,
+                                entities=processed_caption_entities,
                             )
                         else:
-                            await client.send_file(
+                            await _send_file_safe(
+                                client,
                                 target_id,
                                 files,
                                 caption=processed_caption or "",
-                                formatting_entities=processed_caption_entities,
+                                entities=processed_caption_entities,
                             )
                     else:
                         if raw_caption and len(raw_caption) > 1024:
-                            await client.send_message(
+                            await _send_message_safe(
+                                client,
                                 target_id,
                                 raw_caption,
-                                formatting_entities=caption_msg.entities,
+                                entities=caption_msg.entities,
                             )
                         else:
-                            await client.send_file(
+                            await _send_file_safe(
+                                client,
                                 target_id,
                                 files,
                                 caption=raw_caption,
-                                formatting_entities=caption_msg.entities,
+                                entities=caption_msg.entities,
                             )
                     _append_recent_id(state, key, int(caption_msg.id))
                     _set_history_max_id(state, key, int(caption_msg.id))
@@ -914,17 +961,19 @@ async def _process_history_requests():
                         if processed_caption is None:
                             processed_caption = ""
                         if processed_caption and len(processed_caption) > 1024:
-                            await client.send_message(
+                            await _send_message_safe(
+                                client,
                                 target_id,
                                 processed_caption,
-                                formatting_entities=processed_caption_entities,
+                                entities=processed_caption_entities,
                             )
                         else:
-                            await client.send_file(
+                            await _send_file_safe(
+                                client,
                                 target_id,
                                 files,
                                 caption=processed_caption or "",
-                                formatting_entities=processed_caption_entities,
+                                entities=processed_caption_entities,
                             )
                         max_id = max(int(m.id) for m in group_msgs)
                         for m in group_msgs:
@@ -982,13 +1031,16 @@ async def _process_history_requests():
                                     entities=processed_entities,
                                     limit=4096,
                                 )
-                                await client.send_message(target_id, "", file=message.media)
+                                await _send_message_safe(
+                                    client, target_id, "", file=message.media
+                                )
                             else:
-                                await client.send_message(
+                                await _send_message_safe(
+                                    client,
                                     target_id,
                                     processed_text or "",
                                     file=message.media,
-                                    formatting_entities=processed_entities,
+                                    entities=processed_entities,
                                 )
                         else:
                             await _send_text_split(
