@@ -57,6 +57,25 @@ def _today_date():
     return datetime.now().date()
 
 
+async def _resolve_chat_title(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> str:
+    if not context or not chat_id:
+        return ""
+    try:
+        chat = await context.bot.get_chat(chat_id)
+    except Exception:
+        return ""
+    title = (getattr(chat, "title", "") or "").strip()
+    if not title:
+        first = (getattr(chat, "first_name", "") or "").strip()
+        last = (getattr(chat, "last_name", "") or "").strip()
+        title = (f"{first} {last}").strip()
+    if not title:
+        username = (getattr(chat, "username", "") or "").strip()
+        if username:
+            return f"@{username}"
+    return title
+
+
 def _parse_expiry(value: str):
     v = (value or "").strip()
     if not v:
@@ -453,6 +472,8 @@ def _new_rule_default(user_id: str, *, source_id=None, source_name: str = "", se
         "name": source_name or "未命名",
         "sources": [source_id] if source_id is not None else [],
         "targets": [],
+        "source_title": "",
+        "target_title": "",
         "enabled": True,
         "mode": "listen",
         "filter": "all",
@@ -652,13 +673,17 @@ def _build_rule_list_view(user_id: str) -> tuple[str, InlineKeyboardMarkup]:
         name = r.get("name", "")
         src = r.get("sources", [""])[0] if r.get("sources") else ""
         tgt = r.get("targets", [""])[0] if r.get("targets") else ""
+        src_title = (r.get("source_title") or "").strip()
+        tgt_title = (r.get("target_title") or "").strip()
+        src_label = f"{src_title}({src})" if src_title and src else (src or src_title)
+        tgt_label = f"{tgt_title}({tgt})" if tgt_title and tgt else (tgt or tgt_title)
         enabled = bool(r.get("enabled", True))
         mode = str(r.get("mode", "listen") or "listen").lower()
         mode_label = MODE_LABELS.get(mode, mode)
         session_name = r.get("session_name", "")
         session_label = _get_session_label(session_name) if session_name else "未设置"
         lines.append(
-            f"{idx}. {name} | {src} → {tgt} | {'开启' if enabled else '关闭'} | {mode_label} | {session_label}"
+            f"{idx}. {name} | {src_label} → {tgt_label} | {'开启' if enabled else '关闭'} | {mode_label} | {session_label}"
         )
     keyboard_rows = []
     for idx in range(1, len(rules) + 1):
@@ -763,6 +788,12 @@ def _format_rule_panel_text(rule: dict, index: int) -> str:
     clear_links = "开启" if bool(rule.get("clear_links", False)) else "关闭"
     sources = rule.get("sources", []) or []
     targets = rule.get("targets", []) or []
+    source_title = (rule.get("source_title") or "").strip()
+    target_title = (rule.get("target_title") or "").strip()
+    src_id = sources[0] if sources else ""
+    tgt_id = targets[0] if targets else ""
+    src_label = f"{source_title} ({src_id})" if source_title and src_id else (src_id or source_title)
+    tgt_label = f"{target_title} ({tgt_id})" if target_title and tgt_id else (tgt_id or target_title)
     start_id = rule.get("start_id", "")
     end_id = rule.get("end_id", "")
     include_words = rule.get("include_words", []) or []
@@ -778,8 +809,8 @@ def _format_rule_panel_text(rule: dict, index: int) -> str:
         f"状态：{enabled}\n"
         f"任务类型：{mode}\n"
         f"清除链接：{clear_links}\n"
-        f"监听频道ID：{sources}\n"
-        f"目标频道ID：{targets}\n"
+        f"监听频道：{src_label or sources}\n"
+        f"目标频道：{tgt_label or targets}\n"
         f"协议号：{session_name}\n"
         f"开始/结束消息ID：{start_id} / {end_id}\n"
         f"包含词：{include_words}\n"
@@ -797,11 +828,17 @@ def _format_draft_summary(draft: dict) -> str:
     enabled = bool(draft.get("enabled", True))
     mode = str(draft.get("mode", "listen") or "listen").lower()
     session_name = draft.get("session_name", "")
+    src_id = draft.get("source_id", "")
+    tgt_id = draft.get("target_id", "")
+    src_title = (draft.get("source_title") or "").strip()
+    tgt_title = (draft.get("target_title") or "").strip()
+    src_label = f"{src_title} ({src_id})" if src_title and src_id else (src_id or src_title)
+    tgt_label = f"{tgt_title} ({tgt_id})" if tgt_title and tgt_id else (tgt_id or tgt_title)
     return (
         "请确认配置：\n"
         f"频道名称：{draft.get('name', '')}\n"
-        f"搬运频道ID：{draft.get('source_id', '')}\n"
-        f"目标频道ID：{draft.get('target_id', '')}\n"
+        f"搬运频道：{src_label}\n"
+        f"目标频道：{tgt_label}\n"
         f"是否开启：{'开启' if enabled else '关闭'}\n"
         f"任务模式：{MODE_LABELS.get(mode, mode)}\n"
         f"任务类型：{FILTER_LABELS.get(draft.get('filter', 'all'), draft.get('filter', 'all'))}\n"
@@ -818,6 +855,8 @@ def _save_forward_rule(draft: dict, user_id: str, username: Optional[str] = None
         "name": draft.get("name", ""),
         "sources": [draft.get("source_id")],
         "targets": [draft.get("target_id")],
+        "source_title": draft.get("source_title", ""),
+        "target_title": draft.get("target_title", ""),
         "enabled": bool(draft.get("enabled", True)),
         "mode": str(draft.get("mode", "listen") or "listen").lower(),
         "filter": draft.get("filter", "all"),
@@ -875,6 +914,10 @@ def _update_rule_field(user_id: str, index: int, field: str, value) -> bool:
         rule["sources"] = [value]
     elif field == "target_id":
         rule["targets"] = [value]
+    elif field == "source_title":
+        rule["source_title"] = value or ""
+    elif field == "target_title":
+        rule["target_title"] = value or ""
     elif field == "channel_user":
         rule["replace_channel_user"] = value
     elif field == "group_name":
@@ -1152,6 +1195,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "group_name": rule.get("replace_group_name", ""),
                     "submit_user": rule.get("replace_submit_user", ""),
                     "session_name": rule.get("session_name", ""),
+                    "source_title": rule.get("source_title", ""),
+                    "target_title": rule.get("target_title", ""),
                     "edit_index": idx,
                 }
             )
@@ -1211,6 +1256,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "group_name": rule.get("replace_group_name", ""),
                     "submit_user": rule.get("replace_submit_user", ""),
                     "session_name": rule.get("session_name", ""),
+                    "source_title": rule.get("source_title", ""),
+                    "target_title": rule.get("target_title", ""),
                     "edit_index": idx,
                 }
             )
@@ -1266,6 +1313,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "group_name": rule.get("replace_group_name", ""),
                     "submit_user": rule.get("replace_submit_user", ""),
                     "session_name": rule.get("session_name", ""),
+                    "source_title": rule.get("source_title", ""),
+                    "target_title": rule.get("target_title", ""),
                     "edit_index": idx,
                 }
             )
@@ -1366,6 +1415,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "group_name": rule.get("replace_group_name", ""),
             "submit_user": rule.get("replace_submit_user", ""),
             "session_name": rule.get("session_name", ""),
+            "source_title": rule.get("source_title", ""),
+            "target_title": rule.get("target_title", ""),
             "owner_id": user_id,
             "edit_index": idx,
         }
@@ -1433,6 +1484,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "group_name": rule.get("replace_group_name", ""),
             "submit_user": rule.get("replace_submit_user", ""),
             "session_name": rule.get("session_name", ""),
+            "source_title": rule.get("source_title", ""),
+            "target_title": rule.get("target_title", ""),
             "owner_id": user_id,
             "edit_index": idx,
         }
@@ -1548,13 +1601,19 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             _update_rule_field(user_id, idx, "end_id", end_id)
         elif field == "source":
             try:
-                _update_rule_field(user_id, idx, "source_id", int(text))
+                source_id = int(text)
+                _update_rule_field(user_id, idx, "source_id", source_id)
+                title = await _resolve_chat_title(context, source_id)
+                _update_rule_field(user_id, idx, "source_title", title or "")
             except Exception:
                 await update.message.reply_text("❗ 请输入正确的频道ID（数字）。")
                 return True
         elif field == "target":
             try:
-                _update_rule_field(user_id, idx, "target_id", int(text))
+                target_id = int(text)
+                _update_rule_field(user_id, idx, "target_id", target_id)
+                title = await _resolve_chat_title(context, target_id)
+                _update_rule_field(user_id, idx, "target_title", title or "")
             except Exception:
                 await update.message.reply_text("❗ 请输入正确的频道ID（数字）。")
                 return True
@@ -1682,7 +1741,10 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if stage == "source_id":
         try:
-            draft["source_id"] = int(text)
+            source_id = int(text)
+            draft["source_id"] = source_id
+            title = await _resolve_chat_title(context, source_id)
+            draft["source_title"] = title or ""
         except Exception:
             await update.message.reply_text("❗ 请输入正确的频道ID（数字）。", reply_markup=_build_cancel_keyboard())
             return True
@@ -1692,7 +1754,10 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if stage == "target_id":
         try:
-            draft["target_id"] = int(text)
+            target_id = int(text)
+            draft["target_id"] = target_id
+            title = await _resolve_chat_title(context, target_id)
+            draft["target_title"] = title or ""
         except Exception:
             await update.message.reply_text("❗ 请输入正确的频道ID（数字）。", reply_markup=_build_cancel_keyboard())
             return True
@@ -1800,6 +1865,12 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not ok:
             await update.message.reply_text("❗ 更新失败，请重试。")
             return True
+        if field == "source_id":
+            title = await _resolve_chat_title(context, value)
+            _update_rule_field(user_id, idx, "source_title", title or "")
+        if field == "target_id":
+            title = await _resolve_chat_title(context, value)
+            _update_rule_field(user_id, idx, "target_title", title or "")
         rules = _get_user_rules(user_id)
         rule = rules[idx]
         draft.update(
@@ -1814,6 +1885,8 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 "group_name": rule.get("replace_group_name", ""),
                 "submit_user": rule.get("replace_submit_user", ""),
                 "session_name": rule.get("session_name", ""),
+                "source_title": rule.get("source_title", ""),
+                "target_title": rule.get("target_title", ""),
                 "edit_index": idx,
             }
         )

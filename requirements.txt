@@ -56,4 +56,4 @@ typing_extensions==4.14.1
 tzlocal==5.3.1
 urllib3==2.5.0
 yarl==1.20.1
-telethon==1.40.0
+telethon==1.41.0

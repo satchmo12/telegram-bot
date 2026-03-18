@@ -22,6 +22,14 @@ try:
         MessageEntityUrl,
         MessageEntityTextUrl,
     )
+    try:
+        from telethon.extensions import html as telethon_html
+    except Exception:
+        telethon_html = None
+    try:
+        from telethon.extensions import markdown as telethon_markdown
+    except Exception:
+        telethon_markdown = None
 except Exception:  # pragma: no cover - 运行时缺依赖
     TelegramClient = None
     events = None
@@ -29,6 +37,8 @@ except Exception:  # pragma: no cover - 运行时缺依赖
     MessageEntitySpoiler = None
     MessageEntityUrl = None
     MessageEntityTextUrl = None
+    telethon_html = None
+    telethon_markdown = None
 
 if TYPE_CHECKING:
     from telethon import TelegramClient as TelethonClient
@@ -97,6 +107,36 @@ async def _send_file_safe(client, target_id, files, *, caption: str = "", entiti
         if normalized and _is_subscripted_generics_error(e):
             return await client.send_file(target_id, files, caption=caption)
         raise
+
+
+def _caption_to_parse_mode(text: str, entities):
+    if not text or not entities:
+        return None, None
+    try:
+        if telethon_html:
+            return telethon_html.unparse(text, entities), "html"
+    except Exception:
+        pass
+    try:
+        if telethon_markdown:
+            return telethon_markdown.unparse(text, entities), "md"
+    except Exception:
+        pass
+    return None, None
+
+
+async def _send_album_with_caption(client, target_id, files, *, caption: str = "", entities=None):
+    normalized = _normalize_entities(entities)
+    if normalized and caption:
+        parsed_caption, parse_mode = _caption_to_parse_mode(caption, normalized)
+        if parsed_caption and parse_mode:
+            return await client.send_file(
+                target_id,
+                files,
+                caption=parsed_caption,
+                parse_mode=parse_mode,
+            )
+    await _send_file_safe(client, target_id, files, caption=caption or "", entities=normalized)
 
 
 async def _send_text_split(client, target_id, text: str, *, entities=None, limit: int = 4096):
@@ -817,7 +857,7 @@ async def _ensure_client(session_name: str, api_id: int, api_hash: str):
                                 entities=processed_caption_entities,
                             )
                         else:
-                            await _send_file_safe(
+                            await _send_album_with_caption(
                                 client,
                                 target_id,
                                 files,
@@ -833,7 +873,7 @@ async def _ensure_client(session_name: str, api_id: int, api_hash: str):
                                 entities=caption_msg.entities,
                             )
                         else:
-                            await _send_file_safe(
+                            await _send_album_with_caption(
                                 client,
                                 target_id,
                                 files,
@@ -968,7 +1008,7 @@ async def _process_history_requests():
                                 entities=processed_caption_entities,
                             )
                         else:
-                            await _send_file_safe(
+                            await _send_album_with_caption(
                                 client,
                                 target_id,
                                 files,
