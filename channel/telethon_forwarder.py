@@ -3,6 +3,7 @@ import os
 from typing import Dict, List, Any, TYPE_CHECKING
 import re
 import warnings
+import difflib
 
 warnings.filterwarnings(
     "ignore",
@@ -47,7 +48,7 @@ if TYPE_CHECKING:
 SESSION_CLIENTS: Dict[str, "TelethonClient"] = {}
 SESSION_RULES: Dict[str, List[dict]] = {}
 FORWARD_TASKS: Dict[str, asyncio.Task] = {}
-DEBUG_FORWARD = True
+DEBUG_FORWARD = False
 HISTORY_REQUESTS_FILE = "data/history_forward_requests.json"
 HISTORY_STATE_FILE = "data/history_forward_state.json"
 
@@ -249,9 +250,15 @@ def _clone_entity(ent, offset: int, length: int):
         data = dict(getattr(ent, "__dict__", {}) or {})
         data.pop("offset", None)
         data.pop("length", None)
+        if MessageEntityBlockquote and isinstance(ent, MessageEntityBlockquote):
+            data.setdefault("collapsed", bool(getattr(ent, "collapsed", False)))
         return ent.__class__(offset=offset, length=length, **data)
     except Exception:
         try:
+            if MessageEntityBlockquote and isinstance(ent, MessageEntityBlockquote):
+                return ent.__class__(
+                    offset=offset, length=length, collapsed=bool(getattr(ent, "collapsed", False))
+                )
             return ent.__class__(offset=offset, length=length)
         except Exception:
             return None
@@ -388,6 +395,98 @@ def _has_fold_entities(entities) -> bool:
     return False
 
 
+def _format_entities(entities) -> str:
+    if not entities:
+        return "[]"
+    out = []
+    for ent in entities:
+        try:
+            etype = ent.__class__.__name__
+            off = int(getattr(ent, "offset", 0))
+            length = int(getattr(ent, "length", 0))
+            extra = ""
+            if etype == "MessageEntityBlockquote":
+                extra = f", collapsed={bool(getattr(ent, 'collapsed', False))}"
+            out.append(f"{etype}(offset={off}, length={length}{extra})")
+        except Exception:
+            out.append(repr(ent))
+    return "[" + ", ".join(out) + "]"
+
+
+def _debug_print_fold_compare(kind: str, raw_text: str, raw_entities, processed_text: str, processed_entities):
+    if not DEBUG_FORWARD:
+        return
+    print("🔎 折叠块对比开始")
+    print(f"类型: {kind}")
+    print(f"原内容: {raw_text!r}")
+    print(f"原格式: {_format_entities(raw_entities)}")
+    print(f"转发内容: {processed_text!r}")
+    print(f"转发格式: {_format_entities(processed_entities)}")
+    print("🔎 折叠块对比结束")
+
+
+def _build_offset_map_by_diff(old_text: str, new_text: str) -> List[Any]:
+    if old_text is None or new_text is None:
+        return []
+    mapping = [None] * len(old_text)
+    matcher = difflib.SequenceMatcher(None, old_text, new_text, autojunk=False)
+    for tag, a1, a2, b1, b2 in matcher.get_opcodes():
+        if tag == "equal":
+            for i in range(a2 - a1):
+                mapping[a1 + i] = b1 + i
+        elif tag == "replace":
+            overlap = min(a2 - a1, b2 - b1)
+            for i in range(overlap):
+                mapping[a1 + i] = b1 + i
+        # delete/insert -> no direct mapping for removed/added chars
+    return mapping
+
+
+def _remap_entities_by_diff(old_text: str, new_text: str, entities) -> List[Any]:
+    if not entities:
+        return []
+    mapping = _build_offset_map_by_diff(old_text or "", new_text or "")
+    if not mapping:
+        return []
+    new_entities = []
+    new_len = len(new_text or "")
+    for ent in entities:
+        try:
+            start = int(getattr(ent, "offset", 0))
+            length = int(getattr(ent, "length", 0))
+        except Exception:
+            continue
+        if length <= 0:
+            continue
+        if start < 0:
+            start = 0
+        end = start + length
+        if end > len(mapping):
+            end = len(mapping)
+        if start >= end:
+            continue
+        mapped = [m for m in mapping[start:end] if m is not None]
+        if not mapped:
+            continue
+        new_start = min(mapped)
+        new_end = max(mapped) + 1
+        if new_start < 0:
+            new_start = 0
+        if new_end > new_len:
+            new_end = new_len
+        new_length = new_end - new_start
+        if new_length <= 0:
+            continue
+        cloned = _clone_entity(ent, new_start, new_length)
+        if cloned is not None:
+            new_entities.append(cloned)
+    try:
+        new_entities.sort(key=lambda e: int(getattr(e, "offset", 0)))
+    except Exception:
+        pass
+    return new_entities
+
+
 def _has_url(text: str, entities) -> bool:
     if entities:
         for ent in entities:
@@ -441,6 +540,13 @@ def _strip_ranges(text: str, ranges: List[tuple]) -> str:
 def _process_text_preserve_folds(text: str, rule: dict, entities) -> tuple[str, List[Any]]:
     if text is None:
         return text, []
+    original_text = text
+    cut_rule = rule.get("cut_words", "")
+    did_cut = False
+    if cut_rule:
+        text, entities = _apply_cut_with_entities(text, entities, cut_rule)
+        original_text = text
+        did_cut = True
     protected = _get_protected_ranges(entities)
     check_text = _strip_ranges(text, protected)
     include_words = rule.get("include_words") or []
@@ -453,67 +559,42 @@ def _process_text_preserve_folds(text: str, rule: dict, entities) -> tuple[str, 
             return "", []
 
     new_parts = []
-    new_entities = []
     cursor = 0
-    new_pos = 0
     for start, end in protected:
         # unprotected
         if cursor < start:
             seg = text[cursor:start]
             seg = _apply_replace(seg, rule.get("replace_words") or [])
-            seg = _apply_cut(seg, rule.get("cut_words", ""))
+            if not did_cut:
+                seg = _apply_cut(seg, cut_rule)
             if rule.get("clear_links"):
                 seg = _clear_links(seg)
             new_parts.append(seg)
-            new_pos += len(seg)
         # protected (fold/spoiler) — only apply replace words
         protected_text = text[start:end]
         protected_text = _apply_replace(protected_text, rule.get("replace_words") or [])
-        protected_text = _apply_cut(protected_text, rule.get("cut_words", ""))
+        if not did_cut:
+            protected_text = _apply_cut(protected_text, cut_rule)
         new_parts.append(protected_text)
-        if MessageEntityBlockquote:
-            collapsed = False
-            for ent in (entities or []):
-                if isinstance(ent, MessageEntityBlockquote):
-                    if ent.offset <= start < ent.offset + ent.length:
-                        collapsed = bool(getattr(ent, "collapsed", False))
-                        break
-            try:
-                new_entities.append(
-                    MessageEntityBlockquote(
-                        offset=new_pos, length=len(protected_text), collapsed=collapsed
-                    )
-                )
-            except Exception:
-                new_entities.append(MessageEntityBlockquote(offset=new_pos, length=len(protected_text)))
-        if MessageEntitySpoiler:
-            # spoiler only if original had spoiler covering this range
-            # add spoiler entity only when any spoiler intersects this protected range
-            has_spoiler = any(
-                isinstance(ent, MessageEntitySpoiler) and ent.offset <= start < ent.offset + ent.length
-                for ent in (entities or [])
-            )
-            if has_spoiler:
-                new_entities.append(MessageEntitySpoiler(offset=new_pos, length=len(protected_text)))
-        new_pos += len(protected_text)
         cursor = end
     # tail
     if cursor < len(text):
         seg = text[cursor:]
         seg = _apply_replace(seg, rule.get("replace_words") or [])
-        seg = _apply_cut(seg, rule.get("cut_words", ""))
+        if not did_cut:
+            seg = _apply_cut(seg, cut_rule)
         if rule.get("clear_links"):
             seg = _clear_links(seg)
         new_parts.append(seg)
     t = "".join(new_parts)
-    if rule.get("cut_words"):
-        t = _apply_cut(t, rule.get("cut_words", ""))
-        t, new_entities = _truncate_with_entities(t, new_entities, max_len=len(t))
     suffix = str(rule.get("suffix", "") or "")
     if suffix:
         t = _join_with_suffix(t, suffix)
     if t == "" and not include_words and not block_words and not rule.get("clear_links") and not rule.get("cut_words") and not rule.get("replace_words") and not suffix:
-        return None, new_entities
+        return None, []
+    new_entities = _remap_entities_by_diff(original_text, t, entities)
+    if t is not None:
+        t, new_entities = _truncate_with_entities(t, new_entities, max_len=len(t))
     return t, new_entities
 
 
@@ -701,6 +782,13 @@ async def _ensure_client(session_name: str, api_id: int, api_hash: str):
                 processed_text, processed_entities = _process_text_preserve_folds(
                     raw_text, rule, message.entities
                 )
+                _debug_print_fold_compare(
+                    "单条",
+                    raw_text,
+                    message.entities,
+                    processed_text,
+                    processed_entities,
+                )
             else:
                 if message.entities:
                     processed_text, processed_entities = _process_text_with_entities(
@@ -710,9 +798,11 @@ async def _ensure_client(session_name: str, api_id: int, api_hash: str):
                     processed_text = _process_text(raw_text, rule)
                     processed_entities = None
             if processed_text == "":
-                if DEBUG_FORWARD:
-                    print("⛔ 跳过: 过滤后文本为空")
-                continue
+                # If there's media but no text, still forward the media-only message.
+                if not message.media or raw_text:
+                    if DEBUG_FORWARD:
+                        print("⛔ 跳过: 过滤后文本为空")
+                    continue
             if processed_text is None:
                 if not message.media:
                     if DEBUG_FORWARD:
@@ -827,6 +917,13 @@ async def _ensure_client(session_name: str, api_id: int, api_hash: str):
                 processed_caption, processed_caption_entities = _process_text_preserve_folds(
                     raw_caption, rule, caption_msg.entities
                 )
+                _debug_print_fold_compare(
+                    "相册",
+                    raw_caption,
+                    caption_msg.entities,
+                    processed_caption,
+                    processed_caption_entities,
+                )
             else:
                 if caption_msg.entities:
                     processed_caption, processed_caption_entities = _process_text_with_entities(
@@ -836,9 +933,11 @@ async def _ensure_client(session_name: str, api_id: int, api_hash: str):
                     processed_caption = _process_text(raw_caption, rule)
                     processed_caption_entities = None
             if processed_caption == "":
-                if DEBUG_FORWARD:
-                    print("⛔ 跳过(相册): 过滤后文本为空")
-                continue
+                # If there's media but no caption, still forward the album.
+                if not files or raw_caption:
+                    if DEBUG_FORWARD:
+                        print("⛔ 跳过(相册): 过滤后文本为空")
+                    continue
             apply_processing = _needs_processing(rule)
             files = [m.media for m in messages if m.media]
             if not files:
