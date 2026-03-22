@@ -381,7 +381,8 @@ def create_app(bot_cfg: dict):
         five_minute_master_job_wrapper,
         interval=300,
     )
-    app.job_queue.run_once(start_telethon_forwarder_job, when=0)
+    # Delay a bit to avoid startup misfire on some PTB versions.
+    app.job_queue.run_once(start_telethon_forwarder_job, when=1)
 
     app.add_error_handler(error_handler)
 

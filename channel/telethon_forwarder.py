@@ -11,7 +11,13 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 
-from utils import load_json, is_super_admin, save_json, set_runtime_bot_name
+from utils import (
+    load_json,
+    is_super_admin,
+    save_json,
+    set_runtime_bot_name,
+    get_runtime_bot_name,
+)
 from channel.channel_forwarder import _is_active_subscription
 from channel.telethon_login import _get_api_creds
 
@@ -45,12 +51,45 @@ if TYPE_CHECKING:
     from telethon import TelegramClient as TelethonClient
 
 
-SESSION_CLIENTS: Dict[str, "TelethonClient"] = {}
-SESSION_RULES: Dict[str, List[dict]] = {}
+SESSION_CLIENTS_BY_BOT: Dict[str, Dict[str, "TelethonClient"]] = {}
+SESSION_RULES_BY_BOT: Dict[str, Dict[str, List[dict]]] = {}
 FORWARD_TASKS: Dict[str, asyncio.Task] = {}
-DEBUG_FORWARD = False
+DEBUG_FORWARD = True
 HISTORY_REQUESTS_FILE = "data/history_forward_requests.json"
 HISTORY_STATE_FILE = "data/history_forward_state.json"
+
+LINK_RE = re.compile(r"(?i)(https?://[^\s)\]}>]+|t\.me/[^\s)\]}>]+|www\.[^\s)\]}>]+)")
+
+
+def _entity_urls(entities) -> list:
+    urls = []
+    for ent in entities or []:
+        if MessageEntityTextUrl and isinstance(ent, MessageEntityTextUrl):
+            url = getattr(ent, "url", None)
+            if isinstance(url, str) and url:
+                urls.append(url)
+        elif getattr(ent, "url", None):
+            url = getattr(ent, "url", None)
+            if isinstance(url, str) and url:
+                urls.append(url)
+    return urls
+
+
+def _has_link(text: str, entities=None) -> bool:
+    for url in _entity_urls(entities):
+        if url:
+            return True
+    if not text:
+        return False
+    if LINK_RE.search(text):
+        return True
+    return False
+
+
+def _should_skip_by_links(rule: dict, text: str, entities=None) -> bool:
+    if rule.get("skip_links"):
+        return _has_link(text or "", entities)
+    return False
 
 
 def _join_with_suffix(text: str, suffix: str) -> str:
@@ -341,6 +380,7 @@ def _process_text_with_entities(text: str, rule: dict, entities) -> tuple[str, L
     if text is None:
         return text, []
     t = text
+    original_entities = list(entities or [])
     include_words = rule.get("include_words") or []
     block_words = rule.get("block_words") or []
     if include_words:
@@ -350,12 +390,18 @@ def _process_text_with_entities(text: str, rule: dict, entities) -> tuple[str, L
         if any(w and w in t for w in block_words):
             return "", []
     if rule.get("replace_words") or rule.get("clear_links"):
-        return _process_text(t, rule), []
+        processed = _process_text(t, rule)
+        # If text unchanged, keep original entities to preserve formatting.
+        if processed == t:
+            return t, list(entities or [])
+        return processed, []
     if rule.get("cut_words"):
         t, entities = _apply_cut_with_entities(t, entities, rule.get("cut_words", ""))
     suffix = str(rule.get("suffix", "") or "")
     if suffix:
         t = _join_with_suffix(t, suffix)
+    if t == text and original_entities:
+        return t, original_entities
     if t == "" and not include_words and not block_words and not rule.get("cut_words") and not suffix:
         return None, []
     return t, list(entities or [])
@@ -733,8 +779,9 @@ def _collect_rules() -> Dict[str, List[dict]]:
     return result
 
 
-async def _ensure_client(session_name: str, api_id: int, api_hash: str):
-    client = SESSION_CLIENTS.get(session_name)
+async def _ensure_client(bot_name: str, session_name: str, api_id: int, api_hash: str):
+    per_bot_clients = SESSION_CLIENTS_BY_BOT.setdefault(bot_name, {})
+    client = per_bot_clients.get(session_name)
     if client:
         return client
     session_path = os.path.join("sessions", session_name)
@@ -755,7 +802,7 @@ async def _ensure_client(session_name: str, api_id: int, api_hash: str):
         if getattr(event.message, "grouped_id", None):
             # 相册消息由 Album 处理
             return
-        rules = SESSION_RULES.get(session_name, [])
+        rules = SESSION_RULES_BY_BOT.get(bot_name, {}).get(session_name, [])
         if not rules:
             return
         chat_id = getattr(event, "chat_id", None)
@@ -778,6 +825,10 @@ async def _ensure_client(session_name: str, api_id: int, api_hash: str):
                 continue
             targets = rule.get("targets", []) or []
             raw_text = _get_message_text(message)
+            if _should_skip_by_links(rule, raw_text, message.entities):
+                if DEBUG_FORWARD:
+                    print("⛔ 跳过: 含链接或屏蔽域名")
+                continue
             if _has_fold_entities(message.entities):
                 processed_text, processed_entities = _process_text_preserve_folds(
                     raw_text, rule, message.entities
@@ -879,7 +930,7 @@ async def _ensure_client(session_name: str, api_id: int, api_hash: str):
             return
         if not getattr(event, "is_channel", False) or getattr(event, "is_group", False):
             return
-        rules = SESSION_RULES.get(session_name, [])
+        rules = SESSION_RULES_BY_BOT.get(bot_name, {}).get(session_name, [])
         if not rules:
             return
         chat_id = getattr(event, "chat_id", None)
@@ -913,6 +964,10 @@ async def _ensure_client(session_name: str, api_id: int, api_hash: str):
                     print("⛔ 跳过(相册): 类型过滤不匹配")
                 continue
             targets = rule.get("targets", []) or []
+            if _should_skip_by_links(rule, raw_caption, caption_msg.entities):
+                if DEBUG_FORWARD:
+                    print("⛔ 跳过(相册): 含链接或屏蔽域名")
+                continue
             if _has_fold_entities(caption_msg.entities):
                 processed_caption, processed_caption_entities = _process_text_preserve_folds(
                     raw_caption, rule, caption_msg.entities
@@ -990,12 +1045,13 @@ async def _ensure_client(session_name: str, api_id: int, api_hash: str):
         if state_changed:
             _save_history_state(state)
 
-    SESSION_CLIENTS[session_name] = client
+    per_bot_clients[session_name] = client
     return client
 
 
 async def _refresh_sessions(app):
-    set_runtime_bot_name(app.bot_data.get("name", ""))
+    bot_name = app.bot_data.get("name", "") or ""
+    set_runtime_bot_name(bot_name)
     api_id, api_hash = _get_api_creds()
     if not api_id or not api_hash:
         return
@@ -1005,18 +1061,18 @@ async def _refresh_sessions(app):
     #     print(f"🧭 协议号规则刷新: {summary}")
     # else:
     #     print("⚠️ 协议号规则为空")
-    SESSION_RULES.clear()
-    SESSION_RULES.update(rules_by_session)
+    SESSION_RULES_BY_BOT[bot_name] = rules_by_session
 
     active_sessions = set(rules_by_session.keys())
     for session_name in active_sessions:
-        await _ensure_client(session_name, api_id, api_hash)
+        await _ensure_client(bot_name, session_name, api_id, api_hash)
 
     # 清理不再需要的 session
-    for session_name in list(SESSION_CLIENTS.keys()):
+    per_bot_clients = SESSION_CLIENTS_BY_BOT.setdefault(bot_name, {})
+    for session_name in list(per_bot_clients.keys()):
         if session_name in active_sessions:
             continue
-        client = SESSION_CLIENTS.pop(session_name, None)
+        client = per_bot_clients.pop(session_name, None)
         if client:
             try:
                 await client.disconnect()
@@ -1039,7 +1095,8 @@ async def _process_history_requests():
             api_id, api_hash = _get_api_creds()
             if not api_id or not api_hash:
                 continue
-            client = await _ensure_client(session_name, api_id, api_hash)
+            bot_name = get_runtime_bot_name() or ""
+            client = await _ensure_client(bot_name, session_name, api_id, api_hash)
             if not client:
                 continue
             sources = rule.get("sources", []) or []
@@ -1079,6 +1136,8 @@ async def _process_history_requests():
                     if caption_msg is None:
                         caption_msg = group_msgs[0]
                     raw_caption = caption_msg.message or ""
+                    if _should_skip_by_links(rule, raw_caption, caption_msg.entities):
+                        return
                     if _has_fold_entities(caption_msg.entities):
                         processed_caption, processed_caption_entities = _process_text_preserve_folds(
                             raw_caption, rule, caption_msg.entities
@@ -1147,6 +1206,8 @@ async def _process_history_requests():
                     if int(message.id) in recent_ids:
                         continue
                     raw_text = message.message or ""
+                    if _should_skip_by_links(rule, raw_text, message.entities):
+                        continue
                     processed_entities = None
                     if message.entities:
                         processed_text, processed_entities = _process_text_with_entities(

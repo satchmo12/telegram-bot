@@ -17,6 +17,35 @@ TARGET_LAST_TS = {}
 
 SUBSCRIPTION_FILE = "data/subscriptions.json"
 
+LINK_RE = re.compile(r"(?i)(https?://[^\s)\]}>]+|t\.me/[^\s)\]}>]+|www\.[^\s)\]}>]+)")
+
+
+def _entity_urls(entities) -> list:
+    urls = []
+    for ent in entities or []:
+        url = getattr(ent, "url", None)
+        if isinstance(url, str) and url:
+            urls.append(url)
+    return urls
+
+
+def _has_link(text: str, entities=None) -> bool:
+    if entities:
+        for url in _entity_urls(entities):
+            if url:
+                return True
+    if not text:
+        return False
+    if LINK_RE.search(text):
+        return True
+    return False
+
+
+def _should_skip_by_links(rule: dict, text: str, entities=None) -> bool:
+    if rule.get("skip_links"):
+        return _has_link(text or "", entities)
+    return False
+
 
 def _is_active_subscription(user_id: str, username: Optional[str] = None) -> bool:
     if not user_id:
@@ -171,6 +200,15 @@ def _get_target_lock(target_id: int) -> asyncio.Lock:
     return lock
 
 
+def _media_group_should_skip(group_msgs, rule: dict) -> bool:
+    for msg in group_msgs or []:
+        text = getattr(msg, "text", None) or getattr(msg, "caption", None) or ""
+        entities = getattr(msg, "entities", None) if getattr(msg, "text", None) else getattr(msg, "caption_entities", None)
+        if _should_skip_by_links(rule, text, entities):
+            return True
+    return False
+
+
 async def _send_with_retry(
     target_id: int, send_coro, *, kind: str, src: str
 ):
@@ -238,6 +276,8 @@ async def _flush_media_group(
         await asyncio.sleep(MEDIA_GROUP_WAIT_SECONDS)
         group_msgs = MEDIA_GROUP_CACHE.pop(group_key, [])
         if group_msgs:
+            if _media_group_should_skip(group_msgs, rule):
+                return
             await process_media_group(group_msgs, targets, rule, context)
     except asyncio.CancelledError:
         return
@@ -332,6 +372,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if filter_type == "video" and not (msg.video or has_gif):
             continue
 
+        text = getattr(msg, "text", None) or getattr(msg, "caption", None) or ""
+        entities = getattr(msg, "entities", None) if getattr(msg, "text", None) else getattr(msg, "caption_entities", None)
+        if _should_skip_by_links(rule, text, entities):
+            continue
+
         # === MediaGroup 处理 ===
         media_group_id = getattr(msg, "media_group_id", None)
         if media_group_id:
@@ -349,7 +394,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # === 单条消息处理 ===
         targets = rule.get("targets", [])
-        text = getattr(msg, "text", None) or getattr(msg, "caption", None)
         src = _get_source_id_from_msg(msg)
         if msg.photo:
             caption = replace_links_and_submit(msg.caption or "", rule) if msg.caption else None
@@ -451,6 +495,11 @@ async def handle_user_forward(update: Update, context: ContextTypes.DEFAULT_TYPE
         if filter_type == "photo" and not (msg.photo or has_gif):
             continue
         if filter_type == "video" and not (msg.video or has_gif):
+            continue
+
+        text = getattr(msg, "text", None) or getattr(msg, "caption", None) or ""
+        entities = getattr(msg, "entities", None) if getattr(msg, "text", None) else getattr(msg, "caption_entities", None)
+        if _should_skip_by_links(rule, text, entities):
             continue
 
         targets = rule.get("targets", [])

@@ -483,6 +483,7 @@ def _new_rule_default(user_id: str, *, source_id=None, source_name: str = "", se
         "replace_group_name": "",
         "replace_submit_user": "",
         "clear_links": False,
+        "skip_links": False,
         "start_id": "",
         "end_id": "",
         "include_words": [],
@@ -735,6 +736,7 @@ def _build_edit_menu_keyboard(index: int) -> InlineKeyboardMarkup:
 def _build_rule_panel_keyboard(index: int, rule: dict) -> InlineKeyboardMarkup:
     enabled = bool(rule.get("enabled", True))
     clear_links = bool(rule.get("clear_links", False))
+    skip_links = bool(rule.get("skip_links", False))
     mode = str(rule.get("mode", "listen") or "listen").lower()
     en_on = "✅ 开启" if enabled else "开启"
     en_off = "✅ 关闭" if not enabled else "关闭"
@@ -755,6 +757,16 @@ def _build_rule_panel_keyboard(index: int, rule: dict) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(f"清除链接: {clear_on}", callback_data=f"{CALLBACK_PREFIX}:panel:clear_on:{index}"),
             InlineKeyboardButton(f"清除链接: {clear_off}", callback_data=f"{CALLBACK_PREFIX}:panel:clear_off:{index}"),
+        ],
+        [
+            InlineKeyboardButton(
+                f"含链接不转发: {'✅ 开启' if skip_links else '开启'}",
+                callback_data=f"{CALLBACK_PREFIX}:panel:skip_links_on:{index}",
+            ),
+            InlineKeyboardButton(
+                f"含链接不转发: {'✅ 关闭' if not skip_links else '关闭'}",
+                callback_data=f"{CALLBACK_PREFIX}:panel:skip_links_off:{index}",
+            ),
         ],
         [InlineKeyboardButton("设置开始和结束消息id", callback_data=f"{CALLBACK_PREFIX}:panel:range:{index}")],
         [InlineKeyboardButton("开始历史转发", callback_data=f"{CALLBACK_PREFIX}:panel:history_start:{index}")],
@@ -809,6 +821,7 @@ def _format_rule_panel_text(rule: dict, index: int) -> str:
         f"状态：{enabled}\n"
         f"任务类型：{mode}\n"
         f"清除链接：{clear_links}\n"
+        f"含链接不转发：{'开启' if bool(rule.get('skip_links', False)) else '关闭'}\n"
         f"监听频道：{src_label or sources}\n"
         f"目标频道：{tgt_label or targets}\n"
         f"协议号：{session_name}\n"
@@ -865,6 +878,7 @@ def _save_forward_rule(draft: dict, user_id: str, username: Optional[str] = None
         "replace_channel_user": draft.get("channel_user", ""),
         "replace_group_name": draft.get("group_name", ""),
         "replace_submit_user": draft.get("submit_user", ""),
+        "skip_links": bool(draft.get("skip_links", False)),
     }
     session_name = draft.get("session_name")
     if session_name:
@@ -910,6 +924,8 @@ def _update_rule_field(user_id: str, index: int, field: str, value) -> bool:
         rule["speed"] = value
     elif field == "show_contact":
         rule["show_contact"] = bool(value)
+    elif field == "skip_links":
+        rule["skip_links"] = bool(value)
     elif field == "source_id":
         rule["sources"] = [value]
     elif field == "target_id":
@@ -1095,6 +1111,10 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _update_rule_field(user_id, idx, "clear_links", True)
         elif sub == "clear_off":
             _update_rule_field(user_id, idx, "clear_links", False)
+        elif sub == "skip_links_on":
+            _update_rule_field(user_id, idx, "skip_links", True)
+        elif sub == "skip_links_off":
+            _update_rule_field(user_id, idx, "skip_links", False)
         elif sub == "history_start":
             requests = load_json(HISTORY_REQUESTS_FILE)
             if not isinstance(requests, list):
