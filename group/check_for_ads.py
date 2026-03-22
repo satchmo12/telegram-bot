@@ -239,6 +239,8 @@ def has_any_link(msg) -> bool:
 async def check_for_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_bot_admin(update, context):
         return  # 普通机器人只做日志/转发，不删
+    if update.channel_post:
+        return  # 频道消息不删除
     chat_id = str(update.effective_chat.id)
     group_config = get_group_whitelist(context).get(chat_id, {})
 
@@ -254,6 +256,9 @@ async def check_for_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.edited_message or update.channel_post
     if not msg:
         return
+    sender_chat = getattr(msg, "sender_chat", None)
+    if sender_chat and getattr(sender_chat, "type", None) and sender_chat.type.name == "CHANNEL":
+        return  # 频道发言不删除
 
     user = msg.from_user
     if not user:
