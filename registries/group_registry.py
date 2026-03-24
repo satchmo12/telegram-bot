@@ -53,7 +53,8 @@ def register_group_handlers(app):
     # 需要较后注册的群路由
     if is_feature_enabled(app, "user_tracker"):
         register_user_tracker_handlers(app)
-    # register_handle_force_handlers(app)
+    if is_feature_enabled(app, "force_subscribe"):
+        register_handle_force_handlers(app)
     
     # 有吞噬会掉的方法  app.add_handler(CallbackQueryHandler(menu_button_handler))
     if is_feature_enabled(app, "menu"):

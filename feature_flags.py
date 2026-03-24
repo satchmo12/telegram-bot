@@ -50,6 +50,7 @@ ALL_FEATURES: Set[str] = {
     "user_tracker",
     "menu",
     "channel_forward",
+    "force_subscribe",
 }
 
 

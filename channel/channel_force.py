@@ -1,23 +1,73 @@
 import json
 import os
 import time
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
+from telegram.constants import ChatMemberStatus
 from telegram.ext import (
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
 
 from command_router import register_command
-from utils import load_json, save_json
+from typing import Optional
+from utils import get_group_whitelist, load_json, save_json
 
 
 DATA_FILE = "data/force_subscribe.json"
+MUTE_FILE = "data/force_subscribe_mute.json"
 
 # 用户提醒冷却
 user_warn_cooldown = {}
 
+def _full_send_permissions() -> ChatPermissions:
+    return ChatPermissions(
+        can_send_messages=True,
+        can_send_audios=True,
+        can_send_documents=True,
+        can_send_photos=True,
+        can_send_videos=True,
+        can_send_video_notes=True,
+        can_send_voice_notes=True,
+        can_send_polls=True,
+        can_send_other_messages=True,
+    )
+
+def _load_mute_data() -> dict:
+    data = load_json(MUTE_FILE)
+    return data if isinstance(data, dict) else {}
+
+def _save_mute_data(data: dict):
+    save_json(MUTE_FILE, data)
+
+def _record_mute(chat_id: str, user_id: int, channel_username: str):
+    data = _load_mute_data()
+    chat_bucket = data.setdefault(chat_id, {})
+    chat_bucket[str(user_id)] = {
+        "channel": channel_username,
+        "ts": int(time.time()),
+    }
+    _save_mute_data(data)
+
+def _remove_mute_record(chat_id: str, user_id: int):
+    data = _load_mute_data()
+    chat_bucket = data.get(chat_id)
+    if not isinstance(chat_bucket, dict):
+        return
+    if str(user_id) in chat_bucket:
+        chat_bucket.pop(str(user_id), None)
+        if not chat_bucket:
+            data.pop(chat_id, None)
+        _save_mute_data(data)
+
+def _get_mute_record(chat_id: str, user_id: int) -> Optional[dict]:
+    data = _load_mute_data()
+    chat_bucket = data.get(chat_id)
+    if not isinstance(chat_bucket, dict):
+        return None
+    return chat_bucket.get(str(user_id))
 
 
 # ========= 设置强制频道 =========
@@ -65,6 +115,9 @@ async def check_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = str(update.effective_chat.id)
     user_id = update.effective_user.id
+    group_config = get_group_whitelist(context).get(chat_id, {})
+    if not isinstance(group_config, dict) or not group_config.get("force_subscribe", False):
+        return
 
     data = load_json(DATA_FILE)
 
@@ -75,36 +128,148 @@ async def check_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     channel_username = data[chat_id]
 
     try:
+        group_member = await context.bot.get_chat_member(update.effective_chat.id, user_id)
+        if group_member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}:
+            return
         member = await context.bot.get_chat_member(channel_username, user_id)
-
-        if member.status in ["left", "kicked"]:
-            await update.message.delete()
-
-            # 冷却机制
-            now = time.time()
-            if user_id in user_warn_cooldown:
-                if now - user_warn_cooldown[user_id] < 30:
-                    return
-
-            user_warn_cooldown[user_id] = now
-
-            keyboard = [
-                [
-                    InlineKeyboardButton(
-                        "📢 点击关注频道",
-                        url=f"https://t.me/{channel_username.replace('@','')}",
-                    )
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-
-            await update.message.reply_text(
-                "⚠️ 请先关注频道后再发言！",
-                reply_markup=reply_markup,
-            )
-
     except Exception as e:
         print("检测失败：", e)
+        return
+
+    if member.status in ["left", "kicked"]:
+        # 冷却机制
+        now = time.time()
+        if user_id in user_warn_cooldown:
+            if now - user_warn_cooldown[user_id] < 30:
+                return
+
+        user_warn_cooldown[user_id] = now
+
+        # 禁言并记录
+        try:
+            await context.bot.restrict_chat_member(
+                update.effective_chat.id,
+                user_id,
+                permissions=ChatPermissions(can_send_messages=False),
+            )
+            _record_mute(chat_id, user_id, channel_username)
+        except Exception as e:
+            print("禁言失败：", e)
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "📢 点击关注频道",
+                    url=f"https://t.me/{channel_username.replace('@','')}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "✅ 我已关注，解除禁言",
+                    callback_data=f"force_subscribe_check|{chat_id}|{user_id}",
+                )
+            ],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        try:
+            # 先发送提示，避免删除后 reply 失败
+            user = update.effective_user
+            mention = user.full_name if user else "该用户"
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"⚠️ {mention} 请先关注频道后再发言！关注后点击下方按钮解除禁言。",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            print("发送提示失败：", e)
+
+        try:
+            await update.message.delete()
+        except Exception as e:
+            # 删除失败也不影响提示
+            print("删除消息失败：", e)
+
+
+async def _try_unmute_if_followed(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, channel_username: str) -> bool:
+    try:
+        member = await context.bot.get_chat_member(channel_username, user_id)
+    except Exception as e:
+        print("检测失败：", e)
+        return False
+
+    if member.status in ["left", "kicked"]:
+        return False
+
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id,
+            user_id,
+            permissions=_full_send_permissions(),
+        )
+    except Exception as e:
+        print("解除禁言失败：", e)
+        return False
+    return True
+
+
+async def force_subscribe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    try:
+        _, chat_id_str, user_id_str = query.data.split("|", 2)
+        chat_id = int(chat_id_str)
+        target_user_id = int(user_id_str)
+    except Exception:
+        return
+
+    if query.from_user.id != target_user_id:
+        await query.answer("仅本人可操作。", show_alert=True)
+        return
+
+    record = _get_mute_record(str(chat_id), target_user_id)
+    if not record:
+        await query.answer("已解除或未记录。", show_alert=True)
+        return
+
+    channel_username = record.get("channel")
+    if not channel_username:
+        await query.answer("记录异常，请联系管理员。", show_alert=True)
+        return
+
+    ok = await _try_unmute_if_followed(context, chat_id, target_user_id, channel_username)
+    if ok:
+        _remove_mute_record(str(chat_id), target_user_id)
+        try:
+            if query.message:
+                await query.message.edit_reply_markup(reply_markup=None)
+        except Exception as e:
+            print("移除按钮失败：", e)
+        await query.answer("✅ 已解除禁言", show_alert=True)
+    else:
+        await query.answer("⚠️ 检测到仍未关注，请先关注频道。", show_alert=True)
+
+
+async def force_subscribe_sweep(context: ContextTypes.DEFAULT_TYPE):
+    data = _load_mute_data()
+    if not isinstance(data, dict) or not data:
+        return
+    for chat_id_str, users in list(data.items()):
+        if not isinstance(users, dict):
+            continue
+        chat_id = int(chat_id_str)
+        for uid_str, info in list(users.items()):
+            try:
+                user_id = int(uid_str)
+            except Exception:
+                continue
+            channel_username = (info or {}).get("channel")
+            if not channel_username:
+                continue
+            ok = await _try_unmute_if_followed(context, chat_id, user_id, channel_username)
+            if ok:
+                _remove_mute_record(chat_id_str, user_id)
 
 
 # ========= 主程序 =========
@@ -112,6 +277,11 @@ async def check_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def register_handle_force_handlers(app):
     app.add_handler(CommandHandler("setchannel", set_channel))
     app.add_handler(CommandHandler("clearchannel", clear_channel))
-    app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), check_message))
-
-
+    app.add_handler(CallbackQueryHandler(force_subscribe_callback, pattern=r"^force_subscribe_check\|"))
+    # 置于更前的 group，避免被同组 handler 阻断
+    app.add_handler(
+        MessageHandler(filters.ALL & (~filters.COMMAND), check_message),
+        group=-10,
+    )
+    # 10 分钟扫一次，自动解除已关注用户
+    app.job_queue.run_repeating(force_subscribe_sweep, interval=600, first=600)

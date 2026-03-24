@@ -518,4 +518,5 @@ async def handle_user_forward(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # 注册
 def register_handle_message_handlers(app):
-    app.add_handler(MessageHandler(filters.ALL, handle_message))
+    pass
+    # app.add_handler(MessageHandler(filters.ALL, handle_message))

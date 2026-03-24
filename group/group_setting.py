@@ -4,12 +4,13 @@ import time
 from typing import Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters, ApplicationHandlerStop
 
 from command_router import FEATURE_FRIENDS, register_command
-from utils import GROUP_LIST_FILE, get_group_whitelist, is_super_admin, safe_reply, save_json
+from utils import GROUP_LIST_FILE, get_group_whitelist, is_super_admin, safe_reply, save_json, load_json
 
 CALLBACK_PREFIX = "gcfg"
+FORCE_SUBSCRIBE_FILE = "data/force_subscribe.json"
 TOGGLE_FIELDS = [
     ("verify", "身份验证"),
     ("welcome", "入群欢迎"),
@@ -21,6 +22,7 @@ TOGGLE_FIELDS = [
     ("manor", "庄园系统"),
     (FEATURE_FRIENDS, "群好友功能"),
     ("active_speak_enabled", "主动说话"),
+    ("force_subscribe", "强制关注频道"),
 ]
 ACTIVE_SPEAK_MIN_INTERVAL = 1
 ACTIVE_SPEAK_MAX_INTERVAL = 1440
@@ -42,6 +44,23 @@ def _private_chat_url(context: ContextTypes.DEFAULT_TYPE) -> str:
 def _group_title(chat_id: str, cfg: dict) -> str:
     title = (cfg or {}).get("title", "") or (cfg or {}).get("username", "")
     return title or f"群 {chat_id}"
+
+def _get_force_channel(chat_id: str) -> str:
+    data = load_json(FORCE_SUBSCRIBE_FILE)
+    if not isinstance(data, dict):
+        return ""
+    return str(data.get(chat_id, "")).strip()
+
+
+def _set_force_channel(chat_id: str, channel_username: str):
+    data = load_json(FORCE_SUBSCRIBE_FILE)
+    if not isinstance(data, dict):
+        data = {}
+    if channel_username:
+        data[chat_id] = channel_username
+    else:
+        data.pop(chat_id, None)
+    save_json(FORCE_SUBSCRIBE_FILE, data)
 
 
 def _toggle_text(enabled: bool) -> str:
@@ -88,6 +107,8 @@ def _build_group_panel_text(chat_id: str, cfg: dict) -> str:
         f"广告推送：模式={'定时' if ad_mode == 'fixed' else '间隔'} "
         f"间隔={ad_interval} 分钟 定时={ad_times} 文案={ad_has_text}"
     )
+    force_channel = _get_force_channel(chat_id)
+    lines.append(f"强制关注频道：{force_channel if force_channel else '未设置'}")
     lines.append("")
     lines.append("仅群管理员或超级管理员可修改。")
     return "\n".join(lines)
@@ -105,6 +126,15 @@ def _build_group_panel_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardMarkup
                 )
             ]
         )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "📢 设置关注频道",
+                callback_data=f"{CALLBACK_PREFIX}:force_channel:{chat_id}",
+            )
+        ]
+    )
 
     spam_limit = int(cfg.get("spam_limit_max_per_minute", 10))
     rows.append(
@@ -525,6 +555,53 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             save_json(GROUP_LIST_FILE, data)
         return await _open_group_panel(query, context, chat_id_str, user_id)
 
+    if action == "force_channel" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        context.user_data["group_setting_stage"] = "force_channel"
+        context.user_data["group_setting_chat_id"] = chat_id_str
+        await query.answer()
+        return await query.edit_message_text(
+            "请输入要强制关注的频道用户名（如 @example）。\n"
+            "发送「清空」可移除当前设置。",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "🧹 清除",
+                            callback_data=f"{CALLBACK_PREFIX}:force_channel_clear:{chat_id_str}",
+                        ),
+                        InlineKeyboardButton(
+                            "⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:force_channel_back"
+                        ),
+                    ]
+                ]
+            ),
+        )
+    if action == "force_channel_clear" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        _set_force_channel(chat_id_str, "")
+        context.user_data.pop("group_setting_stage", None)
+        context.user_data.pop("group_setting_chat_id", None)
+        await query.answer("✅ 已清空", show_alert=False)
+        return await _open_group_panel(query, context, chat_id_str, user_id)
+    if action == "force_channel_back":
+        context.user_data.pop("group_setting_stage", None)
+        chat_id_str = context.user_data.pop("group_setting_chat_id", None)
+        await query.answer()
+        if chat_id_str:
+            return await _open_group_panel(query, context, chat_id_str, user_id)
+        return
+
     if action == "spam" and len(parts) >= 4:
         chat_id_str = parts[2]
         delta_raw = parts[3]
@@ -590,6 +667,49 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         return await query.answer("当前主动说话频率", show_alert=False)
 
 
+async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.effective_chat:
+        return
+    if update.effective_chat.type != "private":
+        return
+    stage = context.user_data.get("group_setting_stage")
+    if stage != "force_channel":
+        return
+
+    chat_id_str = context.user_data.get("group_setting_chat_id")
+    if not chat_id_str:
+        context.user_data.pop("group_setting_stage", None)
+        return
+
+    text = (update.message.text or "").strip()
+    if not text:
+        return
+
+    if text in {"清空", "取消", "关闭"}:
+        _set_force_channel(chat_id_str, "")
+        context.user_data.pop("group_setting_stage", None)
+        context.user_data.pop("group_setting_chat_id", None)
+        await update.message.reply_text("✅ 已清空强制关注频道设置。")
+    else:
+        if not text.startswith("@"):
+            text = f"@{text}"
+        _set_force_channel(chat_id_str, text)
+        context.user_data.pop("group_setting_stage", None)
+        context.user_data.pop("group_setting_chat_id", None)
+        await update.message.reply_text(f"✅ 已设置强制关注频道为：{text}")
+
+    data = get_group_whitelist(context)
+    cfg = data.get(chat_id_str, {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    keyboard = _build_group_panel_keyboard(chat_id_str, cfg)
+    await update.message.reply_text(
+        _build_group_panel_text(chat_id_str, cfg),
+        reply_markup=keyboard,
+        parse_mode="HTML",
+    )
+    raise ApplicationHandlerStop
+
 def register_group_setting_handlers(app):
     app.add_handler(CommandHandler("group_status", group_status))
     app.add_handler(CommandHandler("welcome", toggle_welcome))
@@ -599,3 +719,11 @@ def register_group_setting_handlers(app):
     app.add_handler(CommandHandler("toggle_manor", toggle_manor))
     app.add_handler(CommandHandler("group", group_help))
     app.add_handler(CallbackQueryHandler(group_setting_callback, pattern=rf"^{CALLBACK_PREFIX}:"))
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.TEXT & (~filters.COMMAND),
+            handle_group_setting_text,
+        )
+        ,
+        group=-5,
+    )
