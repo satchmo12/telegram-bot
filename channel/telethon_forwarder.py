@@ -54,7 +54,7 @@ if TYPE_CHECKING:
 SESSION_CLIENTS_BY_BOT: Dict[str, Dict[str, "TelethonClient"]] = {}
 SESSION_RULES_BY_BOT: Dict[str, Dict[str, List[dict]]] = {}
 FORWARD_TASKS: Dict[str, asyncio.Task] = {}
-DEBUG_FORWARD = True
+DEBUG_FORWARD = False
 HISTORY_REQUESTS_FILE = "data/history_forward_requests.json"
 HISTORY_STATE_FILE = "data/history_forward_state.json"
 

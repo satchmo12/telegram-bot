@@ -24,9 +24,11 @@ async def check_and_restrict_scam_user(update: Update, context: ContextTypes.DEF
     if old_name:
         # 自动更新名字
         ensure_user_exists(chat.id, user.id, display_name)
-        await update.message.reply_text(
-            f"📛 用户昵称已修改：\n旧昵称：{old_name}\n新昵称：{display_name}"
-        )
+        group_cfg = get_group_whitelist(context).get(str(chat.id), {})
+        if bool(group_cfg.get("name_change_notice", False)):
+            await update.message.reply_text(
+                f"📛 用户昵称已修改：\n旧昵称：{old_name}\n新昵称：{display_name}"
+            )
 
     # 忽略非群组和机器人的自身
     if not chat or not chat.type.endswith("group"):

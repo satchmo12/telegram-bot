@@ -134,6 +134,14 @@ def _get_user_config_file(context: ContextTypes.DEFAULT_TYPE) -> str:
     return context.user_data.get("channel_config_file") or FORWARD_USER_CONFIG_FILE
 
 
+def _is_bot_config(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    return _get_user_config_file(context) == FORWARD_USER_CONFIG_BOT_FILE
+
+
+def _show_session(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    return not _is_bot_config(context)
+
+
 def _load_user_forward_config(context: ContextTypes.DEFAULT_TYPE) -> dict:
     data = load_json(_get_user_config_file(context))
     if not isinstance(data, dict):
@@ -331,7 +339,7 @@ async def _channel_config_entry_core(
         update,
         context,
         "请选择操作：\n\n“新建配置”会按步骤引导填写频道名称、ID、任务类型、任务模式等。",
-        reply_markup=_with_start_back(context, _build_main_menu_keyboard()),
+        reply_markup=_with_start_back(context, _build_main_menu_keyboard(context)),
     )
 
 
@@ -553,8 +561,8 @@ def start_channel_config_new(
     idx = _create_rule(context, user_id, session_name=session_name or "")
     rules = _get_user_rules(context, user_id)
     rule = rules[idx] if idx >= 0 and idx < len(rules) else {}
-    text = _format_rule_panel_text(rule, idx)
-    return text, _build_rule_panel_keyboard(idx, rule)
+    text = _format_rule_panel_text(context, rule, idx)
+    return text, _build_rule_panel_keyboard(context, idx, rule)
 
 
 def _clear_history_requests(user_id: str, rule_index: int) -> None:
@@ -594,8 +602,8 @@ def start_channel_config_with_source(
     )
     rules = _get_user_rules(context, user_id)
     rule = rules[idx] if idx >= 0 and idx < len(rules) else {}
-    text = _format_rule_panel_text(rule, idx)
-    return text, _build_rule_panel_keyboard(idx, rule)
+    text = _format_rule_panel_text(context, rule, idx)
+    return text, _build_rule_panel_keyboard(context, idx, rule)
 
 
 def _build_filter_keyboard():
@@ -705,7 +713,7 @@ def _with_start_back(context: ContextTypes.DEFAULT_TYPE, keyboard: InlineKeyboar
 def _build_rule_list_view(context: ContextTypes.DEFAULT_TYPE, user_id: str) -> tuple[str, InlineKeyboardMarkup]:
     rules = _get_user_rules(context, user_id)
     if not rules:
-        return "暂无配置记录。", _build_main_menu_keyboard()
+        return "暂无配置记录。", _build_main_menu_keyboard(context)
     lines = ["当前配置："]
     for idx, r in enumerate(rules, start=1):
         name = r.get("name", "")
@@ -718,11 +726,16 @@ def _build_rule_list_view(context: ContextTypes.DEFAULT_TYPE, user_id: str) -> t
         enabled = bool(r.get("enabled", True))
         mode = str(r.get("mode", "listen") or "listen").lower()
         mode_label = MODE_LABELS.get(mode, mode)
-        session_name = r.get("session_name", "")
-        session_label = _get_session_label(session_name) if session_name else "未设置"
-        lines.append(
-            f"{idx}. {name} | {src_label} → {tgt_label} | {'开启' if enabled else '关闭'} | {mode_label} | {session_label}"
-        )
+        if _show_session(context):
+            session_name = r.get("session_name", "")
+            session_label = _get_session_label(session_name) if session_name else "未设置"
+            lines.append(
+                f"{idx}. {name} | {src_label} → {tgt_label} | {'开启' if enabled else '关闭'} | {mode_label} | {session_label}"
+            )
+        else:
+            lines.append(
+                f"{idx}. {name} | {src_label} → {tgt_label} | {'开启' if enabled else '关闭'} | {mode_label}"
+            )
     keyboard_rows = []
     for idx in range(1, len(rules) + 1):
         keyboard_rows.append(
@@ -740,37 +753,43 @@ def _build_rule_list_view(context: ContextTypes.DEFAULT_TYPE, user_id: str) -> t
     return "\n".join(lines), InlineKeyboardMarkup(keyboard_rows)
 
 
-def _build_main_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("➕ 添加规则", callback_data=f"{CALLBACK_PREFIX}:new")],
-            [InlineKeyboardButton("📄 规则列表", callback_data=f"{CALLBACK_PREFIX}:list")],
-            [InlineKeyboardButton("❓ 帮助", callback_data=f"{CALLBACK_PREFIX}:help")],
-            [InlineKeyboardButton("🔁 切换小号", callback_data=f"{CALLBACK_PREFIX}:choose_session")],
-        ]
-    )
+def _build_main_menu_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("➕ 添加规则", callback_data=f"{CALLBACK_PREFIX}:new")],
+        [InlineKeyboardButton("📄 规则列表", callback_data=f"{CALLBACK_PREFIX}:list")],
+        [InlineKeyboardButton("❓ 帮助", callback_data=f"{CALLBACK_PREFIX}:help")],
+    ]
+    if _show_session(context):
+        rows.append([InlineKeyboardButton("🔁 切换小号", callback_data=f"{CALLBACK_PREFIX}:choose_session")])
+    return InlineKeyboardMarkup(rows)
 
 
-def _build_edit_menu_keyboard(index: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("✏️ 频道名称", callback_data=f"{CALLBACK_PREFIX}:field:{index}:name")],
-            [InlineKeyboardButton("✏️ 搬运频道ID", callback_data=f"{CALLBACK_PREFIX}:field:{index}:source_id")],
-            [InlineKeyboardButton("✏️ 目标频道ID", callback_data=f"{CALLBACK_PREFIX}:field:{index}:target_id")],
-            [InlineKeyboardButton("✏️ 任务模式", callback_data=f"{CALLBACK_PREFIX}:field:{index}:mode")],
-            [InlineKeyboardButton("✏️ 任务类型", callback_data=f"{CALLBACK_PREFIX}:field:{index}:filter")],
-            [InlineKeyboardButton("✏️ 协议号/小号", callback_data=f"{CALLBACK_PREFIX}:field:{index}:session_name")],
-            [InlineKeyboardButton("开关切换", callback_data=f"{CALLBACK_PREFIX}:toggle_enabled:{index}")],
-            [InlineKeyboardButton("联系方式切换", callback_data=f"{CALLBACK_PREFIX}:toggle_contact:{index}")],
-            [InlineKeyboardButton("✏️ 频道用户名", callback_data=f"{CALLBACK_PREFIX}:field:{index}:channel_user")],
-            [InlineKeyboardButton("✏️ 群名", callback_data=f"{CALLBACK_PREFIX}:field:{index}:group_name")],
-            [InlineKeyboardButton("✏️ 投稿用户名", callback_data=f"{CALLBACK_PREFIX}:field:{index}:submit_user")],
-            [InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:back")],
-        ]
-    )
+def _build_edit_menu_keyboard(
+    context: ContextTypes.DEFAULT_TYPE, index: int
+) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("✏️ 频道名称", callback_data=f"{CALLBACK_PREFIX}:field:{index}:name")],
+        [InlineKeyboardButton("✏️ 搬运频道ID", callback_data=f"{CALLBACK_PREFIX}:field:{index}:source_id")],
+        [InlineKeyboardButton("✏️ 目标频道ID", callback_data=f"{CALLBACK_PREFIX}:field:{index}:target_id")],
+        [InlineKeyboardButton("✏️ 任务模式", callback_data=f"{CALLBACK_PREFIX}:field:{index}:mode")],
+        [InlineKeyboardButton("✏️ 任务类型", callback_data=f"{CALLBACK_PREFIX}:field:{index}:filter")],
+    ]
+    if _show_session(context):
+        rows.append([InlineKeyboardButton("✏️ 协议号/小号", callback_data=f"{CALLBACK_PREFIX}:field:{index}:session_name")])
+    rows += [
+        [InlineKeyboardButton("开关切换", callback_data=f"{CALLBACK_PREFIX}:toggle_enabled:{index}")],
+        [InlineKeyboardButton("联系方式切换", callback_data=f"{CALLBACK_PREFIX}:toggle_contact:{index}")],
+        [InlineKeyboardButton("✏️ 频道用户名", callback_data=f"{CALLBACK_PREFIX}:field:{index}:channel_user")],
+        [InlineKeyboardButton("✏️ 群名", callback_data=f"{CALLBACK_PREFIX}:field:{index}:group_name")],
+        [InlineKeyboardButton("✏️ 投稿用户名", callback_data=f"{CALLBACK_PREFIX}:field:{index}:submit_user")],
+        [InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:back")],
+    ]
+    return InlineKeyboardMarkup(rows)
 
 
-def _build_rule_panel_keyboard(index: int, rule: dict) -> InlineKeyboardMarkup:
+def _build_rule_panel_keyboard(
+    context: ContextTypes.DEFAULT_TYPE, index: int, rule: dict
+) -> InlineKeyboardMarkup:
     enabled = bool(rule.get("enabled", True))
     clear_links = bool(rule.get("clear_links", False))
     skip_links = bool(rule.get("skip_links", False))
@@ -811,7 +830,11 @@ def _build_rule_panel_keyboard(index: int, rule: dict) -> InlineKeyboardMarkup:
             InlineKeyboardButton("设置监听频道id", callback_data=f"{CALLBACK_PREFIX}:panel:source:{index}"),
             InlineKeyboardButton("设置目标频道id", callback_data=f"{CALLBACK_PREFIX}:panel:target:{index}"),
         ],
-        [InlineKeyboardButton("设置协议号/小号", callback_data=f"{CALLBACK_PREFIX}:panel:session:{index}")],
+        *(
+            [[InlineKeyboardButton("设置协议号/小号", callback_data=f"{CALLBACK_PREFIX}:panel:session:{index}")]]
+            if _show_session(context)
+            else []
+        ),
         [InlineKeyboardButton("设置包含词", callback_data=f"{CALLBACK_PREFIX}:panel:include:{index}")],
         [
             InlineKeyboardButton("设置替换词", callback_data=f"{CALLBACK_PREFIX}:panel:replace:{index}"),
@@ -830,7 +853,9 @@ def _build_rule_panel_keyboard(index: int, rule: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def _format_rule_panel_text(rule: dict, index: int) -> str:
+def _format_rule_panel_text(
+    context: ContextTypes.DEFAULT_TYPE, rule: dict, index: int
+) -> str:
     name = rule.get("name", "") or f"规则 {index + 1}"
     enabled = "开启" if bool(rule.get("enabled", True)) else "关闭"
     mode = MODE_LABELS.get(str(rule.get("mode", "listen")), "监听消息")
@@ -853,27 +878,31 @@ def _format_rule_panel_text(rule: dict, index: int) -> str:
     media_replace = rule.get("media_replace", "")
     speed = rule.get("speed", "")
     session_name = rule.get("session_name", "")
-    return (
-        f"规则：{name}\n"
-        f"状态：{enabled}\n"
-        f"任务类型：{mode}\n"
-        f"清除链接：{clear_links}\n"
-        f"含链接不转发：{'开启' if bool(rule.get('skip_links', False)) else '关闭'}\n"
-        f"监听频道：{src_label or sources}\n"
-        f"目标频道：{tgt_label or targets}\n"
-        f"协议号：{session_name}\n"
-        f"开始/结束消息ID：{start_id} / {end_id}\n"
-        f"包含词：{include_words}\n"
-        f"屏蔽词：{block_words}\n"
-        f"替换词：{replace_words}\n"
-        f"截取词：{cut_words}\n"
-        f"自定义后缀：{suffix}\n"
-        f"媒体替换：{media_replace}\n"
-        f"消息处理速度：{speed}"
-    )
+    lines = [
+        f"规则：{name}",
+        f"状态：{enabled}",
+        f"任务类型：{mode}",
+        f"清除链接：{clear_links}",
+        f"含链接不转发：{'开启' if bool(rule.get('skip_links', False)) else '关闭'}",
+        f"监听频道：{src_label or sources}",
+        f"目标频道：{tgt_label or targets}",
+    ]
+    if _show_session(context):
+        lines.append(f"协议号：{session_name}")
+    lines += [
+        f"开始/结束消息ID：{start_id} / {end_id}",
+        f"包含词：{include_words}",
+        f"屏蔽词：{block_words}",
+        f"替换词：{replace_words}",
+        f"截取词：{cut_words}",
+        f"自定义后缀：{suffix}",
+        f"媒体替换：{media_replace}",
+        f"消息处理速度：{speed}",
+    ]
+    return "\n".join(lines)
 
 
-def _format_draft_summary(draft: dict) -> str:
+def _format_draft_summary(context: ContextTypes.DEFAULT_TYPE, draft: dict) -> str:
     show_contact = bool(draft.get("show_contact", True))
     enabled = bool(draft.get("enabled", True))
     mode = str(draft.get("mode", "listen") or "listen").lower()
@@ -896,7 +925,7 @@ def _format_draft_summary(draft: dict) -> str:
         f"频道用户名：{draft.get('channel_user', '')}\n"
         f"群名：{draft.get('group_name', '')}\n"
         f"投稿用户名：{draft.get('submit_user', '')}"
-        + (f"\n协议号：{session_name}" if session_name else "")
+        + (f"\n协议号：{session_name}" if session_name and _show_session(context) else "")
     )
 
 
@@ -1012,11 +1041,20 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = query.data.split(":")
     action = parts[1] if len(parts) > 1 else ""
 
+    if action == "back":
+        # 默认回到协议号配置视图
+        context.user_data["channel_config_file"] = FORWARD_USER_CONFIG_FILE
+
     if action == "choose_session":
+        if _is_bot_config(context):
+            return await query.edit_message_text(
+                "机器人转发无需选择小号。",
+                reply_markup=_with_start_back(context, _build_main_menu_keyboard(context)),
+            )
         sessions = _list_accessible_sessions(context, update.effective_user)
         if not sessions:
             return await query.edit_message_text(
-                "暂无可用小号。", reply_markup=_with_start_back(context, _build_main_menu_keyboard())
+                "暂无可用小号。", reply_markup=_with_start_back(context, _build_main_menu_keyboard(context))
             )
         context.user_data["channel_config_session_select"] = {"next": "main"}
         return await query.edit_message_text(
@@ -1024,12 +1062,26 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=_with_start_back(context, _build_session_select_keyboard(sessions)),
         )
 
+    if action == "bot":
+        context.user_data["channel_config_file"] = FORWARD_USER_CONFIG_BOT_FILE
+        context.user_data.pop("channel_config_default_session", None)
+        context.user_data.pop("channel_config_session_select", None)
+        return await query.edit_message_text(
+            "请选择操作：\n\n“新建配置”会按步骤引导填写频道名称、ID、任务类型、任务模式等。",
+            reply_markup=_with_start_back(context, _build_main_menu_keyboard(context)),
+        )
+
     if action == "pick_session" and len(parts) >= 3:
+        if _is_bot_config(context):
+            return await query.edit_message_text(
+                "机器人转发无需选择小号。",
+                reply_markup=_with_start_back(context, _build_main_menu_keyboard(context)),
+            )
         session_name = parts[2]
         sessions = _list_accessible_sessions(context, update.effective_user)
         if session_name not in sessions:
             return await query.edit_message_text(
-                "❗ 小号无效或无权限。", reply_markup=_with_start_back(context, _build_main_menu_keyboard())
+                "❗ 小号无效或无权限。", reply_markup=_with_start_back(context, _build_main_menu_keyboard(context))
             )
         context.user_data["channel_config_default_session"] = session_name
         pending = context.user_data.pop("channel_config_session_select", {}) or {}
@@ -1042,8 +1094,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rules = _get_user_rules(context, user_id)
             rule = rules[idx] if 0 <= idx < len(rules) else {}
             return await query.edit_message_text(
-                "✅ 已更新协议号。\n\n" + _format_rule_panel_text(rule, idx),
-                reply_markup=_build_rule_panel_keyboard(idx, rule),
+                "✅ 已更新协议号。\n\n" + _format_rule_panel_text(context, rule, idx),
+                reply_markup=_build_rule_panel_keyboard(context, idx, rule),
             )
         if pending.get("next") == "new":
             user_id = str(update.effective_user.id)
@@ -1051,12 +1103,12 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rules = _get_user_rules(context, user_id)
             rule = rules[idx] if idx >= 0 and idx < len(rules) else {}
             return await query.edit_message_text(
-                _format_rule_panel_text(rule, idx),
-                reply_markup=_build_rule_panel_keyboard(idx, rule),
+                _format_rule_panel_text(context, rule, idx),
+                reply_markup=_build_rule_panel_keyboard(context, idx, rule),
             )
         return await query.edit_message_text(
             f"已选择小号：{_get_session_label(session_name)}\n请选择操作：",
-            reply_markup=_with_start_back(context, _build_main_menu_keyboard()),
+            reply_markup=_with_start_back(context, _build_main_menu_keyboard(context)),
         )
 
     if action == "new":
@@ -1067,20 +1119,22 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return await query.edit_message_text(
                     f"⚠️ 订阅会员最多可配置 {SUBSCRIBER_MAX_RULES} 条规则。"
                 )
-        sessions = _list_accessible_sessions(context, update.effective_user)
-        session_name = context.user_data.get("channel_config_default_session", "")
-        if sessions and not session_name:
-            context.user_data["channel_config_session_select"] = {"next": "new"}
-            return await query.edit_message_text(
-                "请选择要配置的小号：",
-                reply_markup=_with_start_back(context, _build_session_select_keyboard(sessions)),
-            )
+        session_name = ""
+        if not _is_bot_config(context):
+            sessions = _list_accessible_sessions(context, update.effective_user)
+            session_name = context.user_data.get("channel_config_default_session", "")
+            if sessions and not session_name:
+                context.user_data["channel_config_session_select"] = {"next": "new"}
+                return await query.edit_message_text(
+                    "请选择要配置的小号：",
+                    reply_markup=_with_start_back(context, _build_session_select_keyboard(sessions)),
+                )
         idx = _create_rule(context, user_id, session_name=session_name or "")
         rules = _get_user_rules(context, user_id)
         rule = rules[idx] if idx >= 0 and idx < len(rules) else {}
         return await query.edit_message_text(
-            _format_rule_panel_text(rule, idx),
-            reply_markup=_build_rule_panel_keyboard(idx, rule),
+            _format_rule_panel_text(context, rule, idx),
+            reply_markup=_build_rule_panel_keyboard(context, idx, rule),
         )
 
     if action == "list":
@@ -1090,11 +1144,11 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "cancel":
         _clear_wizard(context)
-        return await query.edit_message_text("已取消。", reply_markup=_with_start_back(context, _build_main_menu_keyboard()))
+        return await query.edit_message_text("已取消。", reply_markup=_with_start_back(context, _build_main_menu_keyboard(context)))
 
     if action == "back":
         sessions = _list_accessible_sessions(context, update.effective_user)
-        if sessions:
+        if sessions and _show_session(context):
             context.user_data["channel_config_session_select"] = {"next": "main"}
             return await query.edit_message_text(
                 "请选择要配置的小号：",
@@ -1102,7 +1156,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return await query.edit_message_text(
             "请选择操作：\n\n“新建配置”会按步骤引导填写频道名称、ID、任务类型、任务模式等。",
-            reply_markup=_with_start_back(context, _build_main_menu_keyboard()),
+            reply_markup=_with_start_back(context, _build_main_menu_keyboard(context)),
         )
 
     if action == "help":
@@ -1118,8 +1172,12 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "8. 频道用户名/群名/投稿用户名：用于替换文本中的联系方式。\n"
             "9. 协议号/小号：用于指定使用哪个登录的小号执行转发。\n"
         )
+        if not _show_session(context):
+            help_text = help_text.replace(
+                "9. 协议号/小号：用于指定使用哪个登录的小号执行转发。\n", ""
+            )
         return await query.edit_message_text(
-            help_text, reply_markup=_with_start_back(context, _build_main_menu_keyboard())
+            help_text, reply_markup=_with_start_back(context, _build_main_menu_keyboard(context))
         )
 
     if action == "panel" and len(parts) >= 4:
@@ -1136,8 +1194,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if sub == "open":
             return await query.edit_message_text(
-                _format_rule_panel_text(rule, idx),
-                reply_markup=_build_rule_panel_keyboard(idx, rule),
+                _format_rule_panel_text(context, rule, idx),
+                reply_markup=_build_rule_panel_keyboard(context, idx, rule),
             )
         if sub == "enabled_on":
             _update_rule_field(context, user_id, idx, "enabled", True)
@@ -1171,6 +1229,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             save_json(HISTORY_REQUESTS_FILE, requests)
         elif sub == "session":
+            if not _show_session(context):
+                return await query.edit_message_text("机器人转发无需设置小号。")
             sessions = _list_accessible_sessions(context, update.effective_user)
             if not sessions:
                 return await query.edit_message_text("暂无可用小号。")
@@ -1205,8 +1265,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rules = _get_user_rules(context, user_id)
         rule = rules[idx]
         return await query.edit_message_text(
-            _format_rule_panel_text(rule, idx),
-            reply_markup=_build_rule_panel_keyboard(idx, rule),
+            _format_rule_panel_text(context, rule, idx),
+            reply_markup=_build_rule_panel_keyboard(context, idx, rule),
         )
 
     if action == "filter" and len(parts) >= 3:
@@ -1264,8 +1324,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             state["stage"] = "edit_menu"
             return await query.edit_message_text(
-                "✅ 已更新开启状态。\n\n" + _format_draft_summary(draft),
-                reply_markup=_build_edit_menu_keyboard(idx),
+                "✅ 已更新开启状态。\n\n" + _format_draft_summary(context, draft),
+                reply_markup=_build_edit_menu_keyboard(context, idx),
             )
 
         state["draft"]["enabled"] = not bool(state["draft"].get("enabled", True))
@@ -1325,8 +1385,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             state["stage"] = "edit_menu"
             return await query.edit_message_text(
-                "✅ 已更新任务模式。\n\n" + _format_draft_summary(draft),
-                reply_markup=_build_edit_menu_keyboard(idx),
+                "✅ 已更新任务模式。\n\n" + _format_draft_summary(context, draft),
+                reply_markup=_build_edit_menu_keyboard(context, idx),
             )
 
         state["draft"]["mode"] = mode
@@ -1382,8 +1442,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             state["stage"] = "edit_menu"
             return await query.edit_message_text(
-                "✅ 已更新显示设置。\n\n" + _format_draft_summary(draft),
-                reply_markup=_build_edit_menu_keyboard(idx),
+                "✅ 已更新显示设置。\n\n" + _format_draft_summary(context, draft),
+                reply_markup=_build_edit_menu_keyboard(context, idx),
             )
 
         state["draft"]["show_contact"] = not bool(state["draft"].get("show_contact", True))
@@ -1413,7 +1473,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("❌ 取消", callback_data=f"{CALLBACK_PREFIX}:cancel")],
             ]
         )
-        return await query.edit_message_text(_format_draft_summary(state["draft"]), reply_markup=keyboard)
+        return await query.edit_message_text(_format_draft_summary(context, state["draft"]), reply_markup=keyboard)
 
     if action == "save":
         state = context.user_data.get("channel_config")
@@ -1435,7 +1495,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _clear_wizard(context)
         return await query.edit_message_text(
             "✅ 已保存频道配置。",
-            reply_markup=_build_main_menu_keyboard(),
+            reply_markup=_build_main_menu_keyboard(context),
         )
 
     if action == "del" and len(parts) >= 3:
@@ -1484,8 +1544,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         context.user_data["channel_config"] = {"stage": "edit_menu", "draft": draft}
         return await query.edit_message_text(
-            _format_draft_summary(draft),
-            reply_markup=_build_edit_menu_keyboard(idx),
+            _format_draft_summary(context, draft),
+            reply_markup=_build_edit_menu_keyboard(context, idx),
         )
 
     if action == "field" and len(parts) >= 4:
@@ -1553,8 +1613,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         context.user_data["channel_config"] = {"stage": "edit_menu", "draft": draft}
         return await query.edit_message_text(
-            "✅ 已更新任务类型。\n\n" + _format_draft_summary(draft),
-            reply_markup=_build_edit_menu_keyboard(idx),
+            "✅ 已更新任务类型。\n\n" + _format_draft_summary(context, draft),
+            reply_markup=_build_edit_menu_keyboard(context, idx),
         )
 
     if action == "panel_back" and len(parts) >= 3:
@@ -1568,8 +1628,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await query.edit_message_text("❗ 无效的规则序号。")
         rule = rules[idx]
         return await query.edit_message_text(
-            _format_rule_panel_text(rule, idx),
-            reply_markup=_build_rule_panel_keyboard(idx, rule),
+            _format_rule_panel_text(context, rule, idx),
+            reply_markup=_build_rule_panel_keyboard(context, idx, rule),
         )
 
     if action == "panel_cancel" and len(parts) >= 3:
@@ -1583,8 +1643,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await query.edit_message_text("❗ 无效的规则序号。")
         rule = rules[idx]
         return await query.edit_message_text(
-            _format_rule_panel_text(rule, idx),
-            reply_markup=_build_rule_panel_keyboard(idx, rule),
+            _format_rule_panel_text(context, rule, idx),
+            reply_markup=_build_rule_panel_keyboard(context, idx, rule),
         )
 
 
@@ -1779,8 +1839,8 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         rules = _get_user_rules(context, user_id)
         rule = rules[idx] if idx >= 0 and idx < len(rules) else {}
         await update.message.reply_text(
-            _format_rule_panel_text(rule, idx),
-            reply_markup=_build_rule_panel_keyboard(idx, rule),
+            _format_rule_panel_text(context, rule, idx),
+            reply_markup=_build_rule_panel_keyboard(context, idx, rule),
         )
         return True
 
@@ -1892,7 +1952,7 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 [InlineKeyboardButton("❌ 取消", callback_data=f"{CALLBACK_PREFIX}:cancel")],
             ]
         )
-        await update.message.reply_text(_format_draft_summary(draft), reply_markup=keyboard)
+        await update.message.reply_text(_format_draft_summary(context, draft), reply_markup=keyboard)
         return True
 
     if isinstance(stage, str) and stage.startswith("edit_"):
@@ -1954,8 +2014,8 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         state["stage"] = "edit_menu"
         await update.message.reply_text(
-            "✅ 已更新。\n\n" + _format_draft_summary(draft),
-            reply_markup=_build_edit_menu_keyboard(idx),
+            "✅ 已更新。\n\n" + _format_draft_summary(context, draft),
+            reply_markup=_build_edit_menu_keyboard(context, idx),
         )
         return True
 

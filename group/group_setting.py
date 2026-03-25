@@ -24,6 +24,7 @@ TOGGLE_FIELDS = [
     (FEATURE_FRIENDS, "群好友功能"),
     ("active_speak_enabled", "主动说话"),
     ("force_subscribe", "强制关注频道"),
+    ("name_change_notice", "用户名变更提示"),
 ]
 ACTIVE_SPEAK_MIN_INTERVAL = 1
 ACTIVE_SPEAK_MAX_INTERVAL = 1440
@@ -117,16 +118,17 @@ def _build_group_panel_text(chat_id: str, cfg: dict) -> str:
 
 def _build_group_panel_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardMarkup:
     rows = []
+    toggle_buttons = []
     for key, label in TOGGLE_FIELDS:
         is_on = bool(cfg.get(key, False))
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"{'✅' if is_on else '🚫'} {label}",
-                    callback_data=f"{CALLBACK_PREFIX}:toggle:{chat_id}:{key}",
-                )
-            ]
+        toggle_buttons.append(
+            InlineKeyboardButton(
+                text=f"{'✅' if is_on else '🚫'} {label}",
+                callback_data=f"{CALLBACK_PREFIX}:toggle:{chat_id}:{key}",
+            )
         )
+    for i in range(0, len(toggle_buttons), 2):
+        rows.append(toggle_buttons[i : i + 2])
 
     rows.append(
         [
@@ -134,6 +136,30 @@ def _build_group_panel_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardMarkup
                 "📢 设置关注频道",
                 callback_data=f"{CALLBACK_PREFIX}:force_channel:{chat_id}",
             )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "📝 广告文案",
+                callback_data=f"{CALLBACK_PREFIX}:ad_text:{chat_id}",
+            ),
+            InlineKeyboardButton(
+                "⏱ 广告间隔",
+                callback_data=f"{CALLBACK_PREFIX}:ad_interval:{chat_id}",
+            ),
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "🕒 广告定时",
+                callback_data=f"{CALLBACK_PREFIX}:ad_times:{chat_id}",
+            ),
+            InlineKeyboardButton(
+                "🔀 推送模式",
+                callback_data=f"{CALLBACK_PREFIX}:ad_mode:{chat_id}",
+            ),
         ]
     )
 
@@ -586,6 +612,52 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                 ]
             ),
         )
+    if action in {"ad_text", "ad_interval", "ad_times", "ad_mode"} and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        context.user_data["group_setting_chat_id"] = chat_id_str
+        back_markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:ad_back")]]
+        )
+        if action == "ad_text":
+            context.user_data["group_setting_stage"] = "ad_text"
+            await query.answer()
+            return await query.edit_message_text(
+                "请输入广告文案，发送「清空」可移除。",
+                reply_markup=back_markup,
+            )
+        if action == "ad_interval":
+            context.user_data["group_setting_stage"] = "ad_interval"
+            await query.answer()
+            return await query.edit_message_text(
+                f"请输入广告推送间隔（分钟，{AD_PUSH_MIN_INTERVAL}-{AD_PUSH_MAX_INTERVAL}）。",
+                reply_markup=back_markup,
+            )
+        if action == "ad_times":
+            context.user_data["group_setting_stage"] = "ad_times"
+            await query.answer()
+            return await query.edit_message_text(
+                "请输入定时时间，如：09:00,12:30,21:00",
+                reply_markup=back_markup,
+            )
+        if action == "ad_mode":
+            context.user_data["group_setting_stage"] = "ad_mode"
+            await query.answer()
+            return await query.edit_message_text(
+                "请输入模式：间隔 或 定时",
+                reply_markup=back_markup,
+            )
+    if action == "ad_back":
+        context.user_data.pop("group_setting_stage", None)
+        chat_id_str = context.user_data.pop("group_setting_chat_id", None)
+        await query.answer()
+        if chat_id_str:
+            return await _open_group_panel(query, context, chat_id_str, user_id)
+        return
     if action == "force_channel_clear" and len(parts) >= 3:
         chat_id_str = parts[2]
         chat_id = _parse_chat_id(chat_id_str)
@@ -677,7 +749,7 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
     if update.effective_chat.type != "private":
         return
     stage = context.user_data.get("group_setting_stage")
-    if stage != "force_channel":
+    if stage not in {"force_channel", "ad_text", "ad_interval", "ad_times", "ad_mode"}:
         return
 
     chat_id_str = context.user_data.get("group_setting_chat_id")
@@ -689,23 +761,65 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
     if not text:
         return
 
-    if text in {"清空", "取消", "关闭"}:
-        _set_force_channel(chat_id_str, "")
-        context.user_data.pop("group_setting_stage", None)
-        context.user_data.pop("group_setting_chat_id", None)
-        await update.message.reply_text("✅ 已清空强制关注频道设置。")
+    if stage == "force_channel":
+        if text in {"清空", "取消", "关闭"}:
+            _set_force_channel(chat_id_str, "")
+            context.user_data.pop("group_setting_stage", None)
+            context.user_data.pop("group_setting_chat_id", None)
+            await update.message.reply_text("✅ 已清空强制关注频道设置。")
+        else:
+            if not text.startswith("@"):
+                text = f"@{text}"
+            _set_force_channel(chat_id_str, text)
+            context.user_data.pop("group_setting_stage", None)
+            context.user_data.pop("group_setting_chat_id", None)
+            await update.message.reply_text(f"✅ 已设置强制关注频道为：{text}")
     else:
-        if not text.startswith("@"):
-            text = f"@{text}"
-        _set_force_channel(chat_id_str, text)
+        data = get_group_whitelist(context)
+        cfg = data.get(chat_id_str, {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+
+        if text in {"取消", "返回"}:
+            context.user_data.pop("group_setting_stage", None)
+            context.user_data.pop("group_setting_chat_id", None)
+            await update.message.reply_text("✅ 已取消。")
+        elif stage == "ad_text":
+            if text in {"清空", "关闭"}:
+                cfg["ad_push_text"] = ""
+                await update.message.reply_text("✅ 已清空广告文案。")
+            else:
+                cfg["ad_push_text"] = text
+                await update.message.reply_text("✅ 广告文案已保存。")
+        elif stage == "ad_interval":
+            if not text.isdigit():
+                return await update.message.reply_text("❗ 请输入数字分钟。")
+            interval = int(text)
+            if interval < AD_PUSH_MIN_INTERVAL or interval > AD_PUSH_MAX_INTERVAL:
+                return await update.message.reply_text(
+                    f"❗ 间隔范围：{AD_PUSH_MIN_INTERVAL}-{AD_PUSH_MAX_INTERVAL} 分钟"
+                )
+            cfg["ad_push_mode"] = "interval"
+            cfg["ad_push_interval_min"] = interval
+            await update.message.reply_text(f"✅ 已设置广告间隔：每 {interval} 分钟")
+        elif stage == "ad_times":
+            slots = _parse_ad_times(text)
+            if not slots:
+                return await update.message.reply_text("❗ 时间格式示例：09:00,12:30,21:00")
+            cfg["ad_push_mode"] = "fixed"
+            cfg["ad_push_times"] = ",".join(slots)
+            await update.message.reply_text(f"✅ 已设置广告定时：{','.join(slots)}")
+        elif stage == "ad_mode":
+            if text not in {"间隔", "定时"}:
+                return await update.message.reply_text("❗ 模式仅支持：间隔 或 定时")
+            cfg["ad_push_mode"] = "interval" if text == "间隔" else "fixed"
+            await update.message.reply_text(f"✅ 已切换广告推送模式为：{text}")
+
         context.user_data.pop("group_setting_stage", None)
         context.user_data.pop("group_setting_chat_id", None)
-        await update.message.reply_text(f"✅ 已设置强制关注频道为：{text}")
+        data[chat_id_str] = cfg
+        save_json(GROUP_LIST_FILE, data)
 
-    data = get_group_whitelist(context)
-    cfg = data.get(chat_id_str, {})
-    if not isinstance(cfg, dict):
-        cfg = {}
     keyboard = _build_group_panel_keyboard(chat_id_str, cfg)
     await update.message.reply_text(
         _build_group_panel_text(chat_id_str, cfg),

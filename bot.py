@@ -249,6 +249,7 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [
             [InlineKeyboardButton("群配置", callback_data="gcfg:list")],
             [InlineKeyboardButton("频道配置", callback_data="chcfg:back")],
+            [InlineKeyboardButton("机器人频道配置", callback_data="chcfg:bot")],
             [InlineKeyboardButton("查看登录", callback_data="tlogin:list")],
             [InlineKeyboardButton("登录小号", callback_data="tlogin:login")],
         ]
@@ -277,6 +278,7 @@ async def start_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         [
             [InlineKeyboardButton("群配置", callback_data="gcfg:list")],
             [InlineKeyboardButton("频道配置", callback_data="chcfg:back")],
+            [InlineKeyboardButton("机器人频道配置", callback_data="chcfg:bot")],
             [InlineKeyboardButton("查看登录", callback_data="tlogin:list")],
             [InlineKeyboardButton("登录小号", callback_data="tlogin:login")],
         ]

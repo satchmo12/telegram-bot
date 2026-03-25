@@ -422,6 +422,7 @@ def get_group_whitelist(context: ContextTypes.DEFAULT_TYPE = None) -> dict:
             "active_speak_enabled": False,
             "active_speak_interval_min": 120,
             "force_subscribe": False,
+            "name_change_notice": False,
         }
         for key, val in defaults.items():
             if key not in cfg:
