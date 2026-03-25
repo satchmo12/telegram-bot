@@ -363,6 +363,10 @@ def _process_text(text: str, rule: dict) -> str:
             return ""
     if block_words:
         if any(w and w in t for w in block_words):
+            if DEBUG_FORWARD:
+                hit = next((w for w in block_words if w and w in t), "")
+                rname = str(rule.get("name", "") or "")
+                print(f"⛔ 跳过: 命中屏蔽词 {hit} (rule={rname})")
             return ""
     t = _apply_replace(t, rule.get("replace_words") or [])
     t = _apply_cut(t, rule.get("cut_words", ""))
@@ -388,6 +392,10 @@ def _process_text_with_entities(text: str, rule: dict, entities) -> tuple[str, L
             return "", []
     if block_words:
         if any(w and w in t for w in block_words):
+            if DEBUG_FORWARD:
+                hit = next((w for w in block_words if w and w in t), "")
+                rname = str(rule.get("name", "") or "")
+                print(f"⛔ 跳过: 命中屏蔽词 {hit} (rule={rname})")
             return "", []
     if rule.get("replace_words") or rule.get("clear_links"):
         processed = _process_text(t, rule)

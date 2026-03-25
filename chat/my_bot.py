@@ -12,6 +12,7 @@ from telegram.ext import (
     ContextTypes,
 )
 from telegram.helpers import escape
+import requests
 from telegram.constants import ParseMode
 from command_router import register_command
 from game.voice_reply import tts_voice_reply
@@ -37,6 +38,25 @@ from PIL import Image, ImageFilter, ImageEnhance
 import os
 import cv2 as cv
 import numpy as np
+
+# ---------------- TON 用户名查询 ----------------
+def _check_ton_username_sync(username: str) -> str:
+    url = f"https://tonapi.io/v2/dns/{username}.ton"
+    try:
+        res = requests.get(url, timeout=8)
+        if res.status_code == 200:
+            data = res.json() or {}
+            owner = data.get("owner", "未知")
+            return f"✅ 已注册\nOwner: {owner}"
+        if res.status_code == 404:
+            return "❌ 未注册（可能可用）"
+        return f"⚠️ 查询失败（{res.status_code}）"
+    except Exception:
+        return "⚠️ 查询失败"
+
+
+async def check_ton_username(username: str) -> str:
+    return await asyncio.to_thread(_check_ton_username_sync, username)
 
 # ---------------- 配置 ----------------
 DATA_FILE = "data/learned_pairs.json"  # 存储学习问答对
@@ -550,6 +570,15 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = msg.text.strip()
     ts = time.time()
 
+    # ---------------- @用户名 直接查询 TON ----------------
+    if text.startswith("@") or text.lower().endswith(".ton"):
+        m = re.match(r"^@?([A-Za-z0-9_]{3,})(?:\\.ton)?$", text)
+        if m:
+            username = m.group(1)
+            result = await check_ton_username(username)
+            await update.message.reply_text(f"查询 @{username}:\n{result}")
+            return
+
     # ---------------- 管理员增加曝光 ----------------
     m = re.match(r"^增加曝光\s*\+?\s*(\d+)$", text)
     if m:
@@ -965,6 +994,18 @@ async def active_speak_control(update: Update, context: ContextTypes.DEFAULT_TYP
         context,
         "❗参数错误。用法：群主动说话 开启/关闭 或 群主动说话 频率 30",
     )
+
+
+@register_command("check")
+async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+    if len(context.args) == 0:
+        await update.message.reply_text("用法: /check 用户名")
+        return
+    username = context.args[0].replace("@", "").replace(".ton", "")
+    result = await check_ton_username(username)
+    await update.message.reply_text(f"查询 @{username}:\n{result}")
 
 
 def _pick_active_speak_text(memory: dict, ad_keywords: list[str]) -> Optional[str]:

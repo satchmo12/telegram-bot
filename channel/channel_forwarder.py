@@ -47,6 +47,19 @@ def _should_skip_by_links(rule: dict, text: str, entities=None) -> bool:
     return False
 
 
+def _should_skip_by_words(rule: dict, text: str) -> bool:
+    t = text or ""
+    include_words = rule.get("include_words") or []
+    block_words = rule.get("block_words") or []
+    if include_words:
+        if not any(w and w in t for w in include_words):
+            return True
+    if block_words:
+        if any(w and w in t for w in block_words):
+            return True
+    return False
+
+
 def _is_active_subscription(user_id: str, username: Optional[str] = None) -> bool:
     if not user_id:
         return False
@@ -204,6 +217,8 @@ def _media_group_should_skip(group_msgs, rule: dict) -> bool:
     for msg in group_msgs or []:
         text = getattr(msg, "text", None) or getattr(msg, "caption", None) or ""
         entities = getattr(msg, "entities", None) if getattr(msg, "text", None) else getattr(msg, "caption_entities", None)
+        if _should_skip_by_words(rule, text):
+            return True
         if _should_skip_by_links(rule, text, entities):
             return True
     return False
@@ -374,6 +389,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         text = getattr(msg, "text", None) or getattr(msg, "caption", None) or ""
         entities = getattr(msg, "entities", None) if getattr(msg, "text", None) else getattr(msg, "caption_entities", None)
+        if _should_skip_by_words(rule, text):
+            continue
         if _should_skip_by_links(rule, text, entities):
             continue
 
@@ -501,6 +518,8 @@ async def handle_user_forward(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         text = getattr(msg, "text", None) or getattr(msg, "caption", None) or ""
         entities = getattr(msg, "entities", None) if getattr(msg, "text", None) else getattr(msg, "caption_entities", None)
+        if _should_skip_by_words(rule, text):
+            continue
         if _should_skip_by_links(rule, text, entities):
             continue
 
