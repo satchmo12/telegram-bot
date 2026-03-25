@@ -25,6 +25,7 @@ TOGGLE_FIELDS = [
     ("active_speak_enabled", "主动说话"),
     ("force_subscribe", "强制关注频道"),
     ("name_change_notice", "用户名变更提示"),
+    ("recommend", "群推荐"),
 ]
 ACTIVE_SPEAK_MIN_INTERVAL = 1
 ACTIVE_SPEAK_MAX_INTERVAL = 1440
@@ -104,6 +105,7 @@ def _build_group_panel_text(chat_id: str, cfg: dict) -> str:
     for key, label in TOGGLE_FIELDS:
         lines.append(f"{label}：{_toggle_text(bool(cfg.get(key, False)))}")
     lines.append(f"限频条数：{spam_limit_value} 条/分钟")
+    lines.append(f"曝光度：{int(cfg.get('exposure', 0))}")
     lines.append(f"主动说话频率：每 {interval} 分钟")
     lines.append(
         f"广告推送：模式={'定时' if ad_mode == 'fixed' else '间隔'} "

@@ -27,6 +27,7 @@ CON_DATA_DIR = "config_data"
 
 ZHENXINHUA_FILE = os.path.join(CON_DATA_DIR, "zhenxinhua.txt")
 GROUP_LIST_FILE = os.path.join(DATA_DIR, "groups.json")
+INVITE_BOT_USERS_FILE = os.path.join(DATA_DIR, "invite_bot_users.json")
 ADMIN_WHITELIST_FILE = os.path.join(CON_DATA_DIR, "admin_whitelist.txt")
 QA_FILE = os.path.join(DATA_DIR, "qa.json")
 IDIOM_FILE = os.path.join(CON_DATA_DIR, "idiom.json")
@@ -407,6 +408,9 @@ def get_group_whitelist(context: ContextTypes.DEFAULT_TYPE = None) -> dict:
         defaults = {
             "enabled": True,
             "bot_in_group": True,
+            "recommend": True,
+            "exposure": 0,
+            "recommend_last_ts": 0,
             "verify": False,
             "silent": False,
             "ad_filter": False,

@@ -541,9 +541,9 @@ async def main():
                 except Exception:
                     pass
                 continue
-            print(
-                f"   ↳ 启用功能: {', '.join(sorted(app.bot_data.get('enabled_features', [])))}"
-            )
+            # print(
+            #     f"   ↳ 启用功能: {', '.join(sorted(app.bot_data.get('enabled_features', [])))}"
+            # )
 
         await asyncio.Event().wait()
     except KeyboardInterrupt:

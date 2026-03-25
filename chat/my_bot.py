@@ -11,6 +11,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+from telegram.helpers import escape
 from telegram.constants import ParseMode
 from command_router import register_command
 from game.voice_reply import tts_voice_reply
@@ -18,7 +19,9 @@ from utils import (
     AD_KEYWORDS_FILE,
     BOT_OWNER_ID,
     GROUP_LIST_FILE,
+    INVITE_BOT_USERS_FILE,
     get_group_whitelist,
+    get_runtime_bot_name,
     INSULT_FILE,
     JOKE_FILE,
     PRAISE_FILE,
@@ -547,6 +550,123 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = msg.text.strip()
     ts = time.time()
 
+    # ---------------- 管理员增加曝光 ----------------
+    m = re.match(r"^增加曝光\s*\+?\s*(\d+)$", text)
+    if m:
+        try:
+            inc = int(m.group(1))
+        except Exception:
+            inc = 0
+        if inc > 0:
+            chat_id_str = str(update.effective_chat.id)
+            user_id = update.effective_user.id
+            # 扣除用户曝光度
+            data = load_json(INVITE_BOT_USERS_FILE)
+            if not isinstance(data, dict):
+                data = {}
+            users = data.get("users", {})
+            if not isinstance(users, dict):
+                users = {}
+            user = users.get(str(user_id), {})
+            balance = int(user.get("exposure", 0))
+            if balance < inc:
+                await safe_reply(update, context, "拉我进群增加曝光度50")
+                return
+            user["exposure"] = balance - inc
+            user["username"] = update.effective_user.full_name or user.get(
+                "username", "未知用户"
+            )
+            users[str(user_id)] = user
+            data["users"] = users
+            save_json(INVITE_BOT_USERS_FILE, data)
+
+            # 增加本群曝光度
+            groups = load_json(GROUP_LIST_FILE)
+            if not isinstance(groups, dict):
+                groups = {}
+            cfg = groups.get(chat_id_str, {})
+            if not isinstance(cfg, dict):
+                cfg = {}
+            cfg["exposure"] = int(cfg.get("exposure", 0)) + inc
+            groups[chat_id_str] = cfg
+            save_json(GROUP_LIST_FILE, groups)
+            await safe_reply(update, context, f"已增加本群曝光度 +{inc}")
+        return
+
+    # ---------------- 无聊/冒泡提示群名 ----------------
+    chat = update.effective_chat
+    if chat and text:
+        triggers = ["好无聊", "无聊", "冒泡", "冒个泡", "冒泡一下", "签到", "6"]
+        if any(k in text for k in triggers):
+            groups = get_group_whitelist(context)
+            lines = ["群推荐：不想被推荐点击机器人关闭群推荐即可，曝光度越高排名越靠前"]
+            recommended = []
+            chat_id_str = str(chat.id)
+            now_ts = int(time.time())
+            cfg_self = groups.get(chat_id_str, {})
+            last_ts = int(cfg_self.get("recommend_last_ts", 0) or 0)
+            if not bool(cfg_self.get("recommend", True)):
+                return
+            if now_ts - last_ts < 300:
+                return
+            cfg_self["recommend_last_ts"] = now_ts
+            groups[chat_id_str] = cfg_self
+            for gid, cfg in groups.items():
+                if not isinstance(cfg, dict):
+                    continue
+                if not bool(cfg.get("bot_in_group", True)):
+                    continue
+                if not bool(cfg.get("recommend", False)):
+                    continue
+                if cfg.get("type") not in ("group", "supergroup", ""):
+                    continue
+                exposure = int(cfg.get("exposure", 0))
+                recommended.append((exposure, gid, cfg))
+
+            recommended.sort(key=lambda x: x[0], reverse=True)
+            for idx, (exposure, gid, cfg) in enumerate(recommended, start=1):
+                title = (cfg.get("title") or "").strip() or "未命名群"
+                safe_title = escape(title)
+                username = (cfg.get("username") or "").strip().lstrip("@")
+                if username:
+                    link = f"https://t.me/{username}"
+                    lines.append(f"{idx}. <a href=\"{link}\">{safe_title}</a>（曝光度 {exposure}）")
+                else:
+                    lines.append(f"{idx}. {safe_title}（曝光度 {exposure}）")
+
+            # 仅增加当前触发群的曝光度
+            if chat_id_str in groups and isinstance(groups[chat_id_str], dict):
+                if bool(groups[chat_id_str].get("recommend", False)):
+                    groups[chat_id_str]["exposure"] = int(
+                        groups[chat_id_str].get("exposure", 0)
+                    ) + 1
+
+            save_json(GROUP_LIST_FILE, groups)
+
+
+            # 避免超长消息，简单分片发送
+            chunk = ""
+            for line in lines:
+                candidate = f"{chunk}\n{line}" if chunk else line
+                if len(candidate) > 3500:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=chunk,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                    )
+                    chunk = line
+                else:
+                    chunk = candidate
+            if chunk:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=chunk,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+            return
+
     # ---------------- 回复开关指令 ----------------
     # 开启自动回复
     if any(k in text for k in REPLY_START_KEYWORDS):
@@ -962,7 +1082,8 @@ async def speaking_to(context: ContextTypes.DEFAULT_TYPE):
             )
             # print(f"✅ 主动说话发送成功: {chat_id} ({interval_min}min)")
         except Exception as e:
-            print(f"⚠️ 主动说话发送失败: {chat_id}, {e}")
+            bot_name = get_runtime_bot_name() or getattr(context.bot, "username", "")
+            print(f"⚠️ 主动说话发送失败: bot={bot_name} chat={chat_id}, {e}")
 
 
 def _parse_fixed_slots(raw: str) -> list[str]:
