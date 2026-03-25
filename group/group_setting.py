@@ -8,6 +8,7 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, Mes
 
 from command_router import FEATURE_FRIENDS, register_command
 from utils import GROUP_LIST_FILE, get_group_whitelist, is_super_admin, safe_reply, save_json, load_json
+from channel.channel_force import unmute_force_subscribe_chat
 
 CALLBACK_PREFIX = "gcfg"
 FORCE_SUBSCRIBE_FILE = "data/force_subscribe.json"
@@ -550,9 +551,12 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         if not isinstance(cfg, dict):
             cfg = {}
         if feature_key in {item[0] for item in TOGGLE_FIELDS}:
-            cfg[feature_key] = not bool(cfg.get(feature_key, False))
+            new_value = not bool(cfg.get(feature_key, False))
+            cfg[feature_key] = new_value
             data[chat_id_str] = cfg
             save_json(GROUP_LIST_FILE, data)
+            if feature_key == "force_subscribe" and not new_value:
+                await unmute_force_subscribe_chat(context, chat_id_str)
         return await _open_group_panel(query, context, chat_id_str, user_id)
 
     if action == "force_channel" and len(parts) >= 3:

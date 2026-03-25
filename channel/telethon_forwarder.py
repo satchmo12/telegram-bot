@@ -744,9 +744,12 @@ def _set_history_max_id(state: dict, key: str, msg_id: int):
     keys[key] = record
 
 
+FORWARD_USER_CONFIG_FILE = "data/forward_config_users_telethon.json"
+
+
 def _collect_rules() -> Dict[str, List[dict]]:
     owners = _load_session_owners()
-    user_config = load_json("data/forward_config_users.json")
+    user_config = load_json(FORWARD_USER_CONFIG_FILE)
     if not isinstance(user_config, dict):
         return {}
     users = user_config.get("users", {})
@@ -1056,11 +1059,12 @@ async def _refresh_sessions(app):
     if not api_id or not api_hash:
         return
     rules_by_session = _collect_rules()
-    # if rules_by_session:
-    #     summary = {k: len(v) for k, v in rules_by_session.items()}
-    #     print(f"🧭 协议号规则刷新: {summary}")
-    # else:
-    #     print("⚠️ 协议号规则为空")
+    if DEBUG_FORWARD:
+        if rules_by_session:
+            summary = {k: len(v) for k, v in rules_by_session.items()}
+            print(f"🧭 协议号规则刷新[{bot_name}]: {summary}")
+        else:
+            print(f"⚠️ 协议号规则为空[{bot_name}]")
     SESSION_RULES_BY_BOT[bot_name] = rules_by_session
 
     active_sessions = set(rules_by_session.keys())

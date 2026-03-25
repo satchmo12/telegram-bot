@@ -14,6 +14,7 @@ from telegram.ext import (
 from command_router import register_command
 from typing import Optional
 from utils import get_group_whitelist, load_json, save_json
+from group.mute_registry import add_mute, remove_mute
 
 
 DATA_FILE = "data/force_subscribe.json"
@@ -153,6 +154,8 @@ async def check_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 permissions=ChatPermissions(can_send_messages=False),
             )
             _record_mute(chat_id, user_id, channel_username)
+            name = group_member.user.full_name if group_member and group_member.user else ""
+            add_mute(chat_id, user_id, name, source="force_subscribe")
         except Exception as e:
             print("禁言失败：", e)
 
@@ -213,6 +216,19 @@ async def _try_unmute_if_followed(context: ContextTypes.DEFAULT_TYPE, chat_id: i
     return True
 
 
+async def _unmute_user(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id,
+            user_id,
+            permissions=_full_send_permissions(),
+        )
+    except Exception as e:
+        print("解除禁言失败：", e)
+        return False
+    return True
+
+
 async def force_subscribe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query or not query.data:
@@ -241,6 +257,7 @@ async def force_subscribe_callback(update: Update, context: ContextTypes.DEFAULT
     ok = await _try_unmute_if_followed(context, chat_id, target_user_id, channel_username)
     if ok:
         _remove_mute_record(str(chat_id), target_user_id)
+        remove_mute(str(chat_id), target_user_id)
         try:
             if query.message:
                 await query.message.edit_reply_markup(reply_markup=None)
@@ -255,21 +272,49 @@ async def force_subscribe_sweep(context: ContextTypes.DEFAULT_TYPE):
     data = _load_mute_data()
     if not isinstance(data, dict) or not data:
         return
+    group_cfg_map = get_group_whitelist(context)
     for chat_id_str, users in list(data.items()):
         if not isinstance(users, dict):
             continue
         chat_id = int(chat_id_str)
+        group_cfg = group_cfg_map.get(chat_id_str, {})
+        force_on = bool(group_cfg.get("force_subscribe", False)) if isinstance(group_cfg, dict) else False
         for uid_str, info in list(users.items()):
             try:
                 user_id = int(uid_str)
             except Exception:
                 continue
+            if not force_on:
+                ok = await _unmute_user(context, chat_id, user_id)
+                if ok:
+                    _remove_mute_record(chat_id_str, user_id)
+                    remove_mute(chat_id_str, user_id)
+                continue
+
             channel_username = (info or {}).get("channel")
             if not channel_username:
                 continue
             ok = await _try_unmute_if_followed(context, chat_id, user_id, channel_username)
             if ok:
                 _remove_mute_record(chat_id_str, user_id)
+                remove_mute(chat_id_str, user_id)
+
+
+async def unmute_force_subscribe_chat(context: ContextTypes.DEFAULT_TYPE, chat_id_str: str):
+    data = _load_mute_data()
+    users = data.get(chat_id_str)
+    if not isinstance(users, dict):
+        return
+    chat_id = int(chat_id_str)
+    for uid_str in list(users.keys()):
+        try:
+            user_id = int(uid_str)
+        except Exception:
+            continue
+        ok = await _unmute_user(context, chat_id, user_id)
+        if ok:
+            _remove_mute_record(chat_id_str, user_id)
+            remove_mute(chat_id_str, user_id)
 
 
 # ========= 主程序 =========

@@ -10,7 +10,8 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, Mes
 from command_router import register_command
 from utils import BOT_USER_FILE, get_bot_path, is_super_admin, load_json, save_json, safe_reply
 
-FORWARD_USER_CONFIG_FILE = "data/forward_config_users.json"
+FORWARD_USER_CONFIG_FILE = "data/forward_config_users_telethon.json"
+FORWARD_USER_CONFIG_BOT_FILE = "data/forward_config_users_bot.json"
 HISTORY_REQUESTS_FILE = "data/history_forward_requests.json"
 SUBSCRIPTION_FILE = "data/subscriptions.json"
 SESSION_OWNERS_FILE = "data/telethon_session_owners.json"
@@ -129,16 +130,20 @@ def _is_active_subscription(user) -> bool:
         return False
 
 
-def _load_user_forward_config() -> dict:
-    data = load_json(FORWARD_USER_CONFIG_FILE)
+def _get_user_config_file(context: ContextTypes.DEFAULT_TYPE) -> str:
+    return context.user_data.get("channel_config_file") or FORWARD_USER_CONFIG_FILE
+
+
+def _load_user_forward_config(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    data = load_json(_get_user_config_file(context))
     if not isinstance(data, dict):
         data = {}
     data.setdefault("users", {})
     return data
 
 
-def _save_user_forward_config(data: dict) -> None:
-    save_json(FORWARD_USER_CONFIG_FILE, data)
+def _save_user_forward_config(context: ContextTypes.DEFAULT_TYPE, data: dict) -> None:
+    save_json(_get_user_config_file(context), data)
 
 
 def _load_bot_users() -> dict:
@@ -237,21 +242,26 @@ def _get_session_label(session_name: str) -> str:
     return session_name
 
 
-def _get_user_rules(user_id: str) -> list:
-    data = _load_user_forward_config()
+def _get_user_rules(context: ContextTypes.DEFAULT_TYPE, user_id: str) -> list:
+    data = _load_user_forward_config(context)
     user_cfg = data.get("users", {}).get(user_id, {})
     rules = user_cfg.get("forward_rules")
     return rules if isinstance(rules, list) else []
 
 
-def _set_user_rules(user_id: str, rules: list, username: Optional[str] = None) -> None:
-    data = _load_user_forward_config()
+def _set_user_rules(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: str,
+    rules: list,
+    username: Optional[str] = None,
+) -> None:
+    data = _load_user_forward_config(context)
     user_cfg = data.get("users", {}).get(user_id, {})
     user_cfg["forward_rules"] = rules
     if username:
         user_cfg["username"] = username
     data.setdefault("users", {})[user_id] = user_cfg
-    _save_user_forward_config(data)
+    _save_user_forward_config(context, data)
 
 
 def _private_chat_url(context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -291,8 +301,13 @@ async def _ensure_private(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await _plain_reply(update, context, "请私聊机器人发送“频道配置”进行设置。")
 
 
-@register_command("频道配置")
-async def channel_config_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _channel_config_entry_core(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    config_file: Optional[str] = None,
+):
+    context.user_data["channel_config_file"] = config_file or FORWARD_USER_CONFIG_FILE
     if not _require_access(update):
         return await _plain_reply(update, context, "🚫 仅高级管理员或订阅会员可使用该功能。")
 
@@ -317,6 +332,20 @@ async def channel_config_entry(update: Update, context: ContextTypes.DEFAULT_TYP
         context,
         "请选择操作：\n\n“新建配置”会按步骤引导填写频道名称、ID、任务类型、任务模式等。",
         reply_markup=_with_start_back(context, _build_main_menu_keyboard()),
+    )
+
+
+@register_command("频道配置")
+async def channel_config_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await _channel_config_entry_core(update, context)
+
+
+@register_command("机器人频道配置", "机器人转发配置", "bot频道配置", "bot_channel_config")
+async def bot_channel_config_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await _channel_config_entry_core(
+        update,
+        context,
+        config_file=FORWARD_USER_CONFIG_BOT_FILE,
     )
 
 
@@ -498,11 +527,18 @@ def _new_rule_default(user_id: str, *, source_id=None, source_name: str = "", se
     return rule
 
 
-def _create_rule(user_id: str, *, source_id=None, source_name: str = "", session_name: str = "") -> int:
-    rules = _get_user_rules(user_id)
+def _create_rule(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: str,
+    *,
+    source_id=None,
+    source_name: str = "",
+    session_name: str = "",
+) -> int:
+    rules = _get_user_rules(context, user_id)
     rule = _new_rule_default(user_id, source_id=source_id, source_name=source_name, session_name=session_name)
     rules.append(rule)
-    _set_user_rules(user_id, rules)
+    _set_user_rules(context, user_id, rules)
     return len(rules) - 1
 
 
@@ -514,8 +550,8 @@ def start_channel_config_new(
     user_id = str(getattr(user, "id", "") or "")
     if not user_id:
         return None, None
-    idx = _create_rule(user_id, session_name=session_name or "")
-    rules = _get_user_rules(user_id)
+    idx = _create_rule(context, user_id, session_name=session_name or "")
+    rules = _get_user_rules(context, user_id)
     rule = rules[idx] if idx >= 0 and idx < len(rules) else {}
     text = _format_rule_panel_text(rule, idx)
     return text, _build_rule_panel_keyboard(idx, rule)
@@ -550,12 +586,13 @@ def start_channel_config_with_source(
     if not user_id:
         return None, None
     idx = _create_rule(
+        context,
         user_id,
         source_id=int(source_id),
         source_name=source_name or "",
         session_name=session_name or "",
     )
-    rules = _get_user_rules(user_id)
+    rules = _get_user_rules(context, user_id)
     rule = rules[idx] if idx >= 0 and idx < len(rules) else {}
     text = _format_rule_panel_text(rule, idx)
     return text, _build_rule_panel_keyboard(idx, rule)
@@ -665,8 +702,8 @@ def _with_start_back(context: ContextTypes.DEFAULT_TYPE, keyboard: InlineKeyboar
     return keyboard
 
 
-def _build_rule_list_view(user_id: str) -> tuple[str, InlineKeyboardMarkup]:
-    rules = _get_user_rules(user_id)
+def _build_rule_list_view(context: ContextTypes.DEFAULT_TYPE, user_id: str) -> tuple[str, InlineKeyboardMarkup]:
+    rules = _get_user_rules(context, user_id)
     if not rules:
         return "暂无配置记录。", _build_main_menu_keyboard()
     lines = ["当前配置："]
@@ -863,7 +900,12 @@ def _format_draft_summary(draft: dict) -> str:
     )
 
 
-def _save_forward_rule(draft: dict, user_id: str, username: Optional[str] = None) -> None:
+def _save_forward_rule(
+    context: ContextTypes.DEFAULT_TYPE,
+    draft: dict,
+    user_id: str,
+    username: Optional[str] = None,
+) -> None:
     rule = {
         "name": draft.get("name", ""),
         "sources": [draft.get("source_id")],
@@ -883,13 +925,13 @@ def _save_forward_rule(draft: dict, user_id: str, username: Optional[str] = None
     session_name = draft.get("session_name")
     if session_name:
         rule["session_name"] = session_name
-    rules = _get_user_rules(user_id)
+    rules = _get_user_rules(context, user_id)
     rules.append(rule)
-    _set_user_rules(user_id, rules, username=username)
+    _set_user_rules(context, user_id, rules, username=username)
 
 
-def _update_rule_field(user_id: str, index: int, field: str, value) -> bool:
-    rules = _get_user_rules(user_id)
+def _update_rule_field(context: ContextTypes.DEFAULT_TYPE, user_id: str, index: int, field: str, value) -> bool:
+    rules = _get_user_rules(context, user_id)
     if index < 0 or index >= len(rules):
         return False
     rule = rules[index]
@@ -945,7 +987,7 @@ def _update_rule_field(user_id: str, index: int, field: str, value) -> bool:
     else:
         return False
     rules[index] = rule
-    _set_user_rules(user_id, rules)
+    _set_user_rules(context, user_id, rules)
     return True
 
 
@@ -994,10 +1036,10 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if pending.get("next") == "panel":
             idx = int(pending.get("index", -1))
             user_id = str(update.effective_user.id)
-            ok = _update_rule_field(user_id, idx, "session_name", session_name)
+            ok = _update_rule_field(context, user_id, idx, "session_name", session_name)
             if not ok:
                 return await query.edit_message_text("❗ 更新失败，请重试。")
-            rules = _get_user_rules(user_id)
+            rules = _get_user_rules(context, user_id)
             rule = rules[idx] if 0 <= idx < len(rules) else {}
             return await query.edit_message_text(
                 "✅ 已更新协议号。\n\n" + _format_rule_panel_text(rule, idx),
@@ -1005,8 +1047,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         if pending.get("next") == "new":
             user_id = str(update.effective_user.id)
-            idx = _create_rule(user_id, session_name=session_name)
-            rules = _get_user_rules(user_id)
+            idx = _create_rule(context, user_id, session_name=session_name)
+            rules = _get_user_rules(context, user_id)
             rule = rules[idx] if idx >= 0 and idx < len(rules) else {}
             return await query.edit_message_text(
                 _format_rule_panel_text(rule, idx),
@@ -1020,7 +1062,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "new":
         user_id = str(update.effective_user.id)
         if not is_super_admin(update.effective_user.id):
-            rules = _get_user_rules(user_id)
+            rules = _get_user_rules(context, user_id)
             if len(rules) >= SUBSCRIBER_MAX_RULES:
                 return await query.edit_message_text(
                     f"⚠️ 订阅会员最多可配置 {SUBSCRIBER_MAX_RULES} 条规则。"
@@ -1033,8 +1075,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "请选择要配置的小号：",
                 reply_markup=_with_start_back(context, _build_session_select_keyboard(sessions)),
             )
-        idx = _create_rule(user_id, session_name=session_name or "")
-        rules = _get_user_rules(user_id)
+        idx = _create_rule(context, user_id, session_name=session_name or "")
+        rules = _get_user_rules(context, user_id)
         rule = rules[idx] if idx >= 0 and idx < len(rules) else {}
         return await query.edit_message_text(
             _format_rule_panel_text(rule, idx),
@@ -1043,7 +1085,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "list":
         user_id = str(update.effective_user.id)
-        text, keyboard = _build_rule_list_view(user_id)
+        text, keyboard = _build_rule_list_view(context, user_id)
         return await query.edit_message_text(text, reply_markup=_with_start_back(context, keyboard))
 
     if action == "cancel":
@@ -1087,7 +1129,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             return await query.edit_message_text("❗ 无效的规则序号。")
         user_id = str(update.effective_user.id)
-        rules = _get_user_rules(user_id)
+        rules = _get_user_rules(context, user_id)
         if idx < 0 or idx >= len(rules):
             return await query.edit_message_text("❗ 无效的规则序号。")
         rule = rules[idx]
@@ -1098,23 +1140,23 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=_build_rule_panel_keyboard(idx, rule),
             )
         if sub == "enabled_on":
-            _update_rule_field(user_id, idx, "enabled", True)
+            _update_rule_field(context, user_id, idx, "enabled", True)
         elif sub == "enabled_off":
-            _update_rule_field(user_id, idx, "enabled", False)
+            _update_rule_field(context, user_id, idx, "enabled", False)
             _clear_history_requests(user_id, idx)
         elif sub == "mode_listen":
-            _update_rule_field(user_id, idx, "mode", "listen")
+            _update_rule_field(context, user_id, idx, "mode", "listen")
             _clear_history_requests(user_id, idx)
         elif sub == "mode_history":
-            _update_rule_field(user_id, idx, "mode", "history")
+            _update_rule_field(context, user_id, idx, "mode", "history")
         elif sub == "clear_on":
-            _update_rule_field(user_id, idx, "clear_links", True)
+            _update_rule_field(context, user_id, idx, "clear_links", True)
         elif sub == "clear_off":
-            _update_rule_field(user_id, idx, "clear_links", False)
+            _update_rule_field(context, user_id, idx, "clear_links", False)
         elif sub == "skip_links_on":
-            _update_rule_field(user_id, idx, "skip_links", True)
+            _update_rule_field(context, user_id, idx, "skip_links", True)
         elif sub == "skip_links_off":
-            _update_rule_field(user_id, idx, "skip_links", False)
+            _update_rule_field(context, user_id, idx, "skip_links", False)
         elif sub == "history_start":
             requests = load_json(HISTORY_REQUESTS_FILE)
             if not isinstance(requests, list):
@@ -1160,7 +1202,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=_build_panel_input_keyboard(idx),
             )
 
-        rules = _get_user_rules(user_id)
+        rules = _get_user_rules(context, user_id)
         rule = rules[idx]
         return await query.edit_message_text(
             _format_rule_panel_text(rule, idx),
@@ -1191,15 +1233,15 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             idx = int(parts[2])
         if idx is not None:
             user_id = str(update.effective_user.id)
-            rules = _get_user_rules(user_id)
+            rules = _get_user_rules(context, user_id)
             if idx < 0 or idx >= len(rules):
                 return await query.edit_message_text("❗ 无效的编辑序号。")
             rule = rules[idx]
             new_enabled = not bool(rule.get("enabled", True))
-            ok = _update_rule_field(user_id, idx, "enabled", new_enabled)
+            ok = _update_rule_field(context, user_id, idx, "enabled", new_enabled)
             if not ok:
                 return await query.edit_message_text("❗ 更新失败，请重试。")
-            rules = _get_user_rules(user_id)
+            rules = _get_user_rules(context, user_id)
             rule = rules[idx]
             draft = state.get("draft", {})
             draft.update(
@@ -1257,10 +1299,10 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if state.get("stage") == "edit_mode":
             user_id = str(update.effective_user.id)
             idx = int(state.get("draft", {}).get("edit_index", -1))
-            ok = _update_rule_field(user_id, idx, "mode", mode)
+            ok = _update_rule_field(context, user_id, idx, "mode", mode)
             if not ok:
                 return await query.edit_message_text("❗ 更新失败，请重试。")
-            rules = _get_user_rules(user_id)
+            rules = _get_user_rules(context, user_id)
             rule = rules[idx]
             draft = state.get("draft", {})
             draft.update(
@@ -1305,19 +1347,19 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             idx = int(parts[2])
         if idx is not None:
             user_id = str(update.effective_user.id)
-            rules = _get_user_rules(user_id)
+            rules = _get_user_rules(context, user_id)
             if idx < 0 or idx >= len(rules):
                 return await query.edit_message_text("❗ 无效的编辑序号。")
             rule = rules[idx]
             new_show = not bool(rule.get("show_contact", True))
-            ok = _update_rule_field(user_id, idx, "show_contact", new_show)
+            ok = _update_rule_field(context, user_id, idx, "show_contact", new_show)
             if not ok:
                 return await query.edit_message_text("❗ 更新失败，请重试。")
             if not new_show:
-                _update_rule_field(user_id, idx, "channel_user", "")
-                _update_rule_field(user_id, idx, "group_name", "")
-                _update_rule_field(user_id, idx, "submit_user", "")
-            rules = _get_user_rules(user_id)
+                _update_rule_field(context, user_id, idx, "channel_user", "")
+                _update_rule_field(context, user_id, idx, "group_name", "")
+                _update_rule_field(context, user_id, idx, "submit_user", "")
+            rules = _get_user_rules(context, user_id)
             rule = rules[idx]
             draft = state.get("draft", {})
             draft.update(
@@ -1389,7 +1431,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not draft.get(key):
                 return await query.edit_message_text("配置未完整，请重新开始。")
         user_id = str(update.effective_user.id)
-        _save_forward_rule(draft, user_id, username=draft.get("owner_username"))
+        _save_forward_rule(context, draft, user_id, username=draft.get("owner_username"))
         _clear_wizard(context)
         return await query.edit_message_text(
             "✅ 已保存频道配置。",
@@ -1402,14 +1444,14 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             idx = int(parts[2])
         except Exception:
             return await query.edit_message_text("❗ 无效的删除序号。")
-        rules = _get_user_rules(user_id)
+        rules = _get_user_rules(context, user_id)
         if idx < 0 or idx >= len(rules):
             return await query.edit_message_text("❗ 无效的删除序号。")
         removed = rules.pop(idx)
-        user_cfg = _load_user_forward_config().get("users", {}).get(user_id, {})
-        _set_user_rules(user_id, rules, username=user_cfg.get("username") if isinstance(user_cfg, dict) else None)
+        user_cfg = _load_user_forward_config(context).get("users", {}).get(user_id, {})
+        _set_user_rules(context, user_id, rules, username=user_cfg.get("username") if isinstance(user_cfg, dict) else None)
         name = removed.get("name", "")
-        text, keyboard = _build_rule_list_view(user_id)
+        text, keyboard = _build_rule_list_view(context, user_id)
         text = f"✅ 已删除配置：{name}\n\n{text}" if text else f"✅ 已删除配置：{name}"
         return await query.edit_message_text(text, reply_markup=_with_start_back(context, keyboard))
 
@@ -1419,7 +1461,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             idx = int(parts[2])
         except Exception:
             return await query.edit_message_text("❗ 无效的编辑序号。")
-        rules = _get_user_rules(user_id)
+        rules = _get_user_rules(context, user_id)
         if idx < 0 or idx >= len(rules):
             return await query.edit_message_text("❗ 无效的编辑序号。")
         rule = rules[idx]
@@ -1487,10 +1529,10 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fval = parts[3]
         if fval not in {"all", "text", "photo", "video"}:
             fval = "all"
-        ok = _update_rule_field(user_id, idx, "filter", fval)
+        ok = _update_rule_field(context, user_id, idx, "filter", fval)
         if not ok:
             return await query.edit_message_text("❗ 更新失败，请重试。")
-        rules = _get_user_rules(user_id)
+        rules = _get_user_rules(context, user_id)
         rule = rules[idx]
         draft = {
             "name": rule.get("name", ""),
@@ -1521,7 +1563,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             return await query.edit_message_text("❗ 无效的规则序号。")
         user_id = str(update.effective_user.id)
-        rules = _get_user_rules(user_id)
+        rules = _get_user_rules(context, user_id)
         if idx < 0 or idx >= len(rules):
             return await query.edit_message_text("❗ 无效的规则序号。")
         rule = rules[idx]
@@ -1536,7 +1578,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             return await query.edit_message_text("❗ 无效的规则序号。")
         user_id = str(update.effective_user.id)
-        rules = _get_user_rules(user_id)
+        rules = _get_user_rules(context, user_id)
         if idx < 0 or idx >= len(rules):
             return await query.edit_message_text("❗ 无效的规则序号。")
         rule = rules[idx]
@@ -1612,44 +1654,44 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.user_data.pop("channel_config_panel", None)
             return False
         if field == "remark":
-            _update_rule_field(user_id, idx, "name", text)
+            _update_rule_field(context, user_id, idx, "name", text)
         elif field == "range":
             parts = text.split()
             start_id = parts[0] if parts else ""
             end_id = parts[1] if len(parts) > 1 else ""
-            _update_rule_field(user_id, idx, "start_id", start_id)
-            _update_rule_field(user_id, idx, "end_id", end_id)
+            _update_rule_field(context, user_id, idx, "start_id", start_id)
+            _update_rule_field(context, user_id, idx, "end_id", end_id)
         elif field == "source":
             try:
                 source_id = int(text)
-                _update_rule_field(user_id, idx, "source_id", source_id)
+                _update_rule_field(context, user_id, idx, "source_id", source_id)
                 title = await _resolve_chat_title(context, source_id)
-                _update_rule_field(user_id, idx, "source_title", title or "")
+                _update_rule_field(context, user_id, idx, "source_title", title or "")
             except Exception:
                 await update.message.reply_text("❗ 请输入正确的频道ID（数字）。")
                 return True
         elif field == "target":
             try:
                 target_id = int(text)
-                _update_rule_field(user_id, idx, "target_id", target_id)
+                _update_rule_field(context, user_id, idx, "target_id", target_id)
                 title = await _resolve_chat_title(context, target_id)
-                _update_rule_field(user_id, idx, "target_title", title or "")
+                _update_rule_field(context, user_id, idx, "target_title", title or "")
             except Exception:
                 await update.message.reply_text("❗ 请输入正确的频道ID（数字）。")
                 return True
         elif field == "include":
             mode, cleaned = _parse_merge_mode(text)
             if cleaned in {"清空", "清除", "删除", "无", "-"}:
-                _update_rule_field(user_id, idx, "include_words", [])
+                _update_rule_field(context, user_id, idx, "include_words", [])
             else:
                 words = [w.strip() for w in cleaned.split(",") if w.strip()]
                 if mode == "append":
-                    rules = _get_user_rules(user_id)
+                    rules = _get_user_rules(context, user_id)
                     rule = rules[idx] if 0 <= idx < len(rules) else {}
                     merged = _merge_words(rule.get("include_words") or [], words)
-                    _update_rule_field(user_id, idx, "include_words", merged)
+                    _update_rule_field(context, user_id, idx, "include_words", merged)
                 else:
-                    _update_rule_field(user_id, idx, "include_words", words)
+                    _update_rule_field(context, user_id, idx, "include_words", words)
         elif field == "replace":
             mode, cleaned = _parse_merge_mode(text)
             pairs = []
@@ -1671,31 +1713,31 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         continue
                 pairs.append({"from": left.strip(), "to": right.strip()})
             if cleaned in {"清空", "清除", "删除", "无", "-"}:
-                _update_rule_field(user_id, idx, "replace_words", [])
+                _update_rule_field(context, user_id, idx, "replace_words", [])
             elif mode == "append":
-                rules = _get_user_rules(user_id)
+                rules = _get_user_rules(context, user_id)
                 rule = rules[idx] if 0 <= idx < len(rules) else {}
                 merged = _merge_replace_pairs(rule.get("replace_words") or [], pairs)
-                _update_rule_field(user_id, idx, "replace_words", merged)
+                _update_rule_field(context, user_id, idx, "replace_words", merged)
             else:
-                _update_rule_field(user_id, idx, "replace_words", pairs)
+                _update_rule_field(context, user_id, idx, "replace_words", pairs)
         elif field == "block":
             mode, cleaned = _parse_merge_mode(text)
             if cleaned in {"清空", "清除", "删除", "无", "-"}:
-                _update_rule_field(user_id, idx, "block_words", [])
+                _update_rule_field(context, user_id, idx, "block_words", [])
             else:
                 words = [w.strip() for w in cleaned.split(",") if w.strip()]
                 if mode == "append":
-                    rules = _get_user_rules(user_id)
+                    rules = _get_user_rules(context, user_id)
                     rule = rules[idx] if 0 <= idx < len(rules) else {}
                     merged = _merge_words(rule.get("block_words") or [], words)
-                    _update_rule_field(user_id, idx, "block_words", merged)
+                    _update_rule_field(context, user_id, idx, "block_words", merged)
                 else:
-                    _update_rule_field(user_id, idx, "block_words", words)
+                    _update_rule_field(context, user_id, idx, "block_words", words)
         elif field == "cut":
             mode, cleaned = _parse_merge_mode(text)
             if cleaned in {"清空", "清除", "删除", "无", "-"}:
-                _update_rule_field(user_id, idx, "cut_words", [])
+                _update_rule_field(context, user_id, idx, "cut_words", [])
             else:
                 parts = []
                 for line in cleaned.splitlines():
@@ -1704,37 +1746,37 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         continue
                     parts.extend([p.strip() for p in line.split(",") if p.strip()])
                 if mode == "append":
-                    rules = _get_user_rules(user_id)
+                    rules = _get_user_rules(context, user_id)
                     rule = rules[idx] if 0 <= idx < len(rules) else {}
                     existing = rule.get("cut_words") or []
                     if isinstance(existing, str):
                         existing = [existing] if existing else []
                     merged = _merge_words(existing, parts)
-                    _update_rule_field(user_id, idx, "cut_words", merged)
+                    _update_rule_field(context, user_id, idx, "cut_words", merged)
                 else:
-                    _update_rule_field(user_id, idx, "cut_words", parts)
+                    _update_rule_field(context, user_id, idx, "cut_words", parts)
         elif field == "suffix":
             mode, cleaned = _parse_merge_mode(text)
             if cleaned in {"清空", "清除", "删除", "无", "-"}:
-                _update_rule_field(user_id, idx, "suffix", "")
+                _update_rule_field(context, user_id, idx, "suffix", "")
             else:
                 cleaned = _normalize_newlines(cleaned)
                 if mode == "append":
-                    rules = _get_user_rules(user_id)
+                    rules = _get_user_rules(context, user_id)
                     rule = rules[idx] if 0 <= idx < len(rules) else {}
                     existing = _normalize_newlines(str(rule.get("suffix", "") or ""))
                     new_suffix = f"{existing}\n{cleaned}" if existing and cleaned else (existing or cleaned)
                     new_suffix = _normalize_newlines(new_suffix)
-                    _update_rule_field(user_id, idx, "suffix", new_suffix)
+                    _update_rule_field(context, user_id, idx, "suffix", new_suffix)
                 else:
-                    _update_rule_field(user_id, idx, "suffix", cleaned)
+                    _update_rule_field(context, user_id, idx, "suffix", cleaned)
         elif field == "media":
-            _update_rule_field(user_id, idx, "media_replace", text)
+            _update_rule_field(context, user_id, idx, "media_replace", text)
         elif field == "speed":
-            _update_rule_field(user_id, idx, "speed", text)
+            _update_rule_field(context, user_id, idx, "speed", text)
 
         context.user_data.pop("channel_config_panel", None)
-        rules = _get_user_rules(user_id)
+        rules = _get_user_rules(context, user_id)
         rule = rules[idx] if idx >= 0 and idx < len(rules) else {}
         await update.message.reply_text(
             _format_rule_panel_text(rule, idx),
@@ -1881,17 +1923,17 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except Exception:
                 await update.message.reply_text("❗ 请输入正确的频道ID（数字）。")
                 return True
-        ok = _update_rule_field(user_id, idx, field, value)
+        ok = _update_rule_field(context, user_id, idx, field, value)
         if not ok:
             await update.message.reply_text("❗ 更新失败，请重试。")
             return True
         if field == "source_id":
             title = await _resolve_chat_title(context, value)
-            _update_rule_field(user_id, idx, "source_title", title or "")
+            _update_rule_field(context, user_id, idx, "source_title", title or "")
         if field == "target_id":
             title = await _resolve_chat_title(context, value)
-            _update_rule_field(user_id, idx, "target_title", title or "")
-        rules = _get_user_rules(user_id)
+            _update_rule_field(context, user_id, idx, "target_title", title or "")
+        rules = _get_user_rules(context, user_id)
         rule = rules[idx]
         draft.update(
             {

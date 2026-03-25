@@ -310,7 +310,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     base_rules = config.get("forward_rules", []) if isinstance(config, dict) else []
     forward_rules = list(base_rules) if isinstance(base_rules, list) else []
 
-    user_config = load_json("data/forward_config_users.json")
+    user_config = load_json("data/forward_config_users_bot.json")
     if isinstance(user_config, dict):
         users = user_config.get("users", {})
         if isinstance(users, dict):
@@ -377,6 +377,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if _should_skip_by_links(rule, text, entities):
             continue
 
+        print(f"📥 监听到频道消息: source={list(source_channel_ids)} rule={rule.get('name','')} targets={rule.get('targets', [])}")
+
         # === MediaGroup 处理 ===
         media_group_id = getattr(msg, "media_group_id", None)
         if media_group_id:
@@ -437,7 +439,7 @@ async def handle_user_forward(update: Update, context: ContextTypes.DEFAULT_TYPE
     base_rules = config.get("forward_rules", []) if isinstance(config, dict) else []
     forward_rules = list(base_rules) if isinstance(base_rules, list) else []
 
-    user_config = load_json("data/forward_config_users.json")
+    user_config = load_json("data/forward_config_users_bot.json")
     if isinstance(user_config, dict):
         users = user_config.get("users", {})
         if isinstance(users, dict):
@@ -518,5 +520,4 @@ async def handle_user_forward(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # 注册
 def register_handle_message_handlers(app):
-    pass
-    # app.add_handler(MessageHandler(filters.ALL, handle_message))
+    app.add_handler(MessageHandler(filters.ALL, handle_message))

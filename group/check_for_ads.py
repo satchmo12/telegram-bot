@@ -297,6 +297,9 @@ async def check_for_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await msg.delete()
     except telegram.error.BadRequest as e:
+        msg = str(e).lower()
+        if "message can't be deleted" in msg or "message to delete not found" in msg:
+            return
         print(f"[删除失败] {e}")
         return
 

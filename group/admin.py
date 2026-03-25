@@ -1,5 +1,5 @@
-from telegram import Update, ChatPermissions
-from telegram.ext import CommandHandler, ContextTypes
+from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import CommandHandler, ContextTypes, CallbackQueryHandler
 from telegram.constants import ChatMemberStatus
 from telegram.error import BadRequest, Forbidden
 import re
@@ -15,6 +15,7 @@ from utils import (
     GROUP_LIST_FILE,
 )
 import datetime
+from group.mute_registry import add_mute, remove_mute, list_mutes
 
 
 def get_warnings_data() -> dict:
@@ -187,6 +188,7 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
+        target_user = update.message.reply_to_message.from_user
         if context.args:
             # 解析时长
             duration = parse_duration(context.args[0])
@@ -199,10 +201,11 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await context.bot.restrict_chat_member(
             chat.id,
-            update.message.reply_to_message.from_user.id,
+            target_user.id,
             ChatPermissions(can_send_messages=False),
             until_date=until,
         )
+        add_mute(str(chat.id), target_user.id, target_user.full_name, source="admin")
         await safe_reply(update, context,tip)
     except Exception as e:
         await safe_reply(update, context,f"❌ 失败：{e}")
@@ -224,9 +227,10 @@ async def unmute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_reply(update, context,"❗此功能只能在超级群中使用。")
         return
     try:
+        target_user = update.message.reply_to_message.from_user
         await context.bot.restrict_chat_member(
             update.effective_chat.id,
-            update.message.reply_to_message.from_user.id,
+            target_user.id,
             ChatPermissions(
                 can_send_messages=True,
                 can_send_audios=True,
@@ -244,6 +248,7 @@ async def unmute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 can_manage_topics=False,
             ),
         )
+        remove_mute(str(update.effective_chat.id), target_user.id)
         await safe_reply(update, context,"🔊 已解除禁言。")
     except (BadRequest, Forbidden) as e:
         if "Not enough rights" in str(e):
@@ -309,6 +314,7 @@ async def unmute_user_by_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 can_manage_topics=False,
             ),
         )
+        remove_mute(str(chat_id), user_id)
         await safe_reply(
             update,
             context,
@@ -434,6 +440,31 @@ async def get_group_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         return await safe_reply(update, context,"🚫 你不是管理员，无法执行此命令。")
+
+
+@group_enabled_only
+@register_command("查看禁言")
+async def list_mute_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        return
+    chat_id = str(update.effective_chat.id)
+    data = list_mutes(chat_id)
+    if not data:
+        return await safe_reply(update, context, "✅ 当前没有被禁言的用户。")
+
+    lines = ["🔇 禁言列表："]
+    keyboard_rows = []
+    for idx, (uid, info) in enumerate(data.items(), start=1):
+        name = (info or {}).get("name") or uid
+        lines.append(f"{idx}. {name} (ID: {uid})")
+        keyboard_rows.append(
+            [InlineKeyboardButton(f"解禁 {name}", callback_data=f"mute_list_unmute|{chat_id}|{uid}")]
+        )
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(keyboard_rows),
+    )
 
 
 @register_command("我要进群", "进群")
@@ -674,6 +705,41 @@ async def check_can_restrict_in_chat(
         return False
 
 
+async def mute_list_unmute_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    try:
+        _, chat_id_str, user_id_str = query.data.split("|", 2)
+        chat_id = int(chat_id_str)
+        user_id = int(user_id_str)
+    except Exception:
+        return
+
+    try:
+        member = await context.bot.get_chat_member(chat_id, query.from_user.id)
+        if member.status not in {"administrator", "creator"} and not is_super_admin(query.from_user.id):
+            return await query.answer("仅管理员可操作。", show_alert=True)
+    except Exception:
+        return await query.answer("无法校验权限。", show_alert=True)
+
+    if not await check_can_restrict_in_chat(context, chat_id):
+        return await query.answer("⚠️ 机器人没有限制成员权限。", show_alert=True)
+
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            permissions=_full_send_permissions(),
+        )
+        remove_mute(str(chat_id), user_id)
+        await query.answer("✅ 已解除禁言", show_alert=True)
+        if query.message:
+            await query.message.edit_reply_markup(reply_markup=None)
+    except Exception as e:
+        await query.answer(f"❌ 解禁失败：{e}", show_alert=True)
+
+
 def register_admin_handlers(app):
     app.add_handler(CommandHandler("help", start_help))
     app.add_handler(CommandHandler("ban", ban_user))
@@ -691,3 +757,4 @@ def register_admin_handlers(app):
     app.add_handler(CommandHandler("groupid", get_group_id))
     app.add_handler(CommandHandler("addgroup", toggle_group_whitelist))
     app.add_handler(CommandHandler("recall", recall_bot_message))
+    app.add_handler(CallbackQueryHandler(mute_list_unmute_callback, pattern=r"^mute_list_unmute\|"))

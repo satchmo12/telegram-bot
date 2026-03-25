@@ -52,6 +52,9 @@ load_dotenv(override=True)
 async def error_handler(update, context):
     err = getattr(context, "error", None)
     if isinstance(err, NetworkError):
+        msg = str(err).lower()
+        if "message to delete not found" in msg:
+            return
         logging.warning("网络错误，可能是Telegram服务器临时不可用: %s", err)
         return
     if isinstance(err, TimedOut):
@@ -375,7 +378,11 @@ def create_app(bot_cfg: dict):
     )
 
     app.job_queue.run_repeating(hour_master_job_wrapper, interval=7200, first=0)
-    app.job_queue.run_repeating(ten_minute_master_job_wrapper, interval=60, first=60)
+    app.job_queue.run_repeating(
+        ten_minute_master_job_wrapper,
+        interval=60,
+        first=60,
+    )
 
     app.job_queue.run_repeating(
         five_minute_master_job_wrapper,
