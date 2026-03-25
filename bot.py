@@ -392,6 +392,8 @@ def create_app(bot_cfg: dict):
     )
     # Delay a bit to avoid startup misfire on some PTB versions.
     app.job_queue.run_once(start_telethon_forwarder_job, when=1)
+    # 兜底重试：防止任务错过导致协议号未启动
+    app.job_queue.run_repeating(start_telethon_forwarder_job, interval=30, first=30)
 
     app.add_error_handler(error_handler)
 

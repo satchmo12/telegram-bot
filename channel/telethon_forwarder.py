@@ -394,7 +394,14 @@ def _process_text_with_entities(text: str, rule: dict, entities) -> tuple[str, L
         # If text unchanged, keep original entities to preserve formatting.
         if processed == t:
             return t, list(entities or [])
-        return processed, []
+        if processed is None:
+            return None, []
+        new_entities = _remap_entities_by_diff(t, processed, entities)
+        if processed is not None:
+            processed, new_entities = _truncate_with_entities(
+                processed, new_entities, max_len=len(processed)
+            )
+        return processed, new_entities
     if rule.get("cut_words"):
         t, entities = _apply_cut_with_entities(t, entities, rule.get("cut_words", ""))
     suffix = str(rule.get("suffix", "") or "")
@@ -828,10 +835,6 @@ async def _ensure_client(bot_name: str, session_name: str, api_id: int, api_hash
                 continue
             targets = rule.get("targets", []) or []
             raw_text = _get_message_text(message)
-            if _should_skip_by_links(rule, raw_text, message.entities):
-                if DEBUG_FORWARD:
-                    print("⛔ 跳过: 含链接或屏蔽域名")
-                continue
             if _has_fold_entities(message.entities):
                 processed_text, processed_entities = _process_text_preserve_folds(
                     raw_text, rule, message.entities
@@ -851,6 +854,12 @@ async def _ensure_client(bot_name: str, session_name: str, api_id: int, api_hash
                 else:
                     processed_text = _process_text(raw_text, rule)
                     processed_entities = None
+            if rule.get("skip_links") and _has_link(
+                processed_text or "", processed_entities
+            ):
+                if DEBUG_FORWARD:
+                    print("⛔ 跳过: 含链接或屏蔽域名")
+                continue
             if processed_text == "":
                 # If there's media but no text, still forward the media-only message.
                 if not message.media or raw_text:
@@ -953,6 +962,7 @@ async def _ensure_client(bot_name: str, session_name: str, api_id: int, api_hash
         if caption_msg is None:
             caption_msg = messages[0]
         raw_caption = _get_message_text(caption_msg)
+        files = [m.media for m in messages if m.media]
 
         state = _load_history_state()
         state_changed = False
@@ -967,10 +977,6 @@ async def _ensure_client(bot_name: str, session_name: str, api_id: int, api_hash
                     print("⛔ 跳过(相册): 类型过滤不匹配")
                 continue
             targets = rule.get("targets", []) or []
-            if _should_skip_by_links(rule, raw_caption, caption_msg.entities):
-                if DEBUG_FORWARD:
-                    print("⛔ 跳过(相册): 含链接或屏蔽域名")
-                continue
             if _has_fold_entities(caption_msg.entities):
                 processed_caption, processed_caption_entities = _process_text_preserve_folds(
                     raw_caption, rule, caption_msg.entities
@@ -990,6 +996,12 @@ async def _ensure_client(bot_name: str, session_name: str, api_id: int, api_hash
                 else:
                     processed_caption = _process_text(raw_caption, rule)
                     processed_caption_entities = None
+            if rule.get("skip_links") and _has_link(
+                processed_caption or "", processed_caption_entities
+            ):
+                if DEBUG_FORWARD:
+                    print("⛔ 跳过(相册): 含链接或屏蔽域名")
+                continue
             if processed_caption == "":
                 # If there's media but no caption, still forward the album.
                 if not files or raw_caption:
@@ -997,7 +1009,6 @@ async def _ensure_client(bot_name: str, session_name: str, api_id: int, api_hash
                         print("⛔ 跳过(相册): 过滤后文本为空")
                     continue
             apply_processing = _needs_processing(rule)
-            files = [m.media for m in messages if m.media]
             if not files:
                 if DEBUG_FORWARD:
                     print("⛔ 跳过(相册): 无媒体文件")
