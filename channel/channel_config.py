@@ -8,7 +8,15 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from command_router import register_command
-from utils import BOT_USER_FILE, get_bot_path, is_super_admin, load_json, save_json, safe_reply
+from utils import (
+    BOT_USER_FILE,
+    get_sessions_dir,
+    is_shared_session_name,
+    is_super_admin,
+    load_json,
+    save_json,
+    safe_reply,
+)
 
 FORWARD_USER_CONFIG_FILE = "data/forward_config_users_telethon.json"
 FORWARD_USER_CONFIG_BOT_FILE = "data/forward_config_users_bot.json"
@@ -205,6 +213,8 @@ def _load_session_owners() -> dict:
 def _is_session_owner(user, session_name: str) -> bool:
     if not user or not session_name:
         return False
+    if is_shared_session_name(session_name):
+        return True
     data = _load_session_owners()
     record = data.get("sessions", {}).get(session_name)
     if not isinstance(record, dict):
@@ -217,8 +227,10 @@ def _is_session_owner(user, session_name: str) -> bool:
     )
 
 
-def _get_sessions_dir(context: ContextTypes.DEFAULT_TYPE) -> str:
-    base = get_bot_path(context, "sessions")
+def _get_sessions_dir(
+    context: ContextTypes.DEFAULT_TYPE, session_name: Optional[str] = None
+) -> str:
+    base = get_sessions_dir(context, session_name)
     os.makedirs(base, exist_ok=True)
     return base
 
@@ -236,11 +248,13 @@ def _list_accessible_sessions(context: ContextTypes.DEFAULT_TYPE, user) -> list[
             names.append(raw)
     names = sorted(names)
     if not user or is_super_admin(user.id):
-        return names
-    return [n for n in names if _is_session_owner(user, n)]
+        return [n for n in names if not is_shared_session_name(n)]
+    return [n for n in names if _is_session_owner(user, n) and not is_shared_session_name(n)]
 
 
 def _get_session_label(session_name: str) -> str:
+    if is_shared_session_name(session_name):
+        return session_name
     data = _load_session_owners()
     record = data.get("sessions", {}).get(session_name)
     if isinstance(record, dict):
@@ -1012,7 +1026,10 @@ def _update_rule_field(context: ContextTypes.DEFAULT_TYPE, user_id: str, index: 
     elif field == "submit_user":
         rule["replace_submit_user"] = value
     elif field == "session_name":
-        rule["session_name"] = str(value or "").strip()
+        session_name = str(value or "").strip()
+        if is_shared_session_name(session_name):
+            return False
+        rule["session_name"] = session_name
     else:
         return False
     rules[index] = rule

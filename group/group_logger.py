@@ -152,8 +152,9 @@ async def track_bot_group_membership(
     old_status = update.my_chat_member.old_chat_member.status
     new_status = update.my_chat_member.new_chat_member.status
 
-    # 状态没变化不处理
-    if old_status == new_status:
+    # 状态没变化时，若已是离群状态仍同步 bot_in_group=false
+    status_unchanged = old_status == new_status
+    if status_unchanged and new_status not in {"left", "kicked"}:
         return
 
     in_group = _is_bot_in_group_status(new_status)

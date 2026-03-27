@@ -7,7 +7,15 @@ from datetime import datetime
 from typing import Optional
 
 from command_router import register_command
-from utils import get_bot_path, load_json, save_json, is_super_admin
+from utils import (
+    SHARED_SESSION_NAME,
+    get_sessions_dir,
+    get_session_path,
+    is_shared_session_name,
+    load_json,
+    save_json,
+    is_super_admin,
+)
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CallbackQueryHandler
 from channel.channel_config import start_channel_config_with_source, start_channel_config_new
@@ -148,6 +156,8 @@ def _get_cached_session_label(session_name: str) -> str:
 def _is_session_owner(user, session_name: str) -> bool:
     if not user or not session_name:
         return False
+    if is_shared_session_name(session_name):
+        return True
     data = _load_session_owners()
     record = data.get("sessions", {}).get(session_name)
     if not isinstance(record, dict):
@@ -209,23 +219,29 @@ def _sanitize_phone(phone: str) -> str:
     return p
 
 
-def _get_sessions_dir(context: ContextTypes.DEFAULT_TYPE) -> str:
-    base = get_bot_path(context, "sessions")
+def _get_sessions_dir(
+    context: ContextTypes.DEFAULT_TYPE, session_name: Optional[str] = None
+) -> str:
+    base = get_sessions_dir(context, session_name)
     os.makedirs(base, exist_ok=True)
     return base
 
 
 def _list_session_names(context: ContextTypes.DEFAULT_TYPE, user=None) -> list[str]:
-    base = _get_sessions_dir(context)
-    if not os.path.isdir(base):
-        return []
-    names = []
-    for name in os.listdir(base):
-        if not name.endswith(".session"):
-            continue
-        raw = name[: -len(".session")]
-        if raw:
-            names.append(raw)
+    bot_base = _get_sessions_dir(context)
+    shared_base = _get_sessions_dir(context, "main")
+    names = set()
+    if os.path.isdir(bot_base):
+        for name in os.listdir(bot_base):
+            if not name.endswith(".session"):
+                continue
+            raw = name[: -len(".session")]
+            if raw:
+                names.add(raw)
+    if shared_base != bot_base and os.path.isdir(shared_base):
+        main_path = os.path.join(shared_base, f"{SHARED_SESSION_NAME}.session")
+        if os.path.exists(main_path):
+            names.add(SHARED_SESSION_NAME)
     names = sorted(names)
     if not user or (user and is_super_admin(user.id)):
         return names
@@ -359,8 +375,7 @@ async def handle_telethon_login_text(update: Update, context: ContextTypes.DEFAU
         if not group_ids:
             await _plain_reply(update, context, "未获取到群组列表（可能未加入群）。")
             return True
-        sessions_dir = _get_sessions_dir(context)
-        session_path = os.path.join(sessions_dir, session_name)
+        session_path = get_session_path(context, session_name)
         client = TelegramClient(session_path, api_id, api_hash)
         await client.connect()
         try:
@@ -462,8 +477,7 @@ async def handle_telethon_login_text(update: Update, context: ContextTypes.DEFAU
             await _plain_reply(update, context, "请输入群号/用户名/邀请链接。")
             return True
 
-        sessions_dir = _get_sessions_dir(context)
-        session_path = os.path.join(sessions_dir, session_name)
+        session_path = get_session_path(context, session_name)
         client = TelegramClient(session_path, api_id, api_hash)
         await client.connect()
         try:
@@ -511,8 +525,8 @@ async def handle_telethon_login_text(update: Update, context: ContextTypes.DEFAU
         if not phone or len(phone) < 6:
             await _plain_reply(update, context, "手机号格式不正确，请重新输入。")
             return True
-        sessions_dir = _get_sessions_dir(context)
-        session_path = os.path.join(sessions_dir, phone)
+        _get_sessions_dir(context, phone)
+        session_path = get_session_path(context, phone)
         client = TelegramClient(session_path, api_id, api_hash)
         await client.connect()
         await client.send_code_request(phone)
@@ -675,8 +689,7 @@ async def _fetch_account_channels(
     except Exception:
         return []
 
-    sessions_dir = _get_sessions_dir(context)
-    session_path = os.path.join(sessions_dir, session_name)
+    session_path = get_session_path(context, session_name)
     client = TelegramClient(session_path, api_id, api_hash)
     try:
         await client.connect()
@@ -715,8 +728,7 @@ async def _fetch_account_groups(
     except Exception:
         return []
 
-    sessions_dir = _get_sessions_dir(context)
-    session_path = os.path.join(sessions_dir, session_name)
+    session_path = get_session_path(context, session_name)
     client = TelegramClient(session_path, api_id, api_hash)
     try:
         await client.connect()
@@ -762,8 +774,7 @@ async def _fetch_account_group_ids(
     except Exception:
         return []
 
-    sessions_dir = _get_sessions_dir(context)
-    session_path = os.path.join(sessions_dir, session_name)
+    session_path = get_session_path(context, session_name)
     client = TelegramClient(session_path, api_id, api_hash)
     try:
         await client.connect()
@@ -802,8 +813,7 @@ async def _fetch_account_group_ids(
     except Exception:
         return []
 
-    sessions_dir = _get_sessions_dir(context)
-    session_path = os.path.join(sessions_dir, session_name)
+    session_path = get_session_path(context, session_name)
     client = TelegramClient(session_path, api_id, api_hash)
     try:
         await client.connect()
@@ -841,8 +851,7 @@ async def _get_session_label(context: ContextTypes.DEFAULT_TYPE, session_name: s
         from telethon import TelegramClient
     except Exception:
         return session_name
-    sessions_dir = _get_sessions_dir(context)
-    session_path = os.path.join(sessions_dir, session_name)
+    session_path = get_session_path(context, session_name)
     client = TelegramClient(session_path, api_id, api_hash)
     try:
         await client.connect()

@@ -39,6 +39,7 @@ import os
 import cv2 as cv
 import numpy as np
 
+
 # ---------------- TON 用户名查询 ----------------
 def _check_ton_username_sync(username: str) -> str:
     url = f"https://tonapi.io/v2/dns/{username}.ton"
@@ -57,6 +58,7 @@ def _check_ton_username_sync(username: str) -> str:
 
 async def check_ton_username(username: str) -> str:
     return await asyncio.to_thread(_check_ton_username_sync, username)
+
 
 # ---------------- 配置 ----------------
 DATA_FILE = "data/learned_pairs.json"  # 存储学习问答对
@@ -245,11 +247,7 @@ def _normalize_keywords(raw_keywords) -> list[str]:
     else:
         return []
 
-    return [
-        kw.strip().lower()
-        for kw in keywords
-        if isinstance(kw, str) and kw.strip()
-    ]
+    return [kw.strip().lower() for kw in keywords if isinstance(kw, str) and kw.strip()]
 
 
 def _contains_ad(text: str, keywords: list[str]) -> bool:
@@ -571,13 +569,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ts = time.time()
 
     # ---------------- @用户名 直接查询 TON ----------------
-    if text.startswith("@") or text.lower().endswith(".ton"):
-        m = re.match(r"^@?([A-Za-z0-9_]{3,})(?:\\.ton)?$", text)
-        if m:
-            username = m.group(1)
-            result = await check_ton_username(username)
-            await update.message.reply_text(f"查询 @{username}:\n{result}")
-            return
+    # 暂时关闭 @ 触发（仅保留 /check）
+    # if text.startswith("@") or text.lower().endswith(".ton"):
+    #     m = re.match(r"^@?([A-Za-z0-9_]{3,})(?:\\.ton)?$", text)
+    #     if m:
+    #         username = m.group(1)
+    #         result = await check_ton_username(username)
+    #         await update.message.reply_text(f"查询 @{username}:\n{result}")
+    #         return
 
     # ---------------- 管理员增加曝光 ----------------
     m = re.match(r"^增加曝光\s*\+?\s*(\d+)$", text)
@@ -625,7 +624,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ---------------- 无聊/冒泡提示群名 ----------------
     chat = update.effective_chat
     if chat and text:
-        triggers = ["好无聊", "无聊", "冒泡", "冒个泡", "冒泡一下", "签到", "6"]
+        triggers = ["好无聊", "无聊", "冒泡", "冒个泡", "冒泡一下", "签到"]
         if any(k in text for k in triggers):
             groups = get_group_whitelist(context)
             lines = ["群推荐：不想被推荐点击机器人关闭群推荐即可，曝光度越高排名越靠前"]
@@ -636,7 +635,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             last_ts = int(cfg_self.get("recommend_last_ts", 0) or 0)
             if not bool(cfg_self.get("recommend", True)):
                 return
-            if now_ts - last_ts < 300:
+            # 多长时间触发一次
+            if now_ts - last_ts < 600:
                 return
             cfg_self["recommend_last_ts"] = now_ts
             groups[chat_id_str] = cfg_self
@@ -659,19 +659,20 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 username = (cfg.get("username") or "").strip().lstrip("@")
                 if username:
                     link = f"https://t.me/{username}"
-                    lines.append(f"{idx}. <a href=\"{link}\">{safe_title}</a>（曝光度 {exposure}）")
+                    lines.append(
+                        f'{idx}. <a href="{link}">{safe_title}</a>（曝光度 {exposure}）'
+                    )
                 else:
                     lines.append(f"{idx}. {safe_title}（曝光度 {exposure}）")
 
             # 仅增加当前触发群的曝光度
             if chat_id_str in groups and isinstance(groups[chat_id_str], dict):
                 if bool(groups[chat_id_str].get("recommend", False)):
-                    groups[chat_id_str]["exposure"] = int(
-                        groups[chat_id_str].get("exposure", 0)
-                    ) + 1
+                    groups[chat_id_str]["exposure"] = (
+                        int(groups[chat_id_str].get("exposure", 0)) + 1
+                    )
 
             save_json(GROUP_LIST_FILE, groups)
-
 
             # 避免超长消息，简单分片发送
             chunk = ""
@@ -912,13 +913,21 @@ async def active_speak_control(update: Update, context: ContextTypes.DEFAULT_TYP
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
             keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("👉 去私聊配置", url=f"https://t.me/{username}")]]
+                [
+                    [
+                        InlineKeyboardButton(
+                            "👉 去私聊配置", url=f"https://t.me/{username}"
+                        )
+                    ]
+                ]
             )
             return await update.message.reply_text(
                 "请在私聊里发送“群配置”修改主动说话设置，避免群里多机器人同时响应。",
                 reply_markup=keyboard,
             )
-        return await safe_reply(update, context, "请私聊机器人发送“群配置”修改主动说话设置。")
+        return await safe_reply(
+            update, context, "请私聊机器人发送“群配置”修改主动说话设置。"
+        )
 
     chat_id = str(update.effective_chat.id)
     group_whitelist = get_group_whitelist(context)
@@ -1037,9 +1046,7 @@ def _pick_active_speak_text(memory: dict, ad_keywords: list[str]) -> Optional[st
     if not question_pool and not answer_pool:
         return None
 
-    choose_question = bool(question_pool) and (
-        not answer_pool or random.random() < 0.5
-    )
+    choose_question = bool(question_pool) and (not answer_pool or random.random() < 0.5)
     if choose_question:
         return random.choice(question_pool)
 
@@ -1103,10 +1110,7 @@ async def speaking_to(context: ContextTypes.DEFAULT_TYPE):
         if current_minute % interval_min != offset_min:
             continue
 
-        if (
-            now_ts - last_active_speak_ts.get(runtime_chat_key, 0)
-            < interval_min * 60
-        ):
+        if now_ts - last_active_speak_ts.get(runtime_chat_key, 0) < interval_min * 60:
             continue
 
         try:
@@ -1166,7 +1170,9 @@ async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
             continue
 
         runtime_chat_key = get_runtime_chat_key(context, str(chat_id))
-        mode = str(cfg.get(GROUP_KEY_AD_PUSH_MODE, AD_PUSH_MODE_INTERVAL)).strip().lower()
+        mode = (
+            str(cfg.get(GROUP_KEY_AD_PUSH_MODE, AD_PUSH_MODE_INTERVAL)).strip().lower()
+        )
 
         if mode == AD_PUSH_MODE_FIXED:
             slots = _parse_fixed_slots(str(cfg.get(GROUP_KEY_AD_PUSH_TIMES, "")))
@@ -1185,7 +1191,9 @@ async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
         interval_min = cfg.get(GROUP_KEY_AD_PUSH_INTERVAL, AD_PUSH_DEFAULT_INTERVAL_MIN)
         if not isinstance(interval_min, int):
             interval_min = AD_PUSH_DEFAULT_INTERVAL_MIN
-        interval_min = max(AD_PUSH_MIN_INTERVAL_MIN, min(AD_PUSH_MAX_INTERVAL_MIN, interval_min))
+        interval_min = max(
+            AD_PUSH_MIN_INTERVAL_MIN, min(AD_PUSH_MAX_INTERVAL_MIN, interval_min)
+        )
 
         current_minute = int(now_ts // 60)
         offset_min = abs(hash(f"{runtime_chat_key}:ad")) % interval_min

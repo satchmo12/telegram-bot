@@ -254,7 +254,12 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
         return await safe_reply(update, context, "📌 请【回复】你要广播的内容")
 
-    group_ids = list(get_group_list().keys())
+    group_list = get_group_list()
+    group_ids = [
+        int(chat_id)
+        for chat_id, cfg in group_list.items()
+        if isinstance(cfg, dict) and bool(cfg.get("bot_in_group", True))
+    ]
     src = update.message.reply_to_message
 
     await send_to_targets(context.bot, group_ids, src)

@@ -17,6 +17,8 @@ from utils import (
     save_json,
     set_runtime_bot_name,
     get_runtime_bot_name,
+    get_sessions_dir_by_bot,
+    is_shared_session_name,
 )
 from channel.channel_forwarder import _is_active_subscription
 from channel.telethon_login import _get_api_creds
@@ -204,6 +206,8 @@ def _can_use_rule(user_id: str, username: str) -> bool:
 
 
 def _is_owner_for_session(owners: dict, session_name: str, user_id: str, username: str) -> bool:
+    if is_shared_session_name(session_name):
+        return False
     sessions = owners.get("sessions", {}) if isinstance(owners, dict) else {}
     record = sessions.get(session_name)
     if not isinstance(record, dict):
@@ -791,6 +795,8 @@ def _collect_rules() -> Dict[str, List[dict]]:
             session_name = str(rule.get("session_name", "") or "").strip()
             if not session_name:
                 continue
+            if is_shared_session_name(session_name):
+                continue
             if not _is_owner_for_session(owners, session_name, str(user_id), username):
                 continue
             result.setdefault(session_name, []).append(rule)
@@ -802,7 +808,11 @@ async def _ensure_client(bot_name: str, session_name: str, api_id: int, api_hash
     client = per_bot_clients.get(session_name)
     if client:
         return client
-    session_path = os.path.join("sessions", session_name)
+    if is_shared_session_name(session_name):
+        return None
+    base = get_sessions_dir_by_bot(bot_name, session_name)
+    os.makedirs(base, exist_ok=True)
+    session_path = os.path.join(base, session_name)
     client = TelegramClient(session_path, api_id, api_hash)
     await client.connect()
     if not await client.is_user_authorized():

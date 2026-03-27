@@ -109,6 +109,8 @@ BOT_OWNER_ID = 6085551760  # 默认主人ID（各机器人可在 TOKEN_CONFIG �
 BOT_RUNTIME_NAME: ContextVar[str] = ContextVar("BOT_RUNTIME_NAME", default="")
 BOT_OWNER_MAP = {}
 
+SHARED_SESSION_NAME = "main"
+
 
 def set_runtime_bot_name(bot_name: str):
     BOT_RUNTIME_NAME.set((bot_name or "").strip())
@@ -163,6 +165,42 @@ def get_bot_path(context: ContextTypes.DEFAULT_TYPE, path: str) -> str:
         return os.path.join(CON_DATA_DIR, bot_name, rel)
 
     return path
+
+
+def _normalize_session_name(session_name: Optional[str]) -> str:
+    return (session_name or "").strip().lower()
+
+
+def is_shared_session_name(session_name: Optional[str]) -> bool:
+    return _normalize_session_name(session_name) == SHARED_SESSION_NAME
+
+
+def get_sessions_dir_by_bot(bot_name: str, session_name: Optional[str] = None) -> str:
+    """
+    生成 session 目录：
+    - shared main -> sessions/
+    - others      -> sessions/<bot_name>/
+    """
+    if is_shared_session_name(session_name):
+        return "sessions"
+    if not bot_name:
+        return "sessions"
+    return os.path.join("sessions", str(bot_name).strip())
+
+
+def get_sessions_dir(
+    context: ContextTypes.DEFAULT_TYPE, session_name: Optional[str] = None
+) -> str:
+    if not context or not getattr(context, "application", None):
+        return get_sessions_dir_by_bot("", session_name)
+    bot_name = (context.application.bot_data.get("name") or "").strip()
+    return get_sessions_dir_by_bot(bot_name, session_name)
+
+
+def get_session_path(context: ContextTypes.DEFAULT_TYPE, session_name: str) -> str:
+    base = get_sessions_dir(context, session_name)
+    os.makedirs(base, exist_ok=True)
+    return os.path.join(base, session_name)
 
 
 def _resolve_json_path(path: str) -> str:
@@ -255,6 +293,16 @@ def load_json(path: str):
                 _cache_data[path] = {}
 
             _cache_timestamp[path] = time.time()
+
+        # groups.json 默认 bot_in_group=false（避免误判在群内）
+        if (
+            isinstance(_cache_data.get(path), dict)
+            and isinstance(original_path, str)
+            and original_path.replace("\\", "/").endswith("groups.json")
+        ):
+            for _, cfg in _cache_data[path].items():
+                if isinstance(cfg, dict) and "bot_in_group" not in cfg:
+                    cfg["bot_in_group"] = False
 
         return _cache_data[path]
 
@@ -407,7 +455,7 @@ def get_group_whitelist(context: ContextTypes.DEFAULT_TYPE = None) -> dict:
 
         defaults = {
             "enabled": True,
-            "bot_in_group": True,
+            "bot_in_group": False,
             "recommend": True,
             "exposure": 0,
             "recommend_last_ts": 0,
