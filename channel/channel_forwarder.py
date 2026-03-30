@@ -5,6 +5,7 @@ from datetime import datetime
 from telegram import Update, InputMediaPhoto, InputMediaVideo, InputMediaDocument
 import telegram
 from telegram.ext import MessageHandler, ContextTypes, filters
+from channel.access_control import is_channel_subscription_required
 from utils import load_json, is_super_admin
 
 MEDIA_GROUP_CACHE = {}
@@ -337,7 +338,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not guess_username and isinstance(rules, list) and rules:
                     raw = str(rules[0].get("replace_submit_user", "") or "")
                     guess_username = raw.lstrip("@")
-                if not (is_super_admin(user_id) or _is_active_subscription(user_id, guess_username)):
+                if is_channel_subscription_required() and not (
+                    is_super_admin(user_id)
+                    or _is_active_subscription(user_id, guess_username)
+                ):
                     continue
                 if isinstance(rules, list):
                     forward_rules.extend(list(rules))
@@ -468,7 +472,10 @@ async def handle_user_forward(update: Update, context: ContextTypes.DEFAULT_TYPE
                 if not guess_username and isinstance(rules, list) and rules:
                     raw = str(rules[0].get("replace_submit_user", "") or "")
                     guess_username = raw.lstrip("@")
-                if not (is_super_admin(user_id) or _is_active_subscription(user_id, guess_username)):
+                if is_channel_subscription_required() and not (
+                    is_super_admin(user_id)
+                    or _is_active_subscription(user_id, guess_username)
+                ):
                     continue
                 if isinstance(rules, list):
                     forward_rules.extend(list(rules))

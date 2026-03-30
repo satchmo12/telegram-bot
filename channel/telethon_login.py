@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Optional
 
 from command_router import register_command
+from channel.access_control import is_channel_subscription_required
 from utils import (
     SHARED_SESSION_NAME,
     get_sessions_dir,
@@ -47,6 +48,41 @@ async def _plain_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
         )
     except Exception:
         return None
+
+
+def _login_cancel_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("❌ 取消登录", callback_data=f"{CALLBACK_PREFIX}:cancel")]]
+    )
+
+
+async def _send_login_prompt(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, uid: str, text: str
+):
+    state = _LOGIN_STATE.setdefault(uid, {})
+    chat_id = state.get("prompt_chat_id")
+    message_id = state.get("prompt_message_id")
+    if chat_id and message_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception:
+            pass
+
+    msg = await _plain_reply(
+        update, context, text, reply_markup=_login_cancel_markup()
+    )
+    if msg:
+        state["prompt_chat_id"] = msg.chat_id
+        state["prompt_message_id"] = msg.message_id
+    return msg
+
+
+def _empty_sessions_reply_markup(context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("start_panel"):
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ 返回", callback_data="start:back")]]
+        )
+    return None
 
 
 async def _clear_login_state(uid: str, context: ContextTypes.DEFAULT_TYPE):
@@ -175,17 +211,27 @@ def _can_access_session(user, session_name: str) -> bool:
         return False
     if is_super_admin(user.id):
         return True
+    if not is_channel_subscription_required():
+        return _is_session_owner(user, session_name)
     return _is_active_subscription(user) and _is_session_owner(user, session_name)
 
 
 def _can_login(user) -> bool:
-    return bool(user and (is_super_admin(user.id) or _is_active_subscription(user)))
+    if not user:
+        return False
+    if is_super_admin(user.id):
+        return True
+    if not is_channel_subscription_required():
+        return True
+    return _is_active_subscription(user)
 
 
 def _require_active_subscription(user) -> bool:
     if not user:
         return False
     if is_super_admin(user.id):
+        return True
+    if not is_channel_subscription_required():
         return True
     return _is_active_subscription(user)
 
@@ -314,10 +360,9 @@ async def _start_login_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     uid = str(update.effective_user.id)
     _LOGIN_STATE[uid] = {"step": LOGIN_STEP_PHONE}
-    msg = await _plain_reply(update, context, "请输入手机号（含国家码），例如：+8613812345678")
-    if msg:
-        _LOGIN_STATE[uid]["prompt_chat_id"] = msg.chat_id
-        _LOGIN_STATE[uid]["prompt_message_id"] = msg.message_id
+    await _send_login_prompt(
+        update, context, uid, "请输入手机号（含国家码），例如：+8613812345678"
+    )
 
 
 @register_command("登录小号", "小号登录", "协议号登录")
@@ -443,7 +488,12 @@ async def handle_telethon_login_text(update: Update, context: ContextTypes.DEFAU
 
     try:
         from telethon import TelegramClient
-        from telethon.errors import SessionPasswordNeededError
+        from telethon.errors import (
+            PasswordHashInvalidError,
+            PhoneCodeExpiredError,
+            PhoneCodeInvalidError,
+            SessionPasswordNeededError,
+        )
     except Exception:
         await _clear_login_state(uid, context)
         await _plain_reply(update, context, "❗ Telethon 未安装，请先安装依赖。")
@@ -531,7 +581,7 @@ async def handle_telethon_login_text(update: Update, context: ContextTypes.DEFAU
         await client.connect()
         await client.send_code_request(phone)
         state.update({"step": LOGIN_STEP_CODE, "phone": phone, "client": client})
-        await _plain_reply(update, context, "已发送验证码，请输入验证码：")
+        await _send_login_prompt(update, context, uid, "已发送验证码，请输入验证码：")
         return True
 
     if step == LOGIN_STEP_CODE:
@@ -549,7 +599,19 @@ async def handle_telethon_login_text(update: Update, context: ContextTypes.DEFAU
             await client.sign_in(phone=phone, code=code)
         except SessionPasswordNeededError:
             state["step"] = LOGIN_STEP_PASSWORD
-            await _plain_reply(update, context, "该账号开启了二步验证，请输入密码：")
+            await _send_login_prompt(
+                update, context, uid, "该账号开启了二步验证，请输入密码："
+            )
+            return True
+        except PhoneCodeInvalidError:
+            await _send_login_prompt(
+                update, context, uid, "验证码错误，请重新输入验证码："
+            )
+            return True
+        except PhoneCodeExpiredError:
+            await _teardown_client(state)
+            await _clear_login_state(uid, context)
+            await _plain_reply(update, context, "验证码已过期，请重新发送「登录小号」。")
             return True
         label = ""
         try:
@@ -575,7 +637,13 @@ async def handle_telethon_login_text(update: Update, context: ContextTypes.DEFAU
             await _clear_login_state(uid, context)
             await _plain_reply(update, context, "登录状态异常，请重新发送「登录小号」。")
             return True
-        await client.sign_in(password=text)
+        try:
+            await client.sign_in(password=text)
+        except PasswordHashInvalidError:
+            await _send_login_prompt(
+                update, context, uid, "二步验证密码错误，请重新输入密码："
+            )
+            return True
         label = ""
         try:
             me = await client.get_me()
@@ -656,7 +724,12 @@ async def list_logged_accounts(update: Update, context: ContextTypes.DEFAULT_TYP
         return await _plain_reply(update, context, "🚫 订阅已到期，无法查看小号。")
     sessions = _list_session_names(context, user)
     if not sessions:
-        return await _plain_reply(update, context, "暂无可查看的小号。")
+        return await _plain_reply(
+            update,
+            context,
+            "暂无可查看的小号。",
+            reply_markup=_empty_sessions_reply_markup(context),
+        )
     labels = []
     for s in sessions:
         label = _get_cached_session_label(s)
@@ -896,7 +969,10 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
             return await query.edit_message_text("🚫 订阅已到期，无法查看小号。")
         sessions = _list_session_names(context, query.from_user)
         if not sessions:
-            return await query.edit_message_text("暂无可查看的小号。")
+            return await query.edit_message_text(
+                "暂无可查看的小号。",
+                reply_markup=_empty_sessions_reply_markup(context),
+            )
         labels = []
         for s in sessions:
             label = _get_cached_session_label(s)
@@ -922,7 +998,10 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
             return await query.edit_message_text("🚫 订阅已到期，无法查看小号。")
         sessions = _list_session_names(context, query.from_user)
         if not sessions:
-            return await query.edit_message_text("暂无可查看的小号。")
+            return await query.edit_message_text(
+                "暂无可查看的小号。",
+                reply_markup=_empty_sessions_reply_markup(context),
+            )
         await query.edit_message_text("正在刷新小号用户名，请稍候...")
         for s in sessions:
             try:
@@ -952,6 +1031,14 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
         uid = str(query.from_user.id)
         await _clear_login_state(uid, context)
         return await _start_login_flow(update, context)
+
+    if action == "cancel":
+        uid = str(query.from_user.id)
+        state = _LOGIN_STATE.pop(uid, None)
+        if state:
+            await _teardown_client(state)
+            return await query.edit_message_text("已取消登录流程。")
+        return await query.edit_message_text("当前没有进行中的登录流程。")
 
     if action == "menu":
         await _clear_login_state(str(query.from_user.id), context)

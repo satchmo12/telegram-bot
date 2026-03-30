@@ -8,6 +8,10 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from command_router import register_command
+from channel.access_control import (
+    is_channel_subscription_required,
+    set_channel_subscription_required,
+)
 from utils import (
     BOT_USER_FILE,
     get_sessions_dir,
@@ -313,7 +317,13 @@ def _build_login_small_account_keyboard() -> InlineKeyboardMarkup:
 
 def _require_access(update: Update) -> bool:
     user = update.effective_user
-    return bool(user and (is_super_admin(user.id) or _is_active_subscription(user)))
+    if not user:
+        return False
+    if is_super_admin(user.id):
+        return True
+    if not is_channel_subscription_required():
+        return True
+    return _is_active_subscription(user)
 
 
 async def _ensure_private(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -405,6 +415,33 @@ async def subscription_status(update: Update, context: ContextTypes.DEFAULT_TYPE
         return await _plain_reply(update, context, f"订阅状态：{status}\n到期时间：{expires_at}")
     except Exception:
         return await _plain_reply(update, context, "⚠️ 订阅信息格式异常，请联系管理员。")
+
+
+@register_command("频道订阅限制")
+async def channel_subscription_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or not is_super_admin(user.id):
+        return await _plain_reply(update, context, "🚫 仅高级管理员可修改频道订阅限制。")
+
+    args = context.args or []
+    current = is_channel_subscription_required()
+    if not args or args[0] in {"查看", "状态"}:
+        status = "开启" if current else "关闭"
+        return await _plain_reply(
+            update,
+            context,
+            f"频道转发订阅限制：{status}\n用法：频道订阅限制 开启/关闭",
+        )
+
+    action = str(args[0]).strip().lower()
+    if action in {"开", "开启", "on", "true", "1"}:
+        set_channel_subscription_required(True)
+        return await _plain_reply(update, context, "✅ 已开启频道转发订阅限制。")
+    if action in {"关", "关闭", "off", "false", "0"}:
+        set_channel_subscription_required(False)
+        return await _plain_reply(update, context, "✅ 已关闭频道转发订阅限制。")
+
+    await _plain_reply(update, context, "用法：频道订阅限制 开启/关闭")
 
 
 @register_command("订阅列表", "查看订阅")

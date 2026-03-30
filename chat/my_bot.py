@@ -6,11 +6,13 @@ import difflib
 from typing import Optional
 from telegram import Update
 from telegram.ext import (
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     filters,
     ContextTypes,
 )
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.helpers import escape
 import requests
 from telegram.constants import ParseMode
@@ -63,6 +65,11 @@ async def check_ton_username(username: str) -> str:
 
 # ---------------- 配置 ----------------
 DATA_FILE = "data/learned_pairs.json"  # 存储学习问答对
+GROUP_RECOMMEND_CONFIG_FILE = "data/group_recommend_config.json"
+DEFAULT_GROUP_RECOMMEND_TEXT = "不想被推荐点击机器人关闭群推荐即可，曝光度越高排名越靠前"
+NAV_CALLBACK_PREFIX = "nav"
+PROMO_COOP_USERNAME = "nuan12"
+CHINESE_PACK_TEXT = "中文包功能暂未配置，后续可在这里接入下载链接、说明或更多按钮。"
 
 MAX_PAIR_WINDOW_SECONDS = 600  # 前后消息时间差，超过则不学习
 MIN_TEXT_LEN, MAX_TEXT_LEN = 2, 60  # 可学习文本长度
@@ -104,6 +111,144 @@ last_ad_push_slot = {}
 
 last_msg = {}  # 记录各群最后一条消息，用于学习前后消息关系
 last_reply_ts = {}  # 记录各群上次回复时间，用于控制冷却
+GROUP_RECOMMEND_PAGE_SIZE = 20
+
+
+def _build_group_recommendations(groups: dict) -> list[tuple[int, str, dict]]:
+    recommended = []
+    for gid, cfg in groups.items():
+        if not isinstance(cfg, dict):
+            continue
+        if not bool(cfg.get("bot_in_group", True)):
+            continue
+        if not bool(cfg.get("recommend", False)):
+            continue
+        if cfg.get("type") not in ("group", "supergroup", ""):
+            continue
+        exposure = int(cfg.get("exposure", 0))
+        recommended.append((exposure, gid, cfg))
+
+    recommended.sort(key=lambda x: x[0], reverse=True)
+    return recommended
+
+
+def _get_group_recommend_text() -> str:
+    data = load_json(GROUP_RECOMMEND_CONFIG_FILE)
+    if not isinstance(data, dict):
+        return DEFAULT_GROUP_RECOMMEND_TEXT
+    text = str(data.get("text", "")).strip()
+    return text or DEFAULT_GROUP_RECOMMEND_TEXT
+
+
+def _set_group_recommend_text(text: str):
+    save_json(GROUP_RECOMMEND_CONFIG_FILE, {"text": (text or "").strip()})
+
+
+def _format_group_recommend_text(args: list[str]) -> str:
+    raw_text = " ".join(args).strip()
+    if not raw_text:
+        return ""
+    if "<a " in raw_text or "</a>" in raw_text:
+        return raw_text
+    if len(args) >= 2:
+        maybe_link = args[-1].strip()
+        link_text = " ".join(args[:-1]).strip()
+        if link_text and re.match(r"^(https?://|tg://|t\.me/)", maybe_link, re.I):
+            href = maybe_link
+            if href.lower().startswith("t.me/"):
+                href = f"https://{href}"
+            return f'<a href="{escape(href)}">{escape(link_text)}</a>'
+    return raw_text
+
+
+def _build_navigation_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("群推荐", callback_data=f"{NAV_CALLBACK_PREFIX}:group_recommend:1")],
+            [InlineKeyboardButton("中文包", callback_data=f"{NAV_CALLBACK_PREFIX}:chinese_pack")],
+            [InlineKeyboardButton("推广合作", url=f"https://t.me/{PROMO_COOP_USERNAME}")],
+        ]
+    )
+
+
+def _build_back_markup(callback_data: str = f"{NAV_CALLBACK_PREFIX}:menu") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⬅️ 返回", callback_data=callback_data)]]
+    )
+
+
+def _build_group_recommend_markup(
+    page: int,
+    total_pages: int,
+    *,
+    include_back: bool = False,
+    page_callback_template: str = "group_recommend_page_{page}",
+) -> Optional[InlineKeyboardMarkup]:
+    keyboard = []
+    if page > 1:
+        keyboard.append(
+            InlineKeyboardButton(
+                "⬅️ 上一页",
+                callback_data=page_callback_template.format(page=page - 1),
+            )
+        )
+    if page < total_pages:
+        keyboard.append(
+            InlineKeyboardButton(
+                "➡️ 下一页",
+                callback_data=page_callback_template.format(page=page + 1),
+            )
+        )
+
+    rows = []
+    if keyboard:
+        rows.append(keyboard)
+    if include_back:
+        rows.append(
+            [InlineKeyboardButton("⬅️ 返回", callback_data=f"{NAV_CALLBACK_PREFIX}:menu")]
+        )
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+def _build_group_recommend_page(
+    recommended: list[tuple[int, str, dict]],
+    page: int,
+    *,
+    include_back: bool = False,
+    page_callback_template: str = "group_recommend_page_{page}",
+) -> tuple[str, Optional[InlineKeyboardMarkup], int]:
+    total_pages = max(
+        1, (len(recommended) + GROUP_RECOMMEND_PAGE_SIZE - 1) // GROUP_RECOMMEND_PAGE_SIZE
+    )
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * GROUP_RECOMMEND_PAGE_SIZE
+    end = start + GROUP_RECOMMEND_PAGE_SIZE
+    page_items = recommended[start:end]
+
+    lines = [
+        f"群推荐：{_get_group_recommend_text()}",
+        f"第 {page}/{total_pages} 页",
+    ]
+
+    for idx, (exposure, gid, cfg) in enumerate(page_items, start=start + 1):
+        title = (cfg.get("title") or "").strip() or "未命名群"
+        safe_title = escape(title)
+        username = (cfg.get("username") or "").strip().lstrip("@")
+        if username:
+            link = f"https://t.me/{username}"
+            lines.append(
+                f'{idx}. <a href="{link}">{safe_title}</a>（曝光度 {exposure}）'
+            )
+        else:
+            lines.append(f"{idx}. {safe_title}（曝光度 {exposure}）")
+
+    markup = _build_group_recommend_markup(
+        page,
+        total_pages,
+        include_back=include_back,
+        page_callback_template=page_callback_template,
+    )
+    return "\n".join(lines), markup, total_pages
 
 
 def get_memory() -> dict:
@@ -629,8 +774,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         triggers = ["好无聊", "无聊", "冒泡", "冒个泡", "冒泡一下", "签到"]
         if any(k in text for k in triggers):
             groups = get_group_whitelist(context)
-            lines = ["群推荐：不想被推荐点击机器人关闭群推荐即可，曝光度越高排名越靠前"]
-            recommended = []
             chat_id_str = str(chat.id)
             now_ts = int(time.time())
             cfg_self = groups.get(chat_id_str, {})
@@ -642,30 +785,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             cfg_self["recommend_last_ts"] = now_ts
             groups[chat_id_str] = cfg_self
-            for gid, cfg in groups.items():
-                if not isinstance(cfg, dict):
-                    continue
-                if not bool(cfg.get("bot_in_group", True)):
-                    continue
-                if not bool(cfg.get("recommend", False)):
-                    continue
-                if cfg.get("type") not in ("group", "supergroup", ""):
-                    continue
-                exposure = int(cfg.get("exposure", 0))
-                recommended.append((exposure, gid, cfg))
-
-            recommended.sort(key=lambda x: x[0], reverse=True)
-            for idx, (exposure, gid, cfg) in enumerate(recommended, start=1):
-                title = (cfg.get("title") or "").strip() or "未命名群"
-                safe_title = escape(title)
-                username = (cfg.get("username") or "").strip().lstrip("@")
-                if username:
-                    link = f"https://t.me/{username}"
-                    lines.append(
-                        f'{idx}. <a href="{link}">{safe_title}</a>（曝光度 {exposure}）'
-                    )
-                else:
-                    lines.append(f"{idx}. {safe_title}（曝光度 {exposure}）")
+            recommended = _build_group_recommendations(groups)
 
             # 仅增加当前触发群的曝光度
             if chat_id_str in groups and isinstance(groups[chat_id_str], dict):
@@ -675,28 +795,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
 
             save_json(GROUP_LIST_FILE, groups)
-
-            # 避免超长消息，简单分片发送
-            chunk = ""
-            for line in lines:
-                candidate = f"{chunk}\n{line}" if chunk else line
-                if len(candidate) > 3500:
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id,
-                        text=chunk,
-                        parse_mode=ParseMode.HTML,
-                        disable_web_page_preview=True,
-                    )
-                    chunk = line
-                else:
-                    chunk = candidate
-            if chunk:
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=chunk,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
-                )
+            text, markup, _ = _build_group_recommend_page(recommended, 1)
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=markup,
+            )
             return
 
     # ---------------- 回复开关指令 ----------------
@@ -1007,6 +1113,85 @@ async def active_speak_control(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 
+@register_command("群推荐文案")
+async def group_recommend_text_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    user = update.effective_user
+    if not user or not is_super_admin(user.id):
+        return await safe_reply(update, context, "❌ 只有超级管理员才能修改群推荐文案。")
+
+    text = " ".join(context.args).strip()
+    if not text or text in {"查看", "状态"}:
+        if update.message:
+            return await update.message.reply_text(
+                f"当前群推荐文案：\n{_get_group_recommend_text()}",
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        return await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"当前群推荐文案：\n{_get_group_recommend_text()}",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+
+    if text in {"清空", "默认", "恢复默认", "重置"}:
+        _set_group_recommend_text(DEFAULT_GROUP_RECOMMEND_TEXT)
+        if update.message:
+            return await update.message.reply_text(
+                f"✅ 已恢复默认群推荐文案：\n{DEFAULT_GROUP_RECOMMEND_TEXT}",
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        return await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"✅ 已恢复默认群推荐文案：\n{DEFAULT_GROUP_RECOMMEND_TEXT}",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+
+    formatted_text = _format_group_recommend_text(context.args)
+    _set_group_recommend_text(formatted_text)
+    example = (
+        "✅ 群推荐文案已更新：\n"
+        f"{formatted_text}\n\n"
+        "支持两种写法：\n"
+        '1. 群推荐文案 点我 https://t.me/test\n'
+        '2. 群推荐文案 <a href="https://t.me/test">点我</a>'
+    )
+    if update.message:
+        await update.message.reply_text(
+            example,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=example,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+
+
+@register_command("导航")
+async def navigation_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "功能导航\n"
+        "选择下面的功能入口。后续新功能可以继续往这里加。"
+    )
+    markup = _build_navigation_menu_markup()
+    if update.message:
+        await update.message.reply_text(text, reply_markup=markup)
+    else:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=text,
+            reply_markup=markup,
+        )
+
+
 @register_command("check")
 async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
@@ -1017,6 +1202,75 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = context.args[0].replace("@", "").replace(".ton", "")
     result = await check_ton_username(username)
     await update.message.reply_text(f"查询 @{username}:\n{result}")
+
+
+async def group_recommend_page_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    query = update.callback_query
+    if not query or not query.data or not query.message:
+        return
+
+    match = re.match(r"^group_recommend_page_(\d+)$", query.data)
+    if not match:
+        return
+
+    await query.answer()
+    page = int(match.group(1))
+    groups = get_group_whitelist(context)
+    recommended = _build_group_recommendations(groups)
+    text, markup, _ = _build_group_recommend_page(recommended, page)
+    await query.message.edit_text(
+        text=text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+        reply_markup=markup,
+    )
+
+
+async def navigation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.data or not query.message:
+        return
+
+    data = query.data
+    if not data.startswith(f"{NAV_CALLBACK_PREFIX}:"):
+        return
+
+    await query.answer()
+
+    if data == f"{NAV_CALLBACK_PREFIX}:menu":
+        await query.message.edit_text(
+            "功能导航\n选择下面的功能入口。后续新功能可以继续往这里加。",
+            reply_markup=_build_navigation_menu_markup(),
+        )
+        return
+
+    if data == f"{NAV_CALLBACK_PREFIX}:chinese_pack":
+        await query.message.edit_text(
+            CHINESE_PACK_TEXT,
+            reply_markup=_build_back_markup(),
+        )
+        return
+
+    match = re.match(rf"^{NAV_CALLBACK_PREFIX}:group_recommend:(\d+)$", data)
+    if match:
+        page = int(match.group(1))
+        groups = get_group_whitelist(context)
+        recommended = _build_group_recommendations(groups)
+        text, markup, _ = _build_group_recommend_page(
+            recommended,
+            page,
+            include_back=True,
+            page_callback_template=f"{NAV_CALLBACK_PREFIX}:group_recommend:{{page}}",
+        )
+        await query.message.edit_text(
+            text=text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=markup,
+        )
+        return
 
 
 def _pick_active_speak_text(memory: dict, ad_keywords: list[str]) -> Optional[str]:
@@ -1304,5 +1558,13 @@ async def add_joke(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def register_my_bot_handlers(app):
     """注册 Telegram 消息和命令处理器"""
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), on_text))
+    app.add_handler(
+        CallbackQueryHandler(navigation_callback, pattern=rf"^{NAV_CALLBACK_PREFIX}:")
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            group_recommend_page_callback, pattern=r"^group_recommend_page_\d+$"
+        )
+    )
     app.add_handler(CommandHandler("insult_someone", insult_someone))
     app.add_handler(CommandHandler("add_insult_word", add_insult_word))

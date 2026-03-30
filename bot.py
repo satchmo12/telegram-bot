@@ -2,6 +2,7 @@
 import asyncio
 import os
 import sys
+import re
 import logging
 from datetime import time
 from dotenv import load_dotenv
@@ -11,6 +12,7 @@ from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
     CommandHandler,
+    ApplicationHandlerStop,
     TypeHandler,
     CallbackQueryHandler,
     filters,
@@ -26,6 +28,7 @@ from modules import register_all_handlers  # 注册各功能模块
 from dispatcher import message_router  # 最终文本处理路由器
 from channel.telethon_forwarder import start_telethon_forwarder_job
 from channel.telethon_login import _clear_login_state
+from command_router import get_matched_command
 
 from chat.my_bot import cleaned_word
 from run_daily import (
@@ -185,6 +188,10 @@ async def owner_reply_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
     owner_id = int(context.application.bot_data.get("owner_id", DEFAULT_OWNER_ID))
     if not update.effective_user or update.effective_user.id != owner_id:
         return
+    if update.message and update.message.text:
+        matched = get_matched_command(update.message.text)
+        if matched:
+            return
     await reply_from_owner(update, context)
 
 
@@ -342,6 +349,13 @@ def create_app(bot_cfg: dict):
 
     # ===== 基础命令 =====
     app.add_handler(CommandHandler("restart", restart_bot))
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.Regex(r"^/restart(?:@\w+)?(?:\s|$)"),
+            restart_bot_fallback,
+        ),
+        group=1,
+    )
     app.add_handler(CommandHandler("leave", leave_group_command))
 
     # ===== 私聊转发逻辑 =====
@@ -427,12 +441,21 @@ async def set_bot_commands(app):
 
 # ===== 重启命令（超级管理员使用） =====
 async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if int(update.effective_user.id) != 6085551760:
+    if not update.effective_user or int(update.effective_user.id) != 6085551760:
         return
-    await update.message.reply_text("♻️ 正在重启机器人...")
+    if not update.message:
+        return
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="♻️ 正在重启机器人...",
+        reply_to_message_id=update.message.message_id,
+    )
+    print("♻️ 正在重启机器人...", flush=True)
+    logging.warning("♻️ 正在重启机器人...")
 
     # 重启前清理广告词
     await cleaned_word()
+    await asyncio.sleep(0.8)
     # # 1️⃣ 先结束所有正在进行的成语接龙
     # for chat_id in group_list.keys():
     #     fake_update = Update(
@@ -443,6 +466,17 @@ async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     python = sys.executable
     os.execv(python, [python] + sys.argv)
+
+
+async def restart_bot_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not msg.text:
+        return
+    text = msg.text.strip()
+    if not re.match(r"^/restart(?:@\w+)?(?:\s|$)", text, re.I):
+        return
+    await restart_bot(update, context)
+    raise ApplicationHandlerStop
 
 
 async def leave_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
