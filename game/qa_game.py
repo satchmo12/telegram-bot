@@ -256,13 +256,13 @@ async def add_re_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 获取答案部分
     qa_text = " ".join(context.args).strip()  # 合并所有参数为答案字符串
     # 支持多个答案，用 "|" 分割
-    answers = [a.strip() for a in qa_text.split("/") if a.strip()]
+    answers = [a.strip() for a in qa_text.split("|") if a.strip()]
 
     if not answers:
         return await safe_reply(
-            update, context, "❗请提供至少一个答案，用 '/' 分隔多个答案"
+            update, context, "❗请提供至少一个答案，用 '|' 分隔多个答案"
         )
-    triggered = update.message.text.split()[0].lstrip('/')
+    triggered = update.message.text.split()[0].lstrip('|')
 
     # 加载已有数据
     data = load_json(RE_FILE)

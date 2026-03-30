@@ -29,6 +29,7 @@ from utils import (
     get_first_pinyin,
     get_last_pinyin,
     group_allowed,
+    is_super_admin,
     load_json,
     save_json,
     safe_reply,
@@ -588,25 +589,26 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if inc > 0:
             chat_id_str = str(update.effective_chat.id)
             user_id = update.effective_user.id
-            # 扣除用户曝光度
-            data = load_json(INVITE_BOT_USERS_FILE)
-            if not isinstance(data, dict):
-                data = {}
-            users = data.get("users", {})
-            if not isinstance(users, dict):
-                users = {}
-            user = users.get(str(user_id), {})
-            balance = int(user.get("exposure", 0))
-            if balance < inc:
-                await safe_reply(update, context, "拉我进群增加曝光度50")
-                return
-            user["exposure"] = balance - inc
-            user["username"] = update.effective_user.full_name or user.get(
-                "username", "未知用户"
-            )
-            users[str(user_id)] = user
-            data["users"] = users
-            save_json(INVITE_BOT_USERS_FILE, data)
+            if not is_super_admin(user_id):
+                # 普通用户从自己的曝光余额中扣除
+                data = load_json(INVITE_BOT_USERS_FILE)
+                if not isinstance(data, dict):
+                    data = {}
+                users = data.get("users", {})
+                if not isinstance(users, dict):
+                    users = {}
+                user = users.get(str(user_id), {})
+                balance = int(user.get("exposure", 0))
+                if balance < inc:
+                    await safe_reply(update, context, "拉我进群增加曝光度50")
+                    return
+                user["exposure"] = balance - inc
+                user["username"] = update.effective_user.full_name or user.get(
+                    "username", "未知用户"
+                )
+                users[str(user_id)] = user
+                data["users"] = users
+                save_json(INVITE_BOT_USERS_FILE, data)
 
             # 增加本群曝光度
             groups = load_json(GROUP_LIST_FILE)

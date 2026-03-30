@@ -24,6 +24,7 @@ HISTORY_REQUESTS_FILE = "data/history_forward_requests.json"
 SUBSCRIPTION_FILE = "data/subscriptions.json"
 SESSION_OWNERS_FILE = "data/telethon_session_owners.json"
 CALLBACK_PREFIX = "chcfg"
+LOGIN_CALLBACK_PREFIX = "tlogin"
 SUBSCRIBER_MAX_RULES = 5
 
 FILTER_LABELS = {
@@ -304,6 +305,12 @@ async def _plain_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
         return None
 
 
+def _build_login_small_account_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("登录小号", callback_data=f"{LOGIN_CALLBACK_PREFIX}:login")]]
+    )
+
+
 def _require_access(update: Update) -> bool:
     user = update.effective_user
     return bool(user and (is_super_admin(user.id) or _is_active_subscription(user)))
@@ -352,8 +359,8 @@ async def _channel_config_entry_core(
     await _plain_reply(
         update,
         context,
-        "请选择操作：\n\n“新建配置”会按步骤引导填写频道名称、ID、任务类型、任务模式等。",
-        reply_markup=_with_start_back(context, _build_main_menu_keyboard(context)),
+        "请先登录小号，再进入频道配置。",
+        reply_markup=_with_start_back(context, _build_login_small_account_keyboard()),
     )
 
 
@@ -1071,7 +1078,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sessions = _list_accessible_sessions(context, update.effective_user)
         if not sessions:
             return await query.edit_message_text(
-                "暂无可用小号。", reply_markup=_with_start_back(context, _build_main_menu_keyboard(context))
+                "请先登录小号，再进入频道配置。",
+                reply_markup=_with_start_back(context, _build_login_small_account_keyboard()),
             )
         context.user_data["channel_config_session_select"] = {"next": "main"}
         return await query.edit_message_text(
@@ -1140,7 +1148,12 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not _is_bot_config(context):
             sessions = _list_accessible_sessions(context, update.effective_user)
             session_name = context.user_data.get("channel_config_default_session", "")
-            if sessions and not session_name:
+            if not sessions:
+                return await query.edit_message_text(
+                    "请先登录小号，再进入频道配置。",
+                    reply_markup=_with_start_back(context, _build_login_small_account_keyboard()),
+                )
+            if not session_name:
                 context.user_data["channel_config_session_select"] = {"next": "new"}
                 return await query.edit_message_text(
                     "请选择要配置的小号：",
@@ -1165,6 +1178,11 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "back":
         sessions = _list_accessible_sessions(context, update.effective_user)
+        if _show_session(context) and not sessions:
+            return await query.edit_message_text(
+                "请先登录小号，再进入频道配置。",
+                reply_markup=_with_start_back(context, _build_login_small_account_keyboard()),
+            )
         if sessions and _show_session(context):
             context.user_data["channel_config_session_select"] = {"next": "main"}
             return await query.edit_message_text(

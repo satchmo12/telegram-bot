@@ -182,9 +182,9 @@ def safe_randint(rng, fallback):
     return random.randint(fallback[0], fallback[1])
 
 
-def check_action_cooldown(chat_id: int, user_id: int, action_key: str, cooldown: int):
+def check_action_cooldown(user_id: int, action_key: str, cooldown: int):
     cooldown = max(1, int(cooldown))
-    key = f"{chat_id}:{user_id}:{action_key}"
+    key = f"{user_id}:{action_key}"
     now_ts = int(datetime.now().timestamp())
     last_ts = int(last_action_ts.get(key, 0))
     remain = cooldown - (now_ts - last_ts)
@@ -236,7 +236,7 @@ async def sign(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_lufa:
         cooldown = int(getattr(config, "LUAFA_COOLDOWN_SECONDS", LUAFA_COOLDOWN_SECONDS))
         cooldown = max(1, cooldown)
-        key = f"{chat_id}:{user.id}"
+        key = f"{user.id}:lufa"
         now_ts = int(datetime.now().timestamp())
         last_ts = int(last_lufa_ts.get(key, 0))
         remain = cooldown - (now_ts - last_ts)
@@ -299,7 +299,6 @@ async def pk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     remain = check_action_cooldown(
-        update.effective_chat.id,
         attacker.id,
         "pk",
         getattr(config, "PK_COOLDOWN_SECONDS", PK_COOLDOWN_SECONDS),
@@ -456,7 +455,6 @@ async def qj(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("⚠️ 不能对自己使用")
 
     remain = check_action_cooldown(
-        update.effective_chat.id,
         attacker.id,
         "qj",
         getattr(config, "QJ_COOLDOWN_SECONDS", QJ_COOLDOWN_SECONDS),
@@ -528,7 +526,6 @@ async def av(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user = update.effective_user
     remain = check_action_cooldown(
-        update.effective_chat.id,
         user.id,
         "av",
         getattr(config, "AV_COOLDOWN_SECONDS", AV_COOLDOWN_SECONDS),
@@ -563,7 +560,6 @@ async def kj(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("⚠️ 不能偷自己")
 
     remain = check_action_cooldown(
-        update.effective_chat.id,
         thief.id,
         "kj",
         getattr(config, "KJ_COOLDOWN_SECONDS", KJ_COOLDOWN_SECONDS),
@@ -601,7 +597,6 @@ async def yp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
     remain = check_action_cooldown(
-        update.effective_chat.id,
         user.id,
         "yp",
         getattr(config, "YP_COOLDOWN_SECONDS", YP_COOLDOWN_SECONDS),

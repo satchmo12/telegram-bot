@@ -157,7 +157,7 @@ def _is_session_owner(user, session_name: str) -> bool:
     if not user or not session_name:
         return False
     if is_shared_session_name(session_name):
-        return True
+        return False
     data = _load_session_owners()
     record = data.get("sessions", {}).get(session_name)
     if not isinstance(record, dict):

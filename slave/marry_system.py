@@ -4,6 +4,7 @@ import os
 from datetime import datetime
 from html import escape
 import random
+from typing import Optional
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
 from telegram.helpers import mention_html
@@ -21,6 +22,7 @@ from utils import (
     get_bot_path,
     get_group_whitelist,
     group_allowed,
+    is_super_admin,
     load_json,
     safe_reply,
     save_json,
@@ -209,14 +211,65 @@ def _find_child_by_id(children: list, child_id: str):
     return None
 
 
-def _sync_child_fields(group: dict, lover_id: str, child_id: str, fields: dict):
+def _same_parents(source_child: dict, target_child: dict) -> bool:
+    source_parents = source_child.get("parents", [])
+    target_parents = target_child.get("parents", [])
+    if not source_parents or not target_parents:
+        return True
+    return sorted(str(p) for p in source_parents) == sorted(
+        str(p) for p in target_parents
+    )
+
+
+def _find_partner_child(
+    partner_children: list, child_id: str, source_child: Optional[dict] = None
+):
+    partner_child = _find_child_by_id(partner_children, child_id) if child_id else None
+    if partner_child:
+        return partner_child
+    if not isinstance(source_child, dict):
+        return None
+
+    name = str(source_child.get("name", "") or "")
+    birthday = str(source_child.get("birthday", "") or "")
+    gender = str(source_child.get("gender", "") or "")
+    if not (name and birthday and gender):
+        return None
+
+    matched = [
+        child
+        for child in partner_children
+        if str(child.get("name", "") or "") == name
+        and str(child.get("birthday", "") or "") == birthday
+        and str(child.get("gender", "") or "") == gender
+        and _same_parents(source_child, child)
+    ]
+    if len(matched) != 1:
+        return None
+
+    partner_child = matched[0]
+    if child_id and str(partner_child.get("id", "") or "") != child_id:
+        partner_child["id"] = child_id
+    return partner_child
+
+
+def _sync_child_fields(
+    group: dict,
+    lover_id: str,
+    child_id: str,
+    fields: dict,
+    source_child: Optional[dict] = None,
+) -> bool:
     if not lover_id:
-        return
+        return False
     partner_info = group.setdefault(str(lover_id), {})
     partner_children = partner_info.setdefault("children", [])
-    partner_child = _find_child_by_id(partner_children, child_id)
+    partner_child = _find_partner_child(partner_children, child_id, source_child)
     if partner_child:
+        before = dict(partner_child)
         partner_child.update(fields)
+        return partner_child != before
+    return False
 
 
 def _apply_baby_item_effect(child: dict, item_name: str):
@@ -289,7 +342,25 @@ def _maybe_handle_starve(
         lover_id,
         child_id,
         {"dead": True, "death_ts": now_ts, "death_handled": True},
+        source_child=child,
     )
+    return True
+
+
+def _revive_child(group: dict, uid: str, lover_id: str, child: dict, now_ts: int) -> bool:
+    if not isinstance(child, dict) or not child.get("dead"):
+        return False
+    child_id = _ensure_child_id(child)
+    fields = {
+        "dead": False,
+        "death_ts": 0,
+        "death_handled": False,
+        "last_fed": now_ts,
+        "health": max(1, int(child.get("health", 50) or 50)),
+        "mood": max(1, int(child.get("mood", 50) or 50)),
+    }
+    child.update(fields)
+    _sync_child_fields(group, lover_id, child_id, fields, source_child=child)
     return True
 
 
@@ -687,6 +758,8 @@ async def children(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c["id"] = _new_baby_id()
             changed = True
         cid = str(c.get("id", ""))
+        if _sync_child_fields(data.get(chat_id, {}), lover_id, cid, {}, source_child=c):
+            changed = True
         short_id = cid[-6:] if cid else "------"
         last_fed = int(c.get("last_fed", 0) or 0)
         feed_count = int(c.get("feed_count", 0) or 0)
@@ -695,7 +768,13 @@ async def children(update: Update, context: ContextTypes.DEFAULT_TYPE):
         growth = c.get("growth_stage") or _baby_growth_stage(feed_count)
         if c.get("growth_stage") != growth:
             c["growth_stage"] = growth
-            _sync_child_fields(data.get(chat_id, {}), lover_id, cid, {"growth_stage": growth})
+            _sync_child_fields(
+                data.get(chat_id, {}),
+                lover_id,
+                cid,
+                {"growth_stage": growth},
+                source_child=c,
+            )
             changed = True
         gender = c.get("gender", "未知")
         status = "夭折" if c.get("dead") else "健康"
@@ -904,15 +983,18 @@ async def feed_child(update: Update, context: ContextTypes.DEFAULT_TYPE):
     child_id = _ensure_child_id(target)
 
     if lover_id:
-        partner_info = group.setdefault(str(lover_id), {})
-        partner_children = partner_info.setdefault("children", [])
-        for c in partner_children:
-            if _ensure_child_id(c) == child_id:
-                c["last_fed"] = now_ts
-                c["feed_count"] = int(c.get("feed_count", 0) or 0) + 1
-                _apply_baby_item_effect(c, item_name)
-                c["growth_stage"] = _baby_growth_stage(int(c["feed_count"]))
-                break
+        partner_child = _find_partner_child(
+            group.setdefault(str(lover_id), {}).setdefault("children", []),
+            child_id,
+            target,
+        )
+        if partner_child:
+            partner_child["last_fed"] = now_ts
+            partner_child["feed_count"] = int(partner_child.get("feed_count", 0) or 0) + 1
+            _apply_baby_item_effect(partner_child, item_name)
+            partner_child["growth_stage"] = _baby_growth_stage(
+                int(partner_child["feed_count"])
+            )
 
     _save_marry_data(context, data)
     await safe_reply(
@@ -983,6 +1065,7 @@ async def feed_all_children(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "health": child.get("health", 50),
                 "mood": child.get("mood", 50),
             },
+            source_child=child,
         )
         fed.append(child.get("name", "未命名"))
 
@@ -999,6 +1082,54 @@ async def feed_all_children(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("当前没有可喂养的宝宝。")
 
     await safe_reply(update, context, "\n".join(lines))
+
+
+@register_command("复活所有宝宝", "一键复活所有宝宝", "一键复活")
+async def revive_all_babies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or not is_super_admin(user.id):
+        return
+
+    data = _load_marry_data(context)
+    if not isinstance(data, dict) or not data:
+        return await safe_reply(update, context, "当前没有宝宝数据。")
+
+    now_ts = int(datetime.now().timestamp())
+    revived = 0
+    touched_chats = 0
+    seen: set[tuple[str, str]] = set()
+
+    for chat_id, group in data.items():
+        if not isinstance(group, dict):
+            continue
+        chat_changed = False
+        for uid, info in group.items():
+            if not isinstance(info, dict):
+                continue
+            lover_id = str(info.get("lover_id", "") or "")
+            children = info.get("children", [])
+            if not isinstance(children, list):
+                continue
+            for child in children:
+                child_id = _ensure_child_id(child)
+                if not child.get("dead") or (str(chat_id), child_id) in seen:
+                    continue
+                seen.add((str(chat_id), child_id))
+                if _revive_child(group, str(uid), lover_id, child, now_ts):
+                    revived += 1
+                    chat_changed = True
+        if chat_changed:
+            touched_chats += 1
+
+    if revived <= 0:
+        return await safe_reply(update, context, "当前没有已夭折的宝宝。")
+
+    _save_marry_data(context, data)
+    await safe_reply(
+        update,
+        context,
+        f"✅ 已复活所有宝宝，共 {revived} 个，涉及 {touched_chats} 个群。",
+    )
 
 
 @register_command("情侣亲密榜", "亲密榜")
