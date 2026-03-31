@@ -32,6 +32,7 @@ ACTIVE_SPEAK_MAX_INTERVAL = 1440
 AD_PUSH_MIN_INTERVAL = 5
 AD_PUSH_MAX_INTERVAL = 1440
 MANAGE_CHECK_CACHE_TTL_SEC = 60
+GROUP_LIST_PAGE_SIZE = 15
 
 
 def _is_group_chat(update: Update) -> bool:
@@ -70,11 +71,33 @@ def _toggle_text(enabled: bool) -> str:
     return "✅ 开启" if enabled else "🚫 关闭"
 
 
-def _build_group_list_keyboard(data: dict) -> InlineKeyboardMarkup:
+def _normalize_business_coop_link(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if text.startswith("@"):
+        return f"https://t.me/{text[1:]}"
+    if text.lower().startswith("t.me/"):
+        return f"https://{text}"
+    return text
+
+
+def _build_group_list_keyboard(data: dict, page: int = 1) -> InlineKeyboardMarkup:
+    items = [
+        (chat_id, cfg)
+        for chat_id, cfg in sorted(
+            data.items(), key=lambda item: _group_title(item[0], item[1]).lower()
+        )
+        if isinstance(cfg, dict)
+    ]
+    total = len(items)
+    total_pages = max(1, (total + GROUP_LIST_PAGE_SIZE - 1) // GROUP_LIST_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * GROUP_LIST_PAGE_SIZE
+    end = start + GROUP_LIST_PAGE_SIZE
+
     rows = []
-    for chat_id, cfg in sorted(
-        data.items(), key=lambda item: _group_title(item[0], item[1]).lower()
-    ):
+    for chat_id, cfg in items[start:end]:
         if not isinstance(cfg, dict):
             continue
         label = _group_title(chat_id, cfg)
@@ -86,7 +109,25 @@ def _build_group_list_keyboard(data: dict) -> InlineKeyboardMarkup:
                 )
             ]
         )
+    nav_row = []
+    if page > 1:
+        nav_row.append(
+            InlineKeyboardButton("⬅️ 上一页", callback_data=f"{CALLBACK_PREFIX}:list:{page - 1}")
+        )
+    if page < total_pages:
+        nav_row.append(
+            InlineKeyboardButton("➡️ 下一页", callback_data=f"{CALLBACK_PREFIX}:list:{page + 1}")
+        )
+    if nav_row:
+        rows.append(nav_row)
     return InlineKeyboardMarkup(rows) if rows else InlineKeyboardMarkup([])
+
+
+def _group_list_text(data: dict, page: int = 1) -> str:
+    total = sum(1 for _, cfg in data.items() if isinstance(cfg, dict))
+    total_pages = max(1, (total + GROUP_LIST_PAGE_SIZE - 1) // GROUP_LIST_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    return f"请选择要配置的群：\n第 {page}/{total_pages} 页"
 
 
 def _build_group_panel_text(chat_id: str, cfg: dict) -> str:
@@ -97,6 +138,9 @@ def _build_group_panel_text(chat_id: str, cfg: dict) -> str:
     ad_interval = int(cfg.get("ad_push_interval_min", 120))
     ad_times = str(cfg.get("ad_push_times", "")).strip() or "未设置"
     ad_has_text = "已设置" if str(cfg.get("ad_push_text", "")).strip() else "未设置"
+    business_coop = (
+        _normalize_business_coop_link(cfg.get("business_coop_link", "")) or "未设置"
+    )
     lines = [
         "📊 群配置面板",
         f"🆔 群ID：<code>{chat_id}</code> | 群名：{group_name}",
@@ -113,12 +157,13 @@ def _build_group_panel_text(chat_id: str, cfg: dict) -> str:
     )
     force_channel = _get_force_channel(chat_id)
     lines.append(f"强制关注频道：{force_channel if force_channel else '未设置'}")
+    lines.append(f"商业合作：{html.escape(business_coop)}")
     lines.append("")
     lines.append("仅群管理员或超级管理员可修改。")
     return "\n".join(lines)
 
 
-def _build_group_panel_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardMarkup:
+def _build_group_panel_keyboard(chat_id: str, cfg: dict, list_page: int = 1) -> InlineKeyboardMarkup:
     rows = []
     toggle_buttons = []
     for key, label in TOGGLE_FIELDS:
@@ -137,7 +182,11 @@ def _build_group_panel_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardMarkup
             InlineKeyboardButton(
                 "📢 设置关注频道",
                 callback_data=f"{CALLBACK_PREFIX}:force_channel:{chat_id}",
-            )
+            ),
+            InlineKeyboardButton(
+                "🤝 商业合作",
+                callback_data=f"{CALLBACK_PREFIX}:business_coop:{chat_id}",
+            ),
         ]
     )
     rows.append(
@@ -207,7 +256,7 @@ def _build_group_panel_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardMarkup
 
     rows.append(
         [
-            InlineKeyboardButton("⬅️ 选择其他群", callback_data=f"{CALLBACK_PREFIX}:list"),
+            InlineKeyboardButton("⬅️ 选择其他群", callback_data=f"{CALLBACK_PREFIX}:list:{max(1, list_page)}"),
             InlineKeyboardButton("🔄 刷新", callback_data=f"{CALLBACK_PREFIX}:open:{chat_id}"),
         ]
     )
@@ -276,10 +325,12 @@ async def _show_group_picker(update: Update, context: ContextTypes.DEFAULT_TYPE)
     data = await _visible_group_data_for_user(context, user_id, data)
     if not data:
         return await safe_reply(update, context, "暂无可配置的群记录。")
-    keyboard = _build_group_list_keyboard(data)
-    text = "请选择要配置的群："
+    page = 1
+    context.user_data["group_setting_list_page"] = page
+    keyboard = _build_group_list_keyboard(data, page)
+    text = _group_list_text(data, page)
     if keyboard.inline_keyboard:
-        return await safe_reply(update, context, text)
+        return await safe_reply(update, context, text, reply_markup=keyboard)
     return await safe_reply(update, context, "暂无可配置的群记录。")
 
 
@@ -306,7 +357,8 @@ async def _open_group_panel(
         cfg = {}
 
     await query.answer()
-    keyboard = _build_group_panel_keyboard(chat_id_str, cfg)
+    list_page = int(context.user_data.get("group_setting_list_page", 1) or 1)
+    keyboard = _build_group_panel_keyboard(chat_id_str, cfg, list_page=list_page)
     if context.user_data.get("start_panel"):
         rows = list(keyboard.inline_keyboard)
         rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
@@ -353,10 +405,12 @@ async def group_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = await _visible_group_data_for_user(context, user_id, data)
     if not data:
         return await safe_reply(update, context, "暂无可配置的群记录。")
-    keyboard = _build_group_list_keyboard(data)
+    page = 1
+    context.user_data["group_setting_list_page"] = page
+    keyboard = _build_group_list_keyboard(data, page)
     if not keyboard.inline_keyboard:
         return await safe_reply(update, context, "暂无可配置的群记录。")
-    await update.message.reply_text("请选择要配置的群：", reply_markup=keyboard)
+    await update.message.reply_text(_group_list_text(data, page), reply_markup=keyboard)
 
 
 async def _redirect_to_private(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -554,15 +608,24 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     if action == "list":
         visible_data = await _visible_group_data_for_user(context, user_id, data)
+        page = 1
+        if len(parts) >= 3:
+            try:
+                page = int(parts[2])
+            except Exception:
+                page = 1
+        context.user_data["group_setting_list_page"] = page
         await query.answer()
-        keyboard = _build_group_list_keyboard(visible_data)
+        keyboard = _build_group_list_keyboard(visible_data, page)
         if not keyboard.inline_keyboard:
             return await query.edit_message_text("暂无可配置的群记录。")
         if context.user_data.get("start_panel"):
             rows = list(keyboard.inline_keyboard)
             rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
             keyboard = InlineKeyboardMarkup(rows)
-        return await query.edit_message_text("请选择要配置的群：", reply_markup=keyboard)
+        return await query.edit_message_text(
+            _group_list_text(visible_data, page), reply_markup=keyboard
+        )
 
     if action == "open" and len(parts) >= 3:
         return await _open_group_panel(query, context, parts[2], user_id)
@@ -612,6 +675,22 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                         ),
                     ]
                 ]
+            ),
+        )
+    if action == "business_coop" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        context.user_data["group_setting_stage"] = "business_coop"
+        context.user_data["group_setting_chat_id"] = chat_id_str
+        await query.answer()
+        return await query.edit_message_text(
+            "请输入商业合作链接。\n支持 @username、t.me/xxx、https://xxx\n发送「清空」可移除当前设置。",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:business_coop_back")]]
             ),
         )
     if action in {"ad_text", "ad_interval", "ad_times", "ad_mode"} and len(parts) >= 3:
@@ -673,6 +752,13 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer("✅ 已清空", show_alert=False)
         return await _open_group_panel(query, context, chat_id_str, user_id)
     if action == "force_channel_back":
+        context.user_data.pop("group_setting_stage", None)
+        chat_id_str = context.user_data.pop("group_setting_chat_id", None)
+        await query.answer()
+        if chat_id_str:
+            return await _open_group_panel(query, context, chat_id_str, user_id)
+        return
+    if action == "business_coop_back":
         context.user_data.pop("group_setting_stage", None)
         chat_id_str = context.user_data.pop("group_setting_chat_id", None)
         await query.answer()
@@ -751,7 +837,7 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
     if update.effective_chat.type != "private":
         return
     stage = context.user_data.get("group_setting_stage")
-    if stage not in {"force_channel", "ad_text", "ad_interval", "ad_times", "ad_mode"}:
+    if stage not in {"force_channel", "ad_text", "ad_interval", "ad_times", "ad_mode", "business_coop"}:
         return
 
     chat_id_str = context.user_data.get("group_setting_chat_id")
@@ -776,6 +862,23 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
             context.user_data.pop("group_setting_stage", None)
             context.user_data.pop("group_setting_chat_id", None)
             await update.message.reply_text(f"✅ 已设置强制关注频道为：{text}")
+    elif stage == "business_coop":
+        data = get_group_whitelist(context)
+        cfg = data.get(chat_id_str, {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        if text in {"清空", "取消", "关闭"}:
+            cfg["business_coop_link"] = ""
+            await update.message.reply_text("✅ 已清空商业合作链接。")
+        else:
+            cfg["business_coop_link"] = _normalize_business_coop_link(text)
+            await update.message.reply_text(
+                f"✅ 已设置商业合作链接：{cfg['business_coop_link']}"
+            )
+        context.user_data.pop("group_setting_stage", None)
+        context.user_data.pop("group_setting_chat_id", None)
+        data[chat_id_str] = cfg
+        save_json(GROUP_LIST_FILE, data)
     else:
         data = get_group_whitelist(context)
         cfg = data.get(chat_id_str, {})
@@ -822,7 +925,8 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
         data[chat_id_str] = cfg
         save_json(GROUP_LIST_FILE, data)
 
-    keyboard = _build_group_panel_keyboard(chat_id_str, cfg)
+    list_page = int(context.user_data.get("group_setting_list_page", 1) or 1)
+    keyboard = _build_group_panel_keyboard(chat_id_str, cfg, list_page=list_page)
     await update.message.reply_text(
         _build_group_panel_text(chat_id_str, cfg),
         reply_markup=keyboard,

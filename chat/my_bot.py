@@ -3,6 +3,7 @@ import random
 import re
 import time
 import difflib
+from datetime import date
 from typing import Optional
 from telegram import Update
 from telegram.ext import (
@@ -68,8 +69,7 @@ DATA_FILE = "data/learned_pairs.json"  # 存储学习问答对
 GROUP_RECOMMEND_CONFIG_FILE = "data/group_recommend_config.json"
 DEFAULT_GROUP_RECOMMEND_TEXT = "不想被推荐点击机器人关闭群推荐即可，曝光度越高排名越靠前"
 NAV_CALLBACK_PREFIX = "nav"
-PROMO_COOP_USERNAME = "nuan12"
-CHINESE_PACK_TEXT = "中文包功能暂未配置，后续可在这里接入下载链接、说明或更多按钮。"
+CHINESE_PACK_URL = "https://t.me/setlanguage/mr566"
 
 MAX_PAIR_WINDOW_SECONDS = 600  # 前后消息时间差，超过则不学习
 MIN_TEXT_LEN, MAX_TEXT_LEN = 2, 60  # 可学习文本长度
@@ -161,14 +161,65 @@ def _format_group_recommend_text(args: list[str]) -> str:
     return raw_text
 
 
-def _build_navigation_menu_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("群推荐", callback_data=f"{NAV_CALLBACK_PREFIX}:group_recommend:1")],
-            [InlineKeyboardButton("中文包", callback_data=f"{NAV_CALLBACK_PREFIX}:chinese_pack")],
-            [InlineKeyboardButton("推广合作", url=f"https://t.me/{PROMO_COOP_USERNAME}")],
-        ]
-    )
+async def _get_group_owner_button(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> Optional[InlineKeyboardButton]:
+    chat = update.effective_chat
+    if not chat or (chat.type or "").lower() not in {"group", "supergroup"}:
+        return None
+    try:
+        admins = await context.bot.get_chat_administrators(chat.id)
+    except Exception:
+        return None
+    for admin in admins or []:
+        user = getattr(admin, "user", None)
+        status = getattr(admin, "status", "")
+        if not user or status != "creator":
+            continue
+        username = (getattr(user, "username", "") or "").strip()
+        if username:
+            return InlineKeyboardButton("群主链接", url=f"https://t.me/{username}")
+        user_id = getattr(user, "id", None)
+        if user_id:
+            return InlineKeyboardButton("群主链接", url=f"tg://user?id={user_id}")
+    return None
+
+
+def _get_business_coop_button(update: Update) -> Optional[InlineKeyboardButton]:
+    chat = update.effective_chat
+    if not chat or (chat.type or "").lower() not in {"group", "supergroup"}:
+        return None
+    data = load_json(GROUP_LIST_FILE)
+    if not isinstance(data, dict):
+        return None
+    cfg = data.get(str(chat.id), {})
+    if not isinstance(cfg, dict):
+        return None
+    raw = str(cfg.get("business_coop_link", "") or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("@"):
+        raw = f"https://t.me/{raw[1:]}"
+    elif raw.lower().startswith("t.me/"):
+        raw = f"https://{raw}"
+    return InlineKeyboardButton("商业合作", url=raw)
+
+
+async def _build_navigation_menu_markup(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("群推荐", callback_data=f"{NAV_CALLBACK_PREFIX}:group_recommend:1")],
+        [InlineKeyboardButton("中文包", url=CHINESE_PACK_URL)],
+    ]
+    business_coop_button = _get_business_coop_button(update)
+    if business_coop_button:
+        rows.append([business_coop_button])
+    else:
+        owner_button = await _get_group_owner_button(update, context)
+        if owner_button:
+            rows.append([owner_button])
+    return InlineKeyboardMarkup(rows)
 
 
 def _build_back_markup(callback_data: str = f"{NAV_CALLBACK_PREFIX}:menu") -> InlineKeyboardMarkup:
@@ -1175,13 +1226,13 @@ async def group_recommend_text_command(
         )
 
 
-@register_command("导航")
+@register_command("导航","群推荐","中文包")
 async def navigation_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "功能导航\n"
         "选择下面的功能入口。后续新功能可以继续往这里加。"
     )
-    markup = _build_navigation_menu_markup()
+    markup = await _build_navigation_menu_markup(update, context)
     if update.message:
         await update.message.reply_text(text, reply_markup=markup)
     else:
@@ -1242,14 +1293,7 @@ async def navigation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     if data == f"{NAV_CALLBACK_PREFIX}:menu":
         await query.message.edit_text(
             "功能导航\n选择下面的功能入口。后续新功能可以继续往这里加。",
-            reply_markup=_build_navigation_menu_markup(),
-        )
-        return
-
-    if data == f"{NAV_CALLBACK_PREFIX}:chinese_pack":
-        await query.message.edit_text(
-            CHINESE_PACK_TEXT,
-            reply_markup=_build_back_markup(),
+            reply_markup=await _build_navigation_menu_markup(update, context),
         )
         return
 
@@ -1552,6 +1596,22 @@ async def add_joke(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 段子内
     await safe_reply(update, context, current_pinyin)
+
+
+@group_allowed
+@register_command("水群")
+async def water_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    today = date.today()
+    year_start = date(today.year, 1, 1)
+    next_year = today.year + 1
+    next_year_start = date(next_year, 1, 1)
+    passed_days = (today - year_start).days + 1
+    remaining_days = (next_year_start - today).days
+    await safe_reply(
+        update,
+        context,
+        f"你已经水群{passed_days}天，距离下一年（{next_year}）还剩{remaining_days}天",
+    )
 
 
 # ---------------- 注册处理器 ----------------

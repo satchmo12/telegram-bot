@@ -4,9 +4,9 @@ from typing import List, Dict
 
 OPENROUTER_API_KEY = os.getenv(
     "OPENROUTER_API_KEY",
-    "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",
+    "",
 )
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "mistralai/mistral-7b-instruct")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/auto")
 FALLBACK_MODELS = [
     "openrouter/auto",
     "deepseek/deepseek-chat",
@@ -53,6 +53,18 @@ async def ask_ai(messages: List[Dict[str, str]]) -> str:
 
                     err_msg = str(res.get("error", {}).get("message", ""))
                     last_error = f"模型 {model} 不可用：{err_msg}"
+                    err_msg_lower = err_msg.lower()
+                    if any(
+                        key in err_msg_lower
+                        for key in [
+                            "user not found",
+                            "invalid api key",
+                            "unauthorized",
+                            "authentication",
+                            "api key",
+                        ]
+                    ):
+                        return "AI 请求失败：OPENROUTER_API_KEY 无效、已失效，或不属于当前 OpenRouter 账号。"
                     if "model_not_available" in str(res):
                         continue
 

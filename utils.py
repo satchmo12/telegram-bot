@@ -315,8 +315,17 @@ def save_json(path: str, data):
     path = _resolve_json_path(path)
     with _cache_lock:
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        use_pretty_indent = not str(path).replace("\\", "/").endswith(
+            "learned_pairs.json"
+        )
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
+            json.dump(
+                data,
+                f,
+                ensure_ascii=False,
+                indent=4 if use_pretty_indent else None,
+                separators=None if use_pretty_indent else (",", ":"),
+            )
         _cache_data[path] = data
         _cache_timestamp[path] = time.time()
 
@@ -467,6 +476,7 @@ def get_group_whitelist(context: ContextTypes.DEFAULT_TYPE = None) -> dict:
             "ad_push_interval_min": 120,
             "ad_push_text": "",
             "ad_push_times": "",
+            "business_coop_link": "",
             "manor": False,
             "welcome": False,
             "learning_enabled": True,

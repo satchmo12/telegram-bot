@@ -10,6 +10,7 @@ from command_router import register_command
 from channel.access_control import is_channel_subscription_required
 from utils import (
     SHARED_SESSION_NAME,
+    get_bot_path,
     get_sessions_dir,
     get_session_path,
     is_shared_session_name,

@@ -9,6 +9,7 @@ from utils import load_json, save_json, safe_reply
 ai_chat_users = set()
 AI_HISTORY_FILE = "data/ai_history.json"
 MAX_HISTORY_MESSAGES = 16
+AI_CHAT_ENABLED = False
 AI_SYSTEM_PROMPT = (
     "你是一个中文聊天助手。回答要自然、有帮助、简洁。"
     "当用户问技术问题时，优先给可执行步骤。"
@@ -66,6 +67,8 @@ def _is_mentioning_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bo
 async def _ask_and_reply(
     update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str
 ) -> None:
+    if not AI_CHAT_ENABLED:
+        return await safe_reply(update, context, "AI 功能已暂时关闭。")
     clean_prompt = (prompt or "").strip()
     if not clean_prompt:
         return await safe_reply(update, context, "请在命令后面加上内容，例如：聊天 今天天气")
@@ -95,6 +98,8 @@ async def ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @register_command("开启ai")
 async def aion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not AI_CHAT_ENABLED:
+        return await safe_reply(update, context, "AI 功能已暂时关闭。")
     user_id = update.effective_user.id
     ai_chat_users.add(user_id)
     await safe_reply(update, context, "✅ 已开启 AI 自动回复（仅@机器人或回复机器人时触发）")
@@ -102,6 +107,8 @@ async def aion(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @register_command("关闭ai")
 async def aioff(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not AI_CHAT_ENABLED:
+        return await safe_reply(update, context, "AI 功能已暂时关闭。")
     user_id = update.effective_user.id
     ai_chat_users.discard(user_id)
     await safe_reply(update, context, "🛑 已关闭 AI 自动回复")
@@ -109,6 +116,8 @@ async def aioff(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @register_command("重置ai")
 async def aireset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not AI_CHAT_ENABLED:
+        return await safe_reply(update, context, "AI 功能已暂时关闭。")
     key = _session_key(update)
     data = load_json(AI_HISTORY_FILE)
     if not isinstance(data, dict):
@@ -120,6 +129,8 @@ async def aireset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def ai_auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not AI_CHAT_ENABLED:
+        return
     msg = update.message
     if not msg or not msg.text:
         return
