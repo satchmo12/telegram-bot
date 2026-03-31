@@ -1,8 +1,13 @@
 import re
-from deep_translator import GoogleTranslator
 import string
+from typing import Optional
 
 from command_router import register_command
+
+try:
+    from deep_translator import GoogleTranslator
+except ModuleNotFoundError:
+    GoogleTranslator = None
 
 LANG_MAP = {
     # 英文
@@ -34,8 +39,21 @@ LANG_MAP = {
     "french": ("法文", "fr"),
 }
 
+
+def _translate_with_google(text: str, target: str) -> str:
+    if GoogleTranslator is None:
+        raise RuntimeError("未安装 deep-translator，翻译功能不可用")
+    return GoogleTranslator(source="auto", target=target).translate(text)
+
+
+async def _safe_translate(text: str, target: str) -> Optional[str]:
+    try:
+        return _translate_with_google(text, target)
+    except Exception:
+        return None
+
 async def to_english(text: str) -> str:
-    return GoogleTranslator(source="auto", target="en").translate(text)
+    return _translate_with_google(text, "en")
 
 
 # async def translate_text(text: str, target: str = 'en') -> str:
@@ -43,7 +61,7 @@ async def to_english(text: str) -> str:
 
 
 async def translate_text(text: str, target: str = "zh") -> str:
-    return GoogleTranslator(source="auto", target=target).translate(text)
+    return _translate_with_google(text, target)
 
 
 # def is_pure_ascii(text: str) -> bool:
@@ -76,7 +94,7 @@ async def auto_translate(text: str) -> str:
             return
 
         if is_pure_ascii(text):
-            return GoogleTranslator(source="auto", target="zh-CN").translate(text)
+            return await _safe_translate(text, "zh-CN")
         else:
             return
             # return GoogleTranslator(source='auto', target='en').translate(text)
@@ -85,7 +103,7 @@ async def auto_translate(text: str) -> str:
 
 
 async def translate(text: str, target: str) -> str:
-    return GoogleTranslator(source="auto", target=target).translate(text)
+    return _translate_with_google(text, target)
 
 
 @register_command("翻译")

@@ -50,35 +50,32 @@ def build_feature_intro(context: ContextTypes.DEFAULT_TYPE) -> str:
     top_features = []
     if "group" in enabled:
         top_features.append("群管理与群设置")
+    if "channel" in enabled:
+        top_features.append("频道功能（配置/转发/搬运）")
+    if "private_forward" in enabled:
+        top_features.append("私聊双向转发")
     if "economy" in enabled:
         top_features.append("经济系统（余额/签到/银行等）")
-    if "simulation" in enabled:
-        top_features.append("互动模拟玩法（学习回复/动作等）")
+    if "my_bot" in enabled:
+        top_features.append("文本互动与学习回复")
+    if "game_hub" in enabled:
+        top_features.append("大型模拟玩法（农场/关系/动作等）")
     if "entertainment" in enabled:
-        top_features.append("娱乐功能（成语/问答/骰子等）")
-    if "niuniu" in enabled:
-        top_features.append("牛牛玩法（PK/纳妾/排行榜）")
+        top_features.append("娱乐功能（成语/问答/骰子/牛牛等）")
 
     if not top_features:
         top_features.append("基础消息与管理功能")
 
     detail_map = {
-        "group_setting": "群设置开关（群开关/群状态）",
-        "admin": "群管命令（踢/禁言/解禁/锁群）",
-        "invite_stats": "邀请统计与邀请链接",
-        "verification": "入群验证",
-        "talk_stats": "群聊发言统计",
-        "economy_info": "余额与资料查询",
-        "economy_bank": "银行存取款/贷款",
+        "group": "群设置/群管理/邀请统计/验证/签到/菜单",
+        "channel": "频道配置/小号登录/频道转发/频道搬运",
+        "private_forward": "私聊消息转发给主人并支持回复",
+        "economy": "余额/银行/公司/基础经济",
         "lottery_betting": "彩票投注",
-        "company_business": "公司经营",
+        "market_price": "行情价格",
         "my_bot": "学说话与自动回复",
-        "game_hub": "农场/花园/宠物等玩法",
-        "truth": "真心话",
-        "chengyu": "成语接龙",
-        "qa": "问答学习",
-        "voice_reply": "语音相关功能",
-        "niuniu": "牛牛小游戏",
+        "game_hub": "农场/花园/牧场/婚姻/宠物/奴隶/动作",
+        "entertainment": "成语接龙/五子棋/问答/真心话/骰子/语音/牛牛",
     }
     details = [detail_map[k] for k in detail_map if k in enabled]
     if not details:

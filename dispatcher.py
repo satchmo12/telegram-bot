@@ -1,6 +1,6 @@
-import traceback
 import asyncio
-from chat.ai_chat import ai_auto_reply
+import traceback
+
 from channel.channel_forwarder import handle_message
 from command_router import dispatch_command
 from config import AUTO_TRANSLATE
@@ -32,7 +32,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_group(update, context),
         watch_special_users(update, context),
     ]
-    if is_feature_enabled(context.application, "channel_forward"):
+    if is_feature_enabled(context.application, "channel"):
         tasks.append(handle_message(update, context))
     await asyncio.gather(*tasks)
 
@@ -55,12 +55,13 @@ async def handle_text_dispatcher(update: Update, context: ContextTypes.DEFAULT_T
         # 优雅分发命令
         if await dispatch_command(update, context):
             return
-        # 协议号登录流程
-        if await handle_telethon_login_text(update, context):
-            return
-        # 频道配置引导输入
-        if await handle_channel_config_text(update, context):
-            return
+        if is_feature_enabled(context.application, "channel"):
+            # 协议号登录流程
+            if await handle_telethon_login_text(update, context):
+                return
+            # 频道配置引导输入
+            if await handle_channel_config_text(update, context):
+                return
         # 自定义命令
         if await apply_action(update, context):
             return
@@ -79,8 +80,6 @@ async def handle_text_dispatcher(update: Update, context: ContextTypes.DEFAULT_T
         await handle_qa_message(update, context)  # 问答模块
         await handle_chengyu(update, context)  # 成语接龙模块
         
-        await ai_auto_reply(update, context)  # ai问答
-
         # await handle_text_message(update, context)  # 群聊天记录
         # 会中断后面的
 

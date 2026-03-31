@@ -2,6 +2,7 @@ import os
 import random
 import re
 import difflib
+import telegram
 
 from telegram.ext import (
     ApplicationBuilder,
@@ -66,6 +67,31 @@ def _find_best_match(text: str, candidates: list[str], threshold: float = FUZZY_
     return None
 
 
+async def _send_qa_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    thread_id=None,
+):
+    try:
+        return await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=text,
+            message_thread_id=thread_id,
+        )
+    except telegram.error.TimedOut:
+        print(
+            f"⚠️ 问答回复发送超时: bot={context.bot.first_name} chat={update.effective_chat.id}"
+        )
+    except telegram.error.BadRequest as e:
+        if "Not enough rights" in str(e):
+            print(
+                f"⚠️ 问答回复权限不足: bot={context.bot.first_name} chat={update.effective_chat.id}"
+            )
+            return None
+        raise
+
+
 # 添加问题=答案
 @register_command("添加问答")
 async def add_qa_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -108,11 +134,7 @@ async def handle_qa_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await tts_voice_reply(update, context)
         else:
             # await group_tts_voice(update, context)
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=str(group_qa[match_key]),
-                message_thread_id=thread_id,
-            )
+            await _send_qa_message(update, context, str(group_qa[match_key]), thread_id)
         return
 
     # 多答案回复
@@ -127,11 +149,7 @@ async def handle_qa_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not isinstance(answers, list):
             answers = [answers]
         reply = random.choice(answers)  # 随机选一个答案
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=str(reply),
-            message_thread_id=thread_id,
-        )
+        await _send_qa_message(update, context, str(reply), thread_id)
         return
 
     group_qa = data.setdefault("1000", {})
@@ -142,11 +160,7 @@ async def handle_qa_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not isinstance(answers, list):
             answers = [answers]
         reply = random.choice(answers)  # 随机选一个答案
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=str(reply),
-            message_thread_id=thread_id,
-        )
+        await _send_qa_message(update, context, str(reply), thread_id)
         return
 
 

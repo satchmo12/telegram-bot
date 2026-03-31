@@ -531,7 +531,11 @@ def group_only(func):
 
 # 高级管理员
 def is_super_admin(user_id):
-    return int(user_id) in SUPER_ADMINS or int(user_id) == get_runtime_owner_id()
+    return int(user_id) in SUPER_ADMINS
+
+
+def is_bot_owner(user_id):
+    return int(user_id) == get_runtime_owner_id()
 
 
 delete_queue = asyncio.Queue()

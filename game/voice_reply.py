@@ -6,14 +6,17 @@ import edge_tts
 from gtts import gTTS
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
-import whisper
 from telegram.ext import MessageHandler, filters
 
 from command_router import register_command
 from utils import load_json, save_json, safe_reply
 
-# 加载模型
-whisper_model = whisper.load_model("base")  # 可以换成 small, medium 更快/精度更高
+try:
+    import whisper
+except ModuleNotFoundError:
+    whisper = None
+
+whisper_model = None
 
 CONFIG_PATH = "config_data/group_tts_config.json"
 
@@ -34,6 +37,15 @@ PITCH_MAP = {"高": "+50Hz", "低": "-50Hz", "默认": "+0Hz"}
 
 TEMP_AUDIO_DIR = "downloads/voice_tmp"
 os.makedirs(TEMP_AUDIO_DIR, exist_ok=True)
+
+
+def _get_whisper_model():
+    global whisper_model
+    if whisper is None:
+        raise RuntimeError("未安装 whisper，语音识别功能不可用")
+    if whisper_model is None:
+        whisper_model = whisper.load_model("base")
+    return whisper_model
 
 
 def _bot_temp_path(
@@ -201,7 +213,8 @@ async def voice_to_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     os.system(f'ffmpeg -i "{ogg_path}" -ar 16000 -ac 1 "{wav_path}" -y')
 
     try:
-        result = whisper_model.transcribe(wav_path, language="zh")
+        model = _get_whisper_model()
+        result = model.transcribe(wav_path, language="zh")
         text = result["text"]
         await update.message.reply_text(f"📝 语音识别结果：{text}")
     except Exception as e:
@@ -238,7 +251,8 @@ async def command_voice_to_text(update: Update, context: ContextTypes.DEFAULT_TY
     os.system(f'ffmpeg -i "{ogg_path}" -ar 16000 -ac 1 "{wav_path}" -y')
 
     try:
-        result = whisper_model.transcribe(wav_path, language="zh")
+        model = _get_whisper_model()
+        result = model.transcribe(wav_path, language="zh")
         text = result["text"]
         # await update.message.reply_text(f"📝 语音识别结果：\n{text}")
         await safe_reply(update, context, f"📝 语音：\n{text}")

@@ -25,37 +25,25 @@ def register_group_handlers(app):
     register_group_logger_handlers(app)
 
     # 导航与群核心功能
-
-    if is_feature_enabled(app, "group_setting"):
-        register_group_setting_handlers(app)
-    if is_feature_enabled(app, "admin"):
-        register_admin_handlers(app)
-    if is_feature_enabled(app, "invite_stats"):
-        register_invite_handlers(app)
-    if is_feature_enabled(app, "verification"):
-        register_verification_handlers(app)
-    if is_feature_enabled(app, "checkin"):
-        register_checkin_handlers(app)
+    register_group_setting_handlers(app)
+    register_admin_handlers(app)
+    register_invite_handlers(app)
+    register_verification_handlers(app)
+    register_checkin_handlers(app)
 
     # 群互动能力
-    if is_feature_enabled(app, "group_care"):
-        register_group_care_handlers(app)
-    if is_feature_enabled(app, "group_media_tools"):
-        register_group_media_tools_handlers(app)
-    if is_feature_enabled(app, "save_photos"):
-        register_save_photos_handlers(app)
-    if is_feature_enabled(app, "talk_stats"):
-        register_talk_handlers(app)
+    register_group_care_handlers(app)
+    register_group_media_tools_handlers(app)
+    register_save_photos_handlers(app)
+    register_talk_handlers(app)
     register_reply_to_channel_handlers(app)
-    register_channel_config_handlers(app)
-    register_telethon_login_handlers(app)
+    if is_feature_enabled(app, "channel"):
+        register_channel_config_handlers(app)
+        register_telethon_login_handlers(app)
 
     # 需要较后注册的群路由
-    if is_feature_enabled(app, "user_tracker"):
-        register_user_tracker_handlers(app)
-    if is_feature_enabled(app, "force_subscribe"):
-        register_handle_force_handlers(app)
+    register_user_tracker_handlers(app)
+    register_handle_force_handlers(app)
     
     # 有吞噬会掉的方法  app.add_handler(CallbackQueryHandler(menu_button_handler))
-    if is_feature_enabled(app, "menu"):
-        register_menu_handlers(app)
+    register_menu_handlers(app)
