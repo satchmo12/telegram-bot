@@ -4,7 +4,7 @@ from telegram.ext import CommandHandler, ContextTypes
 from command_router import register_command
 from utils import is_admin, load_json, safe_reply, save_json
 
-CONFIG_FILE = "data/reply_forward_config.json"
+CONFIG_FILE = "config_data/reply_forward_config.json"
 
 
 def _load_config() -> dict:

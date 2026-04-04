@@ -22,10 +22,10 @@ from utils import (
     safe_reply,
 )
 
-FORWARD_USER_CONFIG_FILE = "data/forward_config_users_telethon.json"
-FORWARD_USER_CONFIG_BOT_FILE = "data/forward_config_users_bot.json"
+FORWARD_USER_CONFIG_FILE = "config_data/forward_config_users_telethon.json"
+FORWARD_USER_CONFIG_BOT_FILE = "config_data/forward_config_users_bot.json"
 HISTORY_REQUESTS_FILE = "data/history_forward_requests.json"
-SUBSCRIPTION_FILE = "data/subscriptions.json"
+SUBSCRIPTION_FILE = "config_data/subscriptions.json"
 SESSION_OWNERS_FILE = "data/telethon_session_owners.json"
 CALLBACK_PREFIX = "chcfg"
 LOGIN_CALLBACK_PREFIX = "tlogin"

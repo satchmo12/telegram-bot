@@ -67,7 +67,7 @@ async def check_ton_username(username: str) -> str:
 
 # ---------------- 配置 ----------------
 DATA_FILE = "data/learned_pairs.json"  # 存储学习问答对
-GROUP_RECOMMEND_CONFIG_FILE = "data/group_recommend_config.json"
+GROUP_RECOMMEND_CONFIG_FILE = "config_data/group_recommend_config.json"
 DEFAULT_GROUP_RECOMMEND_TEXT = "不想被推荐点击机器人关闭群推荐即可，曝光度越高排名越靠前"
 NAV_CALLBACK_PREFIX = "nav"
 CHINESE_PACK_URL = "https://t.me/setlanguage/mr566"

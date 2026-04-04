@@ -763,7 +763,7 @@ def _set_history_max_id(state: dict, key: str, msg_id: int):
     keys[key] = record
 
 
-FORWARD_USER_CONFIG_FILE = "data/forward_config_users_telethon.json"
+FORWARD_USER_CONFIG_FILE = "config_data/forward_config_users_telethon.json"
 
 
 def _collect_rules() -> Dict[str, List[dict]]:

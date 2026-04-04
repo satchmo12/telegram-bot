@@ -17,7 +17,7 @@ from utils import get_group_whitelist, load_json, save_json
 from group.mute_registry import add_mute, remove_mute
 
 
-DATA_FILE = "data/force_subscribe.json"
+DATA_FILE = "config_data/force_subscribe.json"
 MUTE_FILE = "data/force_subscribe_mute.json"
 
 # 用户提醒冷却

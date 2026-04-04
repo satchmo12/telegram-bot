@@ -12,7 +12,7 @@ from utils import GROUP_LIST_FILE, get_group_whitelist, is_super_admin, safe_rep
 from channel.channel_force import unmute_force_subscribe_chat
 
 CALLBACK_PREFIX = "gcfg"
-FORCE_SUBSCRIBE_FILE = "data/force_subscribe.json"
+FORCE_SUBSCRIBE_FILE = "config_data/force_subscribe.json"
 TOGGLE_FIELDS = [
     ("verify", "身份验证"),
     ("welcome", "入群欢迎"),

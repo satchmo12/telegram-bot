@@ -23,7 +23,7 @@ from telegram.ext import ContextTypes, CallbackQueryHandler
 from channel.channel_config import start_channel_config_with_source, start_channel_config_new
 
 HISTORY_RANGE_FILE = os.path.join("data", "history_forward_range.json")
-SUBSCRIPTION_FILE = "data/subscriptions.json"
+SUBSCRIPTION_FILE = "config_data/subscriptions.json"
 SESSION_OWNERS_FILE = "data/telethon_session_owners.json"
 
 LOGIN_STEP_PHONE = "await_phone"

@@ -86,7 +86,7 @@ PRAISE_FILE = os.path.join(DATA_DIR, "praise_words.json")
 
 FORWARD_MAP_FILE = os.path.join(DATA_DIR, "forward_map.json")
 
-JOKE_FILE = os.path.join(DATA_DIR, "joke_file.json")
+JOKE_FILE = os.path.join(CON_DATA_DIR, "joke_file.json")
 
 WORD_FILE = os.path.join(CON_DATA_DIR, "word.txt")
 
@@ -211,6 +211,9 @@ def _resolve_json_path(path: str) -> str:
     仅对 .json 文件生效。
     """
     if not isinstance(path, str) or not path.endswith(".json"):
+        return path
+
+    if os.path.normpath(path) == os.path.normpath(JOKE_FILE):
         return path
 
     bot_name = get_runtime_bot_name()

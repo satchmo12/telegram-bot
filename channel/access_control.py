@@ -1,6 +1,6 @@
 from utils import load_json, save_json
 
-CHANNEL_ACCESS_CONFIG_FILE = "data/channel_access_control.json"
+CHANNEL_ACCESS_CONFIG_FILE = "config_data/channel_access_control.json"
 DEFAULT_REQUIRE_SUBSCRIPTION = True
 
 

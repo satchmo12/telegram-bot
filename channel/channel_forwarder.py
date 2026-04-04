@@ -16,7 +16,7 @@ RATE_LIMIT_MAX_RETRY = 3
 TARGET_LOCKS = {}
 TARGET_LAST_TS = {}
 
-SUBSCRIPTION_FILE = "data/subscriptions.json"
+SUBSCRIPTION_FILE = "config_data/subscriptions.json"
 
 LINK_RE = re.compile(r"(?i)(https?://[^\s)\]}>]+|t\.me/[^\s)\]}>]+|www\.[^\s)\]}>]+)")
 
@@ -322,11 +322,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not source_channel_ids:
         return
 
-    config = load_json("data/forward_config.json")
+    config = load_json("config_data/forward_config.json")
     base_rules = config.get("forward_rules", []) if isinstance(config, dict) else []
     forward_rules = list(base_rules) if isinstance(base_rules, list) else []
 
-    user_config = load_json("data/forward_config_users_bot.json")
+    user_config = load_json("config_data/forward_config_users_bot.json")
     if isinstance(user_config, dict):
         users = user_config.get("users", {})
         if isinstance(users, dict):
@@ -456,11 +456,11 @@ async def handle_user_forward(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not source_channel_ids:
         return
 
-    config = load_json("data/forward_config.json")
+    config = load_json("config_data/forward_config.json")
     base_rules = config.get("forward_rules", []) if isinstance(config, dict) else []
     forward_rules = list(base_rules) if isinstance(base_rules, list) else []
 
-    user_config = load_json("data/forward_config_users_bot.json")
+    user_config = load_json("config_data/forward_config_users_bot.json")
     if isinstance(user_config, dict):
         users = user_config.get("users", {})
         if isinstance(users, dict):
