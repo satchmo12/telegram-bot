@@ -18,6 +18,10 @@ from channel.telethon_login import register_telethon_login_handlers
 
 
 def register_group_handlers(app):
+    # 群配置入口常驻注册，是否可用由运行时功能开关判断。
+    # 这样在运行中开启 group 后，无需重启即可立即使用群配置。
+    register_group_setting_handlers(app)
+
     if not is_feature_enabled(app, "group"):
         return
 
@@ -25,7 +29,6 @@ def register_group_handlers(app):
     register_group_logger_handlers(app)
 
     # 导航与群核心功能
-    register_group_setting_handlers(app)
     register_admin_handlers(app)
     register_invite_handlers(app)
     register_verification_handlers(app)

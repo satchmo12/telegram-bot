@@ -32,6 +32,7 @@ from utils import (
     get_first_pinyin,
     get_last_pinyin,
     group_allowed,
+    is_admin,
     is_super_admin,
     load_json,
     save_json,
@@ -1060,33 +1061,18 @@ async def add_joke(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-@group_allowed
 @register_command("群主动说话", "主动说话")
 async def active_speak_control(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
 
-    if update.effective_chat.type in ["group", "supergroup"]:
-        username = getattr(context.bot, "username", "") or ""
-        if username:
-            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
-            keyboard = InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            "👉 去私聊配置", url=f"https://t.me/{username}"
-                        )
-                    ]
-                ]
-            )
-            return await update.message.reply_text(
-                "请在私聊里发送“群配置”修改主动说话设置，避免群里多机器人同时响应。",
-                reply_markup=keyboard,
-            )
+    if update.effective_chat.type not in ["group", "supergroup"]:
         return await safe_reply(
-            update, context, "请私聊机器人发送“群配置”修改主动说话设置。"
+            update, context, "请在要配置的群里发送“群主动说话”或“主动说话”。"
         )
+
+    if not await is_admin(update, context):
+        return await safe_reply(update, context, "❌ 仅群管理员或超级管理员可配置主动说话。")
 
     chat_id = str(update.effective_chat.id)
     group_whitelist = get_group_whitelist(context)

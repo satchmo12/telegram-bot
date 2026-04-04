@@ -9,7 +9,7 @@ from telegram.ext import (
 from command_router import register_command
 from database import *
 import config
-from utils import get_group_whitelist
+from utils import get_group_whitelist, safe_reply
 
 LUAFA_COOLDOWN_SECONDS = 6000
 last_lufa_ts = {}
@@ -396,7 +396,7 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text += f'{i}. <a href="tg://user?id={user_id}">{name}</a> - {length}cm\n'
 
-    await update.message.reply_text(text, parse_mode=("HTML" if not is_silent else None))
+    await safe_reply(update, context, text, html=not is_silent)
 
 
 # ===== 置顶 =====

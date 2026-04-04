@@ -90,7 +90,6 @@ def build_feature_intro(context: ContextTypes.DEFAULT_TYPE) -> str:
         "📌 已启用功能明细：",
         *[f"• {x}" for x in details[:20]],
         "",
-        "💡 提示：不同机器人可以在 .env 里配置不同功能开关。",
     ]
     return "\n".join(lines)
 

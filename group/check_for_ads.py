@@ -29,6 +29,25 @@ TELEGRAM_LINK_PATTERN = re.compile(
 )
 
 
+async def _ensure_ad_command_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    chat = update.effective_chat
+    if not chat or (chat.type or "").lower() not in {"group", "supergroup"}:
+        await safe_reply(update, context, "❌ 该命令只能在群组中使用。")
+        return False
+
+    chat_id = str(chat.id)
+    group_config = get_group_whitelist(context).get(chat_id)
+    if not isinstance(group_config, dict) or not group_config.get("enabled", True):
+        await safe_reply(update, context, "⚠️ 本群主功能未开启，无法使用广告词命令。")
+        return False
+
+    if not await is_admin(update, context):
+        await safe_reply(update, context, "❌ 仅群管理员或超级管理员可操作。")
+        return False
+
+    return True
+
+
 def get_ad_keywords(context: ContextTypes.DEFAULT_TYPE):
     """兼容旧结构并按群读取广告关键词。"""
     path = get_bot_path(context, AD_KEYWORDS_FILE)
@@ -235,6 +254,36 @@ def has_any_link(msg) -> bool:
             return True
     return False
 
+
+async def _is_linked_channel_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, msg
+) -> bool:
+    sender_chat = getattr(msg, "sender_chat", None)
+    if not sender_chat:
+        return False
+
+    sender_chat_id = getattr(sender_chat, "id", None)
+    sender_chat_type = str(getattr(sender_chat, "type", "") or "").lower()
+    if hasattr(getattr(sender_chat, "type", None), "name"):
+        sender_chat_type = str(sender_chat.type.name or "").lower()
+
+    if sender_chat_type != "channel":
+        return False
+
+    linked_chat_id = getattr(update.effective_chat, "linked_chat_id", None)
+    if linked_chat_id is None:
+        try:
+            full_chat = await context.bot.get_chat(update.effective_chat.id)
+            linked_chat_id = getattr(full_chat, "linked_chat_id", None)
+        except Exception:
+            linked_chat_id = None
+
+    if linked_chat_id and sender_chat_id and int(linked_chat_id) == int(sender_chat_id):
+        return True
+
+    # 兼容旧行为：只要明确是频道身份发言，也默认放行
+    return True
+
 @group_allowed
 async def check_for_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_bot_admin(update, context):
@@ -256,9 +305,8 @@ async def check_for_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.edited_message or update.channel_post
     if not msg:
         return
-    sender_chat = getattr(msg, "sender_chat", None)
-    if sender_chat and getattr(sender_chat, "type", None) and sender_chat.type.name == "CHANNEL":
-        return  # 频道发言不删除
+    if await _is_linked_channel_message(update, context, msg):
+        return  # 本群关联频道/频道身份发言不删除
 
     user = msg.from_user
     if not user:
@@ -321,8 +369,7 @@ from command_router import register_command
 
 @register_command("添加广告词")
 async def add_ad_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not await is_admin(update, context):
+    if not await _ensure_ad_command_access(update, context):
         return
     chat_id = str(update.effective_chat.id)
 
@@ -369,8 +416,7 @@ async def add_ad_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @register_command("删除广告词")
 async def remove_ad_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not await is_admin(update, context):
+    if not await _ensure_ad_command_access(update, context):
         return
     chat_id = str(update.effective_chat.id)
 
@@ -406,8 +452,7 @@ async def remove_ad_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @register_command("群广告词", "查看广告词")
 async def group_ad_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not await is_admin(update, context):
+    if not await _ensure_ad_command_access(update, context):
         return
     chat_id = str(update.effective_chat.id)
 
@@ -511,8 +556,7 @@ async def group_ad_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @register_command("添加白名单")
 async def add_whitelist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not await is_admin(update, context):
+    if not await _ensure_ad_command_access(update, context):
         return
     chat_id = str(update.effective_chat.id)
 

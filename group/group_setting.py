@@ -7,6 +7,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters, ApplicationHandlerStop
 
 from command_router import FEATURE_FRIENDS, register_command
+from feature_flags import is_feature_enabled
 from utils import GROUP_LIST_FILE, get_group_whitelist, is_super_admin, safe_reply, save_json, load_json
 from channel.channel_force import unmute_force_subscribe_chat
 
@@ -32,7 +33,7 @@ ACTIVE_SPEAK_MAX_INTERVAL = 1440
 AD_PUSH_MIN_INTERVAL = 5
 AD_PUSH_MAX_INTERVAL = 1440
 MANAGE_CHECK_CACHE_TTL_SEC = 60
-GROUP_LIST_PAGE_SIZE = 15
+GROUP_LIST_PAGE_SIZE = 10
 
 
 def _is_group_chat(update: Update) -> bool:
@@ -40,9 +41,18 @@ def _is_group_chat(update: Update) -> bool:
     return chat_type in {"group", "supergroup"}
 
 
+def _is_group_feature_enabled(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    return is_feature_enabled(context.application, "group")
+
+
 def _private_chat_url(context: ContextTypes.DEFAULT_TYPE) -> str:
     username = getattr(context.bot, "username", "") or ""
     return f"https://t.me/{username}" if username else ""
+
+
+def _add_group_url(context: ContextTypes.DEFAULT_TYPE) -> str:
+    username = getattr(context.bot, "username", "") or ""
+    return f"https://t.me/{username}?startgroup=true" if username else ""
 
 
 def _group_title(chat_id: str, cfg: dict) -> str:
@@ -82,7 +92,9 @@ def _normalize_business_coop_link(raw: str) -> str:
     return text
 
 
-def _build_group_list_keyboard(data: dict, page: int = 1) -> InlineKeyboardMarkup:
+def _build_group_list_keyboard(
+    data: dict, page: int = 1, *, add_group_url: str = ""
+) -> InlineKeyboardMarkup:
     items = [
         (chat_id, cfg)
         for chat_id, cfg in sorted(
@@ -120,6 +132,8 @@ def _build_group_list_keyboard(data: dict, page: int = 1) -> InlineKeyboardMarku
         )
     if nav_row:
         rows.append(nav_row)
+    if add_group_url:
+        rows.append([InlineKeyboardButton("+ 添加群组", url=add_group_url)])
     return InlineKeyboardMarkup(rows) if rows else InlineKeyboardMarkup([])
 
 
@@ -372,6 +386,8 @@ async def _open_group_panel(
 
 @register_command("群状态")
 async def group_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_group_feature_enabled(context):
+        return await safe_reply(update, context, "⚠️ 当前机器人未开启群功能。")
     if not update.message or not update.effective_chat:
         return
     chat_id = str(update.effective_chat.id)
@@ -383,6 +399,8 @@ async def group_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @register_command("群开关", "群配置", "群设置")
 async def group_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_group_feature_enabled(context):
+        return await safe_reply(update, context, "⚠️ 当前机器人未开启群功能。")
     if not update.message:
         return
 
@@ -404,16 +422,24 @@ async def group_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = get_group_whitelist(context)
     data = await _visible_group_data_for_user(context, user_id, data)
     if not data:
-        return await safe_reply(update, context, "暂无可配置的群记录。")
+        add_group_url = _add_group_url(context)
+        reply_markup = (
+            InlineKeyboardMarkup([[InlineKeyboardButton("+ 添加群组", url=add_group_url)]])
+            if add_group_url
+            else None
+        )
+        return await safe_reply(update, context, "暂无可配置的群记录。", reply_markup=reply_markup)
     page = 1
     context.user_data["group_setting_list_page"] = page
-    keyboard = _build_group_list_keyboard(data, page)
+    keyboard = _build_group_list_keyboard(data, page, add_group_url=_add_group_url(context))
     if not keyboard.inline_keyboard:
         return await safe_reply(update, context, "暂无可配置的群记录。")
     await update.message.reply_text(_group_list_text(data, page), reply_markup=keyboard)
 
 
 async def _redirect_to_private(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_group_feature_enabled(context):
+        return await safe_reply(update, context, "⚠️ 当前机器人未开启群功能。")
     if _is_group_chat(update):
         return await group_help(update, context)
     await safe_reply(update, context, "请发送“群配置”并通过按钮操作。")
@@ -594,6 +620,8 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
     query = update.callback_query
     if not query or not query.data:
         return
+    if not _is_group_feature_enabled(context):
+        return await query.answer("当前机器人未开启群功能。", show_alert=False)
 
     if not update.effective_chat or update.effective_chat.type != "private":
         return await query.answer("请在私聊里操作配置。", show_alert=True)
@@ -616,7 +644,11 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                 page = 1
         context.user_data["group_setting_list_page"] = page
         await query.answer()
-        keyboard = _build_group_list_keyboard(visible_data, page)
+        keyboard = _build_group_list_keyboard(
+            visible_data,
+            page,
+            add_group_url=_add_group_url(context),
+        )
         if not keyboard.inline_keyboard:
             return await query.edit_message_text("暂无可配置的群记录。")
         if context.user_data.get("start_panel"):
@@ -833,6 +865,10 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_chat:
+        return
+    if not _is_group_feature_enabled(context):
+        context.user_data.pop("group_setting_stage", None)
+        context.user_data.pop("group_setting_chat_id", None)
         return
     if update.effective_chat.type != "private":
         return

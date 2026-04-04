@@ -99,6 +99,10 @@ async def _clear_login_state(uid: str, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+def _clear_broadcast_state(uid: str):
+    _BROADCAST_STATE.pop(uid, None)
+
+
 def _normalize_username(value: str) -> str:
     if not value:
         return ""
@@ -385,6 +389,8 @@ async def telethon_login_cancel(update: Update, context: ContextTypes.DEFAULT_TY
 async def handle_telethon_login_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not update.message:
         return False
+    if not update.effective_chat or update.effective_chat.type != "private":
+        return False
     uid = str(update.effective_user.id)
     state = _LOGIN_STATE.get(uid)
     join_state = _JOIN_STATE.get(uid)
@@ -528,6 +534,24 @@ async def handle_telethon_login_text(update: Update, context: ContextTypes.DEFAU
             await _plain_reply(update, context, "请输入群号/用户名/邀请链接。")
             return True
 
+        normalized = raw
+        if normalized.startswith("https://t.me/"):
+            normalized = normalized.replace("https://t.me/", "")
+        if normalized.startswith("t.me/"):
+            normalized = normalized.replace("t.me/", "")
+        if normalized.startswith("@"):
+            normalized = normalized[1:]
+
+        is_invite_link = "t.me/+" in raw or "joinchat" in raw
+        is_numeric_target = normalized.lstrip("-").isdigit()
+        is_username_target = bool(
+            normalized
+            and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,}", normalized)
+        )
+        if not (is_invite_link or is_numeric_target or is_username_target):
+            await _plain_reply(update, context, "❗ 请输入正确的群号、@用户名，或邀请链接。")
+            return True
+
         session_path = get_session_path(context, session_name)
         client = TelegramClient(session_path, api_id, api_hash)
         await client.connect()
@@ -537,19 +561,13 @@ async def handle_telethon_login_text(update: Update, context: ContextTypes.DEFAU
                 await _plain_reply(update, context, "该小号未登录，请重新登录。")
                 return True
 
-            if "t.me/+" in raw or "joinchat" in raw:
+            if is_invite_link:
                 invite_hash = raw.split("/")[-1]
                 if invite_hash.startswith("+"):
                     invite_hash = invite_hash[1:]
                 await client(ImportChatInviteRequest(invite_hash))
             else:
-                target = raw
-                if target.startswith("https://t.me/"):
-                    target = target.replace("https://t.me/", "")
-                if target.startswith("t.me/"):
-                    target = target.replace("t.me/", "")
-                if target.startswith("@"):
-                    target = target[1:]
+                target = normalized
                 if target.lstrip("-").isdigit():
                     entity = await client.get_entity(int(target))
                     await client(JoinChannelRequest(entity))
@@ -963,9 +981,14 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
     parts = data.split(":", 2)
     action = parts[1] if len(parts) > 1 else ""
     payload = parts[2] if len(parts) > 2 else ""
+    uid = str(query.from_user.id)
+
+    # 只要离开“等待输入群发内容”的界面，就清掉待群发状态，避免后续任意私聊文本被误当成群发内容。
+    if action != "broadcast":
+        _clear_broadcast_state(uid)
 
     if action == "list":
-        await _clear_login_state(str(query.from_user.id), context)
+        await _clear_login_state(uid, context)
         if not _require_active_subscription(query.from_user):
             return await query.edit_message_text("🚫 订阅已到期，无法查看小号。")
         sessions = _list_session_names(context, query.from_user)
@@ -994,7 +1017,7 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
         )
 
     if action == "refresh":
-        await _clear_login_state(str(query.from_user.id), context)
+        await _clear_login_state(uid, context)
         if not _require_active_subscription(query.from_user):
             return await query.edit_message_text("🚫 订阅已到期，无法查看小号。")
         sessions = _list_session_names(context, query.from_user)
@@ -1029,12 +1052,10 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
         )
 
     if action == "login":
-        uid = str(query.from_user.id)
         await _clear_login_state(uid, context)
         return await _start_login_flow(update, context)
 
     if action == "cancel":
-        uid = str(query.from_user.id)
         state = _LOGIN_STATE.pop(uid, None)
         if state:
             await _teardown_client(state)
@@ -1042,7 +1063,7 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
         return await query.edit_message_text("当前没有进行中的登录流程。")
 
     if action == "menu":
-        await _clear_login_state(str(query.from_user.id), context)
+        await _clear_login_state(uid, context)
         session_name = payload
         if not session_name:
             return await query.edit_message_text("账号无效。")
@@ -1062,7 +1083,7 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
         )
 
     if action == "broadcast":
-        await _clear_login_state(str(query.from_user.id), context)
+        await _clear_login_state(uid, context)
         session_name = payload
         if not session_name:
             return await query.edit_message_text("账号无效。")
@@ -1070,7 +1091,6 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
             return await query.edit_message_text("🚫 订阅已到期，无法群发。")
         if not _can_access_session(query.from_user, session_name):
             return await query.edit_message_text("🚫 无权使用该账号群发。")
-        uid = str(query.from_user.id)
         _BROADCAST_STATE[uid] = {"session": session_name}
         keyboard = InlineKeyboardMarkup(
             [
@@ -1081,10 +1101,9 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
         return await query.edit_message_text("请发送要群发的消息：", reply_markup=keyboard)
 
     if action == "bcancel":
-        await _clear_login_state(str(query.from_user.id), context)
+        await _clear_login_state(uid, context)
         session_name = payload
-        uid = str(query.from_user.id)
-        _BROADCAST_STATE.pop(uid, None)
+        _clear_broadcast_state(uid)
         if not session_name:
             return await query.edit_message_text("已取消。")
         label = _get_cached_session_label(session_name)
@@ -1094,7 +1113,7 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
         )
 
     if action == "channels":
-        await _clear_login_state(str(query.from_user.id), context)
+        await _clear_login_state(uid, context)
         session_name = payload
         if not session_name:
             return await query.edit_message_text("账号无效。")
@@ -1108,7 +1127,6 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
                 f"未获取到频道列表（可能未登录或无关注频道）。",
                 reply_markup=_build_account_menu_keyboard(session_name),
             )
-        uid = str(query.from_user.id)
         _CHANNEL_LIST_CACHE[(uid, session_name)] = channels
         lines = []
         keyboard_rows = []
@@ -1130,7 +1148,7 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
         return await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard_rows))
 
     if action == "groups":
-        await _clear_login_state(str(query.from_user.id), context)
+        await _clear_login_state(uid, context)
         session_name = payload
         if not session_name:
             return await query.edit_message_text("账号无效。")
@@ -1148,7 +1166,7 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
         return await query.edit_message_text(text, reply_markup=_build_account_menu_keyboard(session_name))
 
     if action == "join":
-        await _clear_login_state(str(query.from_user.id), context)
+        await _clear_login_state(uid, context)
         session_name = payload
         if not session_name:
             return await query.edit_message_text("账号无效。")
@@ -1156,7 +1174,6 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
             return await query.edit_message_text("🚫 订阅已到期，无法查看小号。")
         if not _can_access_session(query.from_user, session_name):
             return await query.edit_message_text("🚫 无权查看该账号。")
-        uid = str(query.from_user.id)
         _JOIN_STATE[uid] = {"session": session_name}
         return await query.edit_message_text(
             "请输入群号/用户名/邀请链接（如 @group 或 https://t.me/+xxxxx）：",
@@ -1164,7 +1181,7 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
         )
 
     if action == "cfg_new":
-        await _clear_login_state(str(query.from_user.id), context)
+        await _clear_login_state(uid, context)
         session_name = payload
         if not _require_active_subscription(query.from_user):
             return await query.edit_message_text("🚫 订阅已到期，无法配置规则。")

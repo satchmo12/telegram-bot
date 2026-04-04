@@ -6,6 +6,8 @@ import re
 from command_router import register_command
 from utils import (
     WARNINGS_FILE,
+    BOT_USER_FILE,
+    FORWARD_MAP_FILE,
     is_admin,
     is_super_admin,
     load_json,
@@ -69,6 +71,32 @@ def _normalize_group_target(raw: str):
         except Exception:
             return None
     return f"@{s}"
+
+
+def _resolve_reply_user_for_id(update: Update):
+    reply = update.message.reply_to_message if update.message else None
+    if not reply:
+        return None
+
+    forward_map = load_json(FORWARD_MAP_FILE) or {}
+    mapped_uid = forward_map.get(str(reply.message_id))
+    if mapped_uid is not None:
+        uid = str(mapped_uid)
+        user_data = load_json(BOT_USER_FILE) or {}
+        info = user_data.get(uid, {}) if isinstance(user_data, dict) else {}
+        name = str(info.get("name", "")).strip() or f"用户 {uid}"
+        username = str(info.get("username", "")).strip()
+        if username:
+            name = f"{name} (@{username})"
+        return int(uid), name
+
+    user = getattr(reply, "from_user", None)
+    if not user:
+        return None
+    name = user.full_name
+    if getattr(user, "username", None):
+        name = f"{name} (@{user.username})"
+    return int(user.id), name
 
 
 @register_command("群管")
@@ -411,13 +439,18 @@ async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # 获取id  仅高级管理
-@register_command("用户id")
+@register_command("用户id", "查询id", "查id", "用户ID", "查询ID", "查ID")
 async def get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_super_admin(update.effective_user.id):
         if update.message.reply_to_message:
-            user = update.message.reply_to_message.from_user
-            await safe_reply(update, context,
-                f"👤 用户：{user.full_name}\n🆔 ID：<code>{user.id}</code>",
+            resolved = _resolve_reply_user_for_id(update)
+            if not resolved:
+                return await safe_reply(update, context, "未找到被回复用户的信息。")
+            user_id, user_label = resolved
+            await safe_reply(
+                update,
+                context,
+                f"👤 用户：{user_label}\n🆔 ID：<code>{user_id}</code>",
                 html=True,
             )
         else:

@@ -70,6 +70,7 @@ def _feature_for_handler(handler) -> Optional[str]:
         ("group.verify", "group"),
         ("group.talk_stats", "group"),
         ("group.group_care", "group"),
+        ("group.check_for_ads", "group"),
         ("group.group_media_tools", "group"),
         ("group.save_photos", "group"),
         ("group.grouplist", "group"),
@@ -157,12 +158,6 @@ def feature_required(feature_name: str):
         async def wrapper(update, context):
             chat_id = update.effective_chat.id
             if not is_feature_enabled(chat_id, feature_name, context):
-                if feature_name == FEATURE_MANOR:
-                    await safe_reply(
-                        update,
-                        context,
-                        "⚠️ 本群庄园功能未开启，请管理员发送「群庄园」开启后再试。",
-                    )
                 return
             return await func(update, context)
 

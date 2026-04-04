@@ -1,10 +1,12 @@
 # === bot.py 主文件 ===
 import asyncio
+import html
 import os
 import sys
 import re
 import logging
 from datetime import time
+from typing import Optional
 from dotenv import load_dotenv
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -24,6 +26,7 @@ from telegram.error import NetworkError, TimedOut, InvalidToken
 
 from group.group_logger import GROUPS_FILE
 from forward.message_forward import forward_to_owner, reply_from_owner
+from menu import build_feature_intro
 from modules import register_all_handlers  # 注册各功能模块
 from dispatcher import message_router  # 最终文本处理路由器
 from channel.telethon_forwarder import start_telethon_forwarder_job
@@ -48,6 +51,7 @@ from utils import (
     is_super_admin,
     load_json,
     save_json,
+    is_bot_owner,
     set_bot_owner,
     set_runtime_bot_name,
 )
@@ -78,23 +82,12 @@ logging.basicConfig(
     level=logging.WARNING,
 )
 
-# ===== 多机器人配置 =====
-# 自动读取环境变量：
-# - BOT_TOKEN_<KEY>  (必填)
-# - BOT_NAME_<KEY>   (可选，不填默认 bot_<key>)
-# - BOT_OWNER_<KEY>  (可选，不填默认 DEFAULT_OWNER_ID)
-# - BOT_ENABLE_<KEY> (可选，默认开启)
-# - BOT_FEATURES_<KEY> (可选，显式启用功能列表，逗号分隔)
-# - BOT_DISABLE_FEATURES_<KEY> (可选，在当前启用列表上关闭功能，逗号分隔)
-#
-# 例如：
-# BOT_TOKEN_A=xxxx
-# BOT_NAME_A=bot_haha
-# BOT_OWNER_A=6085551760
-# BOT_ENABLE_A=1
-# BOT_DISABLE_FEATURES_A=save_photos,group_media_tools
+
 DEFAULT_OWNER_ID = 6085551760
 MASTER_BOT_NAME = "小雅"
+MASTER_BOT_USERNAME = str(os.getenv("MASTER_BOT_USERNAME", "")).strip().lstrip("@")
+PRIVATE_FORWARD_SELF_SERVICE_STAGE_KEY = "private_forward_self_service_stage"
+MULTI_BOT_STAGE_KEY = "multi_bot_stage"
 
 
 def load_bot_configs():
@@ -138,6 +131,14 @@ async def owner_reply_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bind_runtime_bot_context(context)
+    if (
+        str(context.application.bot_data.get("name", "")).strip() == MASTER_BOT_NAME
+        and (
+            isinstance(context.user_data.get(PRIVATE_FORWARD_SELF_SERVICE_STAGE_KEY), dict)
+            or isinstance(context.user_data.get(MULTI_BOT_STAGE_KEY), dict)
+        )
+    ):
+        return
     msg = update.message
     if msg:
         sender_chat = getattr(msg, "sender_chat", None)
@@ -196,9 +197,11 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard_rows = _build_start_panel_rows(context)
     keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
     await update.message.reply_text(
-        f"👋 欢迎使用 {bot_name}\n",
+        _build_start_welcome_text(bot_name),
         # f"当前启用功能：{feature_text}\n\n",
         reply_markup=keyboard,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
     )
 
 
@@ -218,14 +221,126 @@ async def start_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     keyboard_rows = _build_start_panel_rows(context)
     keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
     return await query.edit_message_text(
-        f"👋 欢迎使用 {bot_name}\n",
+        _build_start_welcome_text(bot_name),
         reply_markup=keyboard,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
     )
+
+
+def _build_help_text(context: ContextTypes.DEFAULT_TYPE, user_id: Optional[int] = None) -> str:
+    enabled = context.application.bot_data.get("enabled_features") or set(ALL_FEATURES)
+    bot_name = str(context.application.bot_data.get("name", "机器人")).strip() or "机器人"
+    is_master = bot_name == MASTER_BOT_NAME
+    can_manage_private_forward = bool(
+        user_id and (is_super_admin(user_id) or is_bot_owner(user_id))
+    )
+    lines = [
+        f"📖 {bot_name} 命令帮助",
+        "",
+        "基础命令：",
+        "/start 查看欢迎面板",
+        "/help 查看命令帮助",
+        "/features 查看当前机器人启用功能",
+    ]
+
+    if "group" in enabled:
+        lines.extend(
+            [
+                "",
+                "群配置：",
+                "/group 打开群配置列表",
+                "群状态 查看当前群配置",
+                "群配置 / 群设置 打开群设置面板",
+                "群静默 / 群验证 / 群欢迎 / 群广告 调整对应开关",
+                "群限频 / 群限频条数 调整限频参数",
+                "群庄园 / 群好友 / 群成语 调整群玩法开关",
+                "群广告推送 查看或设置广告推送",
+            ]
+        )
+
+    if "channel" in enabled:
+        lines.extend(
+            [
+                "",
+                "频道功能：",
+                "/channel_config 打开频道配置",
+                "频道配置 查看频道设置",
+                "机器人频道配置 设置机器人频道转发",
+                "登录小号 / 查看登录 管理协议号",
+                "订阅会员 / 订阅列表 / 添加订阅 管理订阅",
+            ]
+        )
+
+    if "private_forward" in enabled:
+        lines.extend(
+            [
+                "",
+                "双向机器人：",
+                "用户直接私聊机器人，消息会转给主人，主人回复消息即可回给用户",
+            ]
+        )
+        if can_manage_private_forward:
+            lines.extend(
+                [
+                    "用户列表 查看已私聊过机器人的用户",
+                    "拉黑用户 回复用户消息或者 拉黑用户 用户ID 将用户拉黑 ",
+                    "移除拉黑 回复用户消息或者 移除拉黑 用户ID 将用户解除拉黑 ",
+                    "黑名单 查看已拉黑用户",
+                    "广播 回复一条消息后群发给机器人所在的全部群",
+                    "用户广播 回复一条消息后群发给全部私聊过的用户",
+                    "导出用户 导出私聊用户列表",
+                ]
+            )
+
+    if "game_hub" in enabled:
+        lines.extend(
+            [
+                "",
+                "玩法帮助：",
+                "/start_menu 打开玩法帮助菜单",
+            ]
+        )
+
+    if is_master:
+        lines.extend(
+            [
+                "",
+                "小雅专属：",
+                "双向机器人 创建仅私聊转发功能的新机器人",
+                "克隆机器人 直接按小雅模板克隆新机器人",
+                "机器人面板 查看名下机器人列表",
+            ]
+        )
+        if user_id and is_super_admin(user_id):
+            lines.append("/restart 重启小雅")
+
+    return "\n".join(lines)
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id if update.effective_user else None
+    text = _build_help_text(context, user_id)
+    if update.message:
+        return await update.message.reply_text(text)
+    return await context.bot.send_message(chat_id=update.effective_chat.id, text=text)
+
+
+async def features_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = build_feature_intro(context)
+    if update.message:
+        return await update.message.reply_text(text)
+    return await context.bot.send_message(chat_id=update.effective_chat.id, text=text)
 
 
 def _build_start_panel_rows(context: ContextTypes.DEFAULT_TYPE) -> list[list[InlineKeyboardButton]]:
     enabled = context.application.bot_data.get("enabled_features") or set(ALL_FEATURES)
+    bot_name = str(context.application.bot_data.get("name", "")).strip()
     rows: list[list[InlineKeyboardButton]] = []
+    if bot_name == MASTER_BOT_NAME:
+        rows.append([InlineKeyboardButton("创建双向机器人", callback_data="pfbot:guide")])
+        rows.append([InlineKeyboardButton("克隆机器人", callback_data=f"mbot:clone:{MASTER_BOT_NAME}")])
+        rows.append([InlineKeyboardButton("机器人面板", callback_data="mbot:list")])
     if "group" in enabled:
         rows.append([InlineKeyboardButton("群配置", callback_data="gcfg:list")])
     if "channel" in enabled:
@@ -238,6 +353,20 @@ def _build_start_panel_rows(context: ContextTypes.DEFAULT_TYPE) -> list[list[Inl
             ]
         )
     return rows
+
+
+def _build_start_welcome_text(bot_name: str) -> str:
+    safe_name = html.escape(str(bot_name or "机器人"))
+    if str(bot_name or "").strip() == MASTER_BOT_NAME:
+        return f"👋 欢迎使用 {safe_name}\n"
+
+    if MASTER_BOT_USERNAME:
+        master_label = (
+            f'<a href="https://t.me/{html.escape(MASTER_BOT_USERNAME, quote=True)}">{html.escape(MASTER_BOT_NAME)}</a>'
+        )
+    else:
+        master_label = html.escape(MASTER_BOT_NAME)
+    return f"👋 欢迎使用 {safe_name} 克隆自 {master_label}\n"
 
 
 async def clear_login_prompt_on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -301,6 +430,9 @@ def create_app(bot_cfg: dict):
             ),
             group=1,
         )
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("features", features_command))
+    app.add_handler(CommandHandler("intro", features_command))
     app.add_handler(CommandHandler("leave", leave_group_command))
 
     # ===== 私聊转发逻辑 =====
@@ -383,6 +515,7 @@ async def set_bot_commands(app):
 
     # 普通用户命令：只显示当前机器人确实启用的功能
     commands.append(BotCommand("start", "功能简介"))
+    commands.append(BotCommand("help", "命令帮助"))
     if "group" in enabled:
         commands.append(BotCommand("group", "群设置"))
     if "channel" in enabled:
