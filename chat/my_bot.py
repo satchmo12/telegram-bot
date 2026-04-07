@@ -210,7 +210,7 @@ async def _build_navigation_menu_markup(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton("群推荐", callback_data=f"{NAV_CALLBACK_PREFIX}:group_recommend:1")],
+        # [InlineKeyboardButton("群推荐", callback_data=f"{NAV_CALLBACK_PREFIX}:group_recommend:1")],
         [InlineKeyboardButton("中文包", url=CHINESE_PACK_URL)],
     ]
     business_coop_button = _get_business_coop_button(update)

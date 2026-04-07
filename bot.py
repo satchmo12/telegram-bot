@@ -81,6 +81,7 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.WARNING,
 )
+logging.getLogger("apscheduler").setLevel(logging.ERROR)
 
 
 DEFAULT_OWNER_ID = 6085551760
@@ -307,8 +308,7 @@ def _build_help_text(context: ContextTypes.DEFAULT_TYPE, user_id: Optional[int] 
             [
                 "",
                 "小雅专属：",
-                "双向机器人 创建仅私聊转发功能的新机器人",
-                "克隆机器人 直接按小雅模板克隆新机器人",
+                "克隆机器人 按模板克隆新机器人",
                 "机器人面板 查看名下机器人列表",
             ]
         )
@@ -338,18 +338,17 @@ def _build_start_panel_rows(context: ContextTypes.DEFAULT_TYPE) -> list[list[Inl
     bot_name = str(context.application.bot_data.get("name", "")).strip()
     rows: list[list[InlineKeyboardButton]] = []
     if bot_name == MASTER_BOT_NAME:
-        rows.append([InlineKeyboardButton("创建双向机器人", callback_data="pfbot:guide")])
-        rows.append([InlineKeyboardButton("克隆机器人", callback_data=f"mbot:clone:{MASTER_BOT_NAME}")])
-        rows.append([InlineKeyboardButton("机器人面板", callback_data="mbot:list")])
+        rows.append([InlineKeyboardButton("🧬克隆机器人", callback_data=f"mbot:clone:{MASTER_BOT_NAME}")])
+        rows.append([InlineKeyboardButton("🤖机器人面板", callback_data="mbot:list")])
     if "group" in enabled:
-        rows.append([InlineKeyboardButton("群配置", callback_data="gcfg:list")])
+        rows.append([InlineKeyboardButton("👥群配置", callback_data="gcfg:list")])
     if "channel" in enabled:
         rows.extend(
             [
-                [InlineKeyboardButton("频道配置", callback_data="chcfg:back")],
-                [InlineKeyboardButton("机器人频道配置", callback_data="chcfg:bot")],
-                [InlineKeyboardButton("查看登录", callback_data="tlogin:list")],
-                [InlineKeyboardButton("登录小号", callback_data="tlogin:login")],
+                [InlineKeyboardButton("📣频道配置", callback_data="chcfg:back")],
+                [InlineKeyboardButton("📣机器人频道配置", callback_data="chcfg:bot")],
+                [InlineKeyboardButton("📱查看登录", callback_data="tlogin:list")],
+                [InlineKeyboardButton("📱登录小号", callback_data="tlogin:login")],
             ]
         )
     return rows

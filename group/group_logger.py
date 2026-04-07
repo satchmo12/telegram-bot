@@ -30,6 +30,7 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "type": chat.type,
             "enabled": True,
             "bot_in_group": True,
+            "bot_muted": False,
             "recommend": True,
             "exposure": 0,
             "recommend_last_ts": 0,
@@ -63,6 +64,9 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             updated = True
         if group.get("bot_in_group", True) is not True:
             group["bot_in_group"] = True
+            updated = True
+        if "bot_muted" not in group:
+            group["bot_muted"] = False
             updated = True
         if "learning_enabled" not in group:
             group["learning_enabled"] = True
@@ -159,13 +163,15 @@ async def track_bot_group_membership(
 
     in_group = _is_bot_in_group_status(new_status)
     was_in_group = _is_bot_in_group_status(old_status)
-    # 如果被禁言（restricted 且不能发言），视为不在群
+    # 如果被禁言（restricted 且不能发言），单独记录 bot_muted，避免业务层持续尝试发消息
+    bot_muted = False
     if new_status == "restricted":
         can_send = bool(
             getattr(update.my_chat_member.new_chat_member, "can_send_messages", False)
         )
         if not can_send:
             in_group = False
+            bot_muted = True
     groups = load_json(GROUPS_FILE) or {}
     if not isinstance(groups, dict):
         groups = {}
@@ -188,6 +194,9 @@ async def track_bot_group_membership(
         changed = True
     if bool(cfg.get("bot_in_group", True)) != in_group:
         cfg["bot_in_group"] = in_group
+        changed = True
+    if bool(cfg.get("bot_muted", False)) != bot_muted:
+        cfg["bot_muted"] = bot_muted
         changed = True
     if in_group and not was_in_group and chat.type == "supergroup":
         inviter = getattr(update.my_chat_member, "from_user", None)

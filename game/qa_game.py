@@ -18,7 +18,7 @@ from game.voice_reply import group_tts_voice, tts_voice_reply
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 
-from utils import QA_FILE, RE_FILE, load_json, safe_reply, save_json
+from utils import GROUP_LIST_FILE, QA_FILE, RE_FILE, load_json, safe_reply, save_json
 
 # 确保 data 目录存在
 os.makedirs("data", exist_ok=True)
@@ -34,6 +34,30 @@ def load_qa_data():
 # 保存问答数据
 def save_qa_data(data):
     save_json(QA_FILE, data)
+
+
+def _is_group_bot_muted(chat_id: str) -> bool:
+    groups = load_json(GROUP_LIST_FILE)
+    if not isinstance(groups, dict):
+        return False
+    cfg = groups.get(str(chat_id), {})
+    if not isinstance(cfg, dict):
+        return False
+    return bool(cfg.get("bot_muted", False))
+
+
+def _set_group_bot_muted(chat_id: str, muted: bool):
+    groups = load_json(GROUP_LIST_FILE)
+    if not isinstance(groups, dict):
+        groups = {}
+    cfg = groups.get(str(chat_id), {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    if bool(cfg.get("bot_muted", False)) == bool(muted):
+        return
+    cfg["bot_muted"] = bool(muted)
+    groups[str(chat_id)] = cfg
+    save_json(GROUP_LIST_FILE, groups)
 
 
 def _normalize_text(text: str) -> str:
@@ -73,18 +97,30 @@ async def _send_qa_message(
     text: str,
     thread_id=None,
 ):
+    chat_id = str(update.effective_chat.id)
+    if _is_group_bot_muted(chat_id):
+        return None
     try:
-        return await context.bot.send_message(
+        msg = await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=text,
             message_thread_id=thread_id,
         )
+        _set_group_bot_muted(chat_id, False)
+        return msg
     except telegram.error.TimedOut:
         print(
             f"⚠️ 问答回复发送超时: bot={context.bot.first_name} chat={update.effective_chat.id}"
         )
+    except telegram.error.Forbidden:
+        _set_group_bot_muted(chat_id, True)
+        print(
+            f"⚠️ 问答回复权限不足: bot={context.bot.first_name} chat={update.effective_chat.id}"
+        )
+        return None
     except telegram.error.BadRequest as e:
         if "Not enough rights" in str(e):
+            _set_group_bot_muted(chat_id, True)
             print(
                 f"⚠️ 问答回复权限不足: bot={context.bot.first_name} chat={update.effective_chat.id}"
             )

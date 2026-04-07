@@ -95,8 +95,10 @@ def _can_view_bot(cfg: dict, user_id: int) -> bool:
     return int(cfg.get("owner_id") or 0) == int(user_id)
 
 
-def _can_edit_bot(user_id: int) -> bool:
-    return is_super_admin(user_id)
+def _can_edit_bot(cfg: dict, user_id: int) -> bool:
+    if is_super_admin(user_id):
+        return True
+    return int(cfg.get("owner_id") or 0) == int(user_id)
 
 
 def _can_control_bot(cfg: dict, user_id: int) -> bool:
@@ -111,6 +113,19 @@ def _can_self_service_clone(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         and update.effective_user
         and update.effective_chat
         and update.effective_chat.type == "private"
+        and _is_master_panel(context)
+    )
+
+
+def _can_continue_self_service_clone_text(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, state: Optional[dict]
+) -> bool:
+    return bool(
+        isinstance(state, dict)
+        and str(state.get("source_name", "")).strip() == MASTER_BOT_NAME
+        and update.effective_chat
+        and update.effective_chat.type == "private"
+        and update.effective_user
         and _is_master_panel(context)
     )
 
@@ -372,12 +387,14 @@ async def _panel_reply(
             text,
             reply_markup=reply_markup,
             parse_mode=parse_mode,
+            disable_web_page_preview=True,
         )
     return await context.bot.send_message(
         chat_id=update.effective_chat.id,
         text=text,
         reply_markup=reply_markup,
         parse_mode=parse_mode,
+        disable_web_page_preview=True,
     )
 
 
@@ -418,22 +435,54 @@ def _build_list_text_for_user(user_id: int) -> str:
     )
 
 
-def _build_detail_text(cfg: dict) -> str:
+async def _resolve_bot_username(cfg: dict) -> str:
+    username = str(cfg.get("username", "") or "").strip().lstrip("@")
+    if username:
+        return f"@{username}"
+    token = str(cfg.get("token", "") or "").strip()
+    if token:
+        try:
+            me = await _fetch_bot_profile(token)
+            username = str(getattr(me, "username", "") or "").strip().lstrip("@")
+            if username:
+                return f"@{username}"
+        except Exception:
+            pass
+    name = str(cfg.get("name", "") or "").strip()
+    return f"@{name}" if name else "未设置"
+
+
+def _build_owner_link(owner_id: int) -> str:
+    user_data = load_json(BOT_USER_FILE) or {}
+    username = ""
+    if isinstance(user_data, dict):
+        info = user_data.get(str(owner_id))
+        if isinstance(info, dict):
+            username = str(info.get("username", "") or "").strip().lstrip("@")
+    if username:
+        return f'<a href="https://t.me/{html.escape(username)}">@{html.escape(username)}</a>'
+    return f'<a href="tg://user?id={int(owner_id)}">{int(owner_id)}</a>'
+
+
+def _build_bot_link(bot_username: str) -> str:
+    username = str(bot_username or "").strip().lstrip("@")
+    if not username or username == "未设置":
+        return html.escape(str(bot_username or "未设置"))
+    return f'<a href="https://t.me/{html.escape(username)}">@{html.escape(username)}</a>'
+
+
+async def _build_detail_text(cfg: dict) -> str:
     name = cfg.get("name", "")
-    source = "面板托管" if cfg.get("managed") else "环境变量"
     running = "运行中" if is_bot_running(name) else "未运行"
-    clone_from = cfg.get("clone_from", "") or "无"
+    bot_username = await _resolve_bot_username(cfg)
+    owner_id = int(cfg.get("owner_id") or 0)
     lines = [
         "🤖 机器人详情",
         f"名称：{html.escape(name)}",
         f"状态：{running}",
-        f"来源：{source}",
-        f"Owner：<code>{int(cfg.get('owner_id') or 0)}</code>",
-        f"克隆自：{html.escape(clone_from)}",
+        f"归属：{_build_owner_link(owner_id)}",
+        f"机器人：{_build_bot_link(bot_username)}",
     ]
-    if cfg.get("managed"):
-        auto_start = "开启" if cfg.get("auto_start", True) else "关闭"
-        lines.insert(3, f"重启恢复：{auto_start}")
     return "\n".join(lines)
 
 
@@ -452,7 +501,7 @@ def _build_detail_keyboard(cfg: dict, *, can_edit: bool, can_control: bool) -> I
 
     if can_edit:
         rows.append(
-            [InlineKeyboardButton("🧬 克隆这个机器人", callback_data=f"{CALLBACK_PREFIX}:clone:{name}")]
+            [InlineKeyboardButton("🧬 克隆机器人", callback_data=f"{CALLBACK_PREFIX}:clone:{name}")]
         )
 
     if can_edit and cfg.get("managed"):
@@ -489,13 +538,14 @@ async def _show_list(query):
 async def _show_detail(query, cfg: dict):
     user_id = int(query.from_user.id)
     return await query.edit_message_text(
-        _build_detail_text(cfg),
+        await _build_detail_text(cfg),
         reply_markup=_build_detail_keyboard(
             cfg,
-            can_edit=_can_edit_bot(user_id),
+            can_edit=_can_edit_bot(cfg, user_id),
             can_control=_can_control_bot(cfg, user_id),
         ),
         parse_mode="HTML",
+        disable_web_page_preview=True,
     )
 
 
@@ -504,16 +554,18 @@ async def current_bot_features(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.effective_user
     if not user:
         return
-    owner_id = int(get_runtime_owner_id())
     if not (is_super_admin(user.id) or is_bot_owner(user.id)):
         return
 
     features = sorted(context.application.bot_data.get("enabled_features", []))
     feature_names = [FEATURE_LABELS.get(feature, feature) for feature in features]
     bot_name = str(context.application.bot_data.get("name", "机器人")).strip()
+    bot_username = str(getattr(context.bot, "username", "") or "").strip().lstrip("@")
+    owner_id = int(get_runtime_owner_id())
     text = (
         f"🤖 {bot_name}\n"
-        f"Owner：<code>{owner_id}</code>\n"
+        f"归属：{_build_owner_link(owner_id)}\n"
+        f"机器人：{_build_bot_link(bot_username or bot_name)}\n"
         f"功能数量：{len(features)}\n"
         f"已开启功能：{ '、'.join(feature_names) if feature_names else '无' }"
     )
@@ -595,8 +647,8 @@ async def handle_multi_bot_callback(update: Update, context: ContextTypes.DEFAUL
     if action == "clone":
         if not cfg:
             return await query.answer("源机器人不存在", show_alert=True)
-        if not (allow_self_service_clone or _can_edit_bot(query.from_user.id)):
-            return await query.answer("仅超级管理员可克隆该机器人。", show_alert=True)
+        if not (allow_self_service_clone or _can_edit_bot(cfg, query.from_user.id)):
+            return await query.answer("仅机器人所有者或超级管理员可克隆该机器人。", show_alert=True)
         return await query.edit_message_text(
             _build_clone_text(name),
             reply_markup=_build_clone_keyboard(name),
@@ -605,8 +657,8 @@ async def handle_multi_bot_callback(update: Update, context: ContextTypes.DEFAUL
     if action == "clone_start":
         if not cfg:
             return await query.answer("源机器人不存在", show_alert=True)
-        if not (allow_self_service_clone or _can_edit_bot(query.from_user.id)):
-            return await query.answer("仅超级管理员可克隆该机器人。", show_alert=True)
+        if not (allow_self_service_clone or _can_edit_bot(cfg, query.from_user.id)):
+            return await query.answer("仅机器人所有者或超级管理员可克隆该机器人。", show_alert=True)
         context.user_data[TEXT_STAGE_KEY] = {
             "stage": "clone_await_token",
             "source_name": name,
@@ -657,8 +709,8 @@ async def handle_multi_bot_callback(update: Update, context: ContextTypes.DEFAUL
         managed = get_managed_bot_by_name(name)
         if not managed:
             return await query.answer("只能修改面板托管机器人。", show_alert=True)
-        if not _can_edit_bot(query.from_user.id):
-            return await query.answer("仅超级管理员可修改功能。", show_alert=True)
+        if not _can_edit_bot(managed, query.from_user.id):
+            return await query.answer("仅机器人所有者或超级管理员可修改功能。", show_alert=True)
         if feature_key not in {item[0] for item in MANAGED_FEATURES}:
             return await query.answer("功能不存在。", show_alert=True)
 
@@ -874,8 +926,6 @@ async def handle_private_forward_self_service_text(
 
 
 async def handle_multi_bot_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _can_manage(update, context):
-        return
     if not update.message or not update.message.text:
         return
     if not update.effective_chat or update.effective_chat.type != "private":
@@ -883,6 +933,8 @@ async def handle_multi_bot_text(update: Update, context: ContextTypes.DEFAULT_TY
 
     state = context.user_data.get(TEXT_STAGE_KEY)
     if not isinstance(state, dict):
+        return
+    if not (_can_manage(update, context) or _can_continue_self_service_clone_text(update, context, state)):
         return
 
     text = (update.message.text or "").strip()

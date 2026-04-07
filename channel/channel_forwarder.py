@@ -48,6 +48,18 @@ def _should_skip_by_links(rule: dict, text: str, entities=None) -> bool:
     return False
 
 
+def _join_with_suffix(text: str, suffix: str) -> str:
+    base = text or ""
+    extra = suffix or ""
+    if not extra:
+        return base
+    if not base:
+        return extra.strip("\n")
+    base = re.sub(r"\n+\Z", "", base)
+    extra = re.sub(r"\A\n+", "", extra)
+    return f"{base}\n\n{extra}"
+
+
 def _should_skip_by_words(rule: dict, text: str) -> bool:
     t = text or ""
     include_words = rule.get("include_words") or []
@@ -81,109 +93,91 @@ def _is_active_subscription(user_id: str, username: Optional[str] = None) -> boo
     except Exception:
         return False
 
-def replace_links_and_submit(text: str, rule: dict) -> str:
+def _clear_links(text: str) -> str:
     if not text:
         return text
+    t = text
+    t = re.sub(r"(?i)https?://\S+", "", t)
+    t = re.sub(r"(?i)t\.me/\S+", "", t)
+    t = re.sub(r"@[\w_]{3,}", "", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    t = re.sub(r"[ \t]{2,}", " ", t)
+    return t.strip()
 
-    show_contact = rule.get("show_contact", True)
 
-    replace_link = str(rule.get("replace_channel_user", "")).strip()
-    replace_channel_user = str(rule.get("replace_group_name", "")).strip()
-    replace_user = str(rule.get("replace_submit_user", "")).strip()
+def _apply_replace(text: str, pairs) -> str:
+    if not text or not pairs:
+        return text
+    out = text
+    for pair in pairs:
+        if not isinstance(pair, dict):
+            continue
+        src = str(pair.get("from", "") or "")
+        dst = str(pair.get("to", "") or "")
+        if not src:
+            continue
+        out = out.replace(src, dst)
+    return out
 
-    original_text = text
-    # 若固定宣传文案不是独立行，前置一个换行以分隔正文
-    # “关注”前留一空行，且确保“关注”后不被拆行
-    text = re.sub(r"关注\s*\n+", "关注", text)
-    text = re.sub(r"^(关注)", r"\n\1", text)
-    text = re.sub(r"(?<!^)(?<!\n)(关注\s*东南亚新闻大事件频道|东南亚新闻大事件频道)", r"\n\1", text)
-    if replace_link:
-        if not replace_link.startswith("@"):
-            # 统一为 t.me/xxx 或 t.me/xxx/123 形式，兼容带 http(s) 的原链接
-            replace_link = re.sub(r"^https?://", "", replace_link, flags=re.I).rstrip("/")
-            # 匹配任意 Telegram 链接（含 t.me/+邀请码、joinchat、深层路径）
-            # 例如:
-            # - https://t.me/abc
-            # - t.me/abc/123
-            # - https://t.me/+AbCdEf
-            # - https://t.me/joinchat/xxxx
-            text = re.sub(
-                r"(?i)(?:https?://)?t\.me/[^\s)\]}>]+",
-                f"https://{replace_link}",
-                text,
-            )
 
-    if replace_user:
-        if not replace_user.startswith("@"):
-            replace_user = f"@{replace_user}"
+def _apply_cut(text: str, cut_rule) -> str:
+    if not text or not cut_rule:
+        return text
+    rules = [cut_rule] if isinstance(cut_rule, str) else [r for r in (cut_rule or []) if r]
+    out = text
+    for rule in rules:
+        if "|" in rule:
+            start, end = rule.split("|", 1)
+        else:
+            start, end = "", rule
+        if start:
+            idx = out.find(start)
+            if idx >= 0:
+                out = out[idx + len(start) :]
+        if end:
+            idx = out.find(end)
+            if idx >= 0:
+                out = out[:idx]
+    return out
 
-        # 先兼容旧占位词，再替换常见“投稿人”匿名名
-        text = text.replace("@原投稿人", replace_user)
-        text = re.sub(r"@投稿人\b", replace_user, text)
-        # 替换“投稿/爆料/澄清”等标签后面的真实用户名
-        text = re.sub(
-            r"((?:投稿|爆料|澄清|联系|商务)[^:\n：]{0,20}[：:]\s*)@[A-Za-z0-9_]{3,}",
-            rf"\1{replace_user}",
-            text,
-            flags=re.I,
-        )
 
-    if replace_channel_user:
-        if not replace_channel_user.startswith("@"):
-            replace_channel_user = f"@{replace_channel_user}"
-        # 替换“聊天/交友群”等标签后的用户名
-        text = re.sub(
-            r"((?:聊天交友群|聊天群|交友群|交流群|群)[^\n]{0,20}?)[@＠]\s*[A-Za-z0-9_]{3,}",
-            rf"\1{replace_channel_user}",
-            text,
-            flags=re.I,
-        )
+def _process_text(text: str, rule: dict):
+    if text is None:
+        return text
+    t = text
+    include_words = rule.get("include_words") or []
+    block_words = rule.get("block_words") or []
+    if include_words:
+        if not any(w and w in t for w in include_words):
+            return ""
+    if block_words:
+        if any(w and w in t for w in block_words):
+            return ""
+    t = _apply_replace(t, rule.get("replace_words") or [])
+    t = _apply_cut(t, rule.get("cut_words", ""))
+    if rule.get("clear_links"):
+        t = _clear_links(t)
+    suffix = str(rule.get("suffix", "") or "")
+    if suffix:
+        t = _join_with_suffix(t, suffix)
+    if (
+        t == ""
+        and not include_words
+        and not block_words
+        and not rule.get("clear_links")
+        and not rule.get("cut_words")
+        and not rule.get("replace_words")
+        and not suffix
+    ):
+        return None
+    return t
 
-    if replace_link:
-        # 如果 replace_link 本身是 @用户名，用在“关注...频道”标签后
-        if replace_link.startswith("@"):
-            text = re.sub(
-                r"((?:关注[^\n]{0,40}?频道|订阅[^\n]{0,40}?频道)[^\n]{0,20}?)[@＠]\s*[A-Za-z0-9_]{3,}",
-                rf"\1{replace_link}",
-                text,
-                flags=re.I,
-            )
-            # 兜底：直接匹配“东南亚新闻大事件频道”后的 @用户名
-            text = re.sub(
-                r"(东南亚新闻大事件频道[^\n]{0,20}?)[@＠]\s*[A-Za-z0-9_]{3,}",
-                rf"\1{replace_link}",
-                text,
-                flags=re.I,
-            )
 
-    # 规范空格与分隔符，避免“频道名没有更改且没有空格”的情况
-    text = re.sub(
-        r"(频道[^\n]{0,40}?)(?:：|:|➡️|➡)?\s*(@[A-Za-z0-9_]{3,})",
-        r"\1➡️  \2",
-        text,
-    )
-    text = re.sub(
-        r"((?:东南亚讨论群|东南亚聊天交友群|聊天交友群|聊天群|交友群|交流群)[^\n]{0,20}?@[A-Za-z0-9_]{3,})\s*投稿曝光",
-        r"\1 投稿曝光",
-        text,
-    )
-
-    if not show_contact:
-        # 去除联系方式相关内容：从出现联系方式提示的行开始，截断后续
-        contact_line_re = re.compile(
-            r"(关注|订阅).{0,10}频道|频道➡️|聊天交友群|讨论群|投稿|爆料|澄清|联系|商务|便民信息|互助群|二手群|TG中文包|签证查询",
-            re.I,
-        )
-        lines = text.splitlines()
-        cutoff = None
-        for idx, line in enumerate(lines):
-            if contact_line_re.search(line):
-                cutoff = idx
-                break
-        if cutoff is not None:
-            lines = lines[:cutoff]
-        text = "\n".join([ln for ln in lines if ln.strip()]).strip()
-    return text
+def _processed_text_or_original(text: str, rule: dict):
+    processed = _process_text(text, rule)
+    if processed is None:
+        return text
+    return processed
 
 def _get_media_group_key(msg, rule_idx: int) -> tuple[int, str, int]:
     # media_group_id 在不同 chat 可能重复，组合 chat_id 更稳妥
@@ -260,7 +254,7 @@ async def process_media_group(
     for msg in group_msgs:
         text = getattr(msg, "text", None) or getattr(msg, "caption", None)
         if text:
-            main_text = replace_links_and_submit(text, rule)
+            main_text = _processed_text_or_original(text, rule)
             break
 
     media_list = []
@@ -419,7 +413,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         targets = rule.get("targets", [])
         src = _get_source_id_from_msg(msg)
         if msg.photo:
-            caption = replace_links_and_submit(msg.caption or "", rule) if msg.caption else None
+            caption = _processed_text_or_original(msg.caption or "", rule) if msg.caption else None
             for target_id in targets:
                 await _send_with_retry(
                     target_id,

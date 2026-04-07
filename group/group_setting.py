@@ -8,7 +8,15 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, Mes
 
 from command_router import FEATURE_FRIENDS, register_command
 from feature_flags import is_feature_enabled
-from utils import GROUP_LIST_FILE, get_group_whitelist, is_super_admin, safe_reply, save_json, load_json
+from utils import (
+    GROUP_LIST_FILE,
+    get_group_whitelist,
+    is_bot_owner,
+    is_super_admin,
+    load_json,
+    safe_reply,
+    save_json,
+)
 from channel.channel_force import unmute_force_subscribe_chat
 
 CALLBACK_PREFIX = "gcfg"
@@ -177,6 +185,10 @@ def _build_group_panel_text(chat_id: str, cfg: dict) -> str:
     return "\n".join(lines)
 
 
+def _can_leave_group(user_id: int) -> bool:
+    return is_super_admin(user_id) or is_bot_owner(user_id)
+
+
 def _build_group_panel_keyboard(chat_id: str, cfg: dict, list_page: int = 1) -> InlineKeyboardMarkup:
     rows = []
     toggle_buttons = []
@@ -277,6 +289,22 @@ def _build_group_panel_keyboard(chat_id: str, cfg: dict, list_page: int = 1) -> 
     return InlineKeyboardMarkup(rows)
 
 
+def _build_group_panel_keyboard_for_user(
+    chat_id: str, cfg: dict, user_id: int, list_page: int = 1
+) -> InlineKeyboardMarkup:
+    rows = list(_build_group_panel_keyboard(chat_id, cfg, list_page).inline_keyboard)
+    if _can_leave_group(user_id):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🚪 退出群聊",
+                    callback_data=f"{CALLBACK_PREFIX}:leave:{chat_id}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(rows)
+
+
 async def _can_manage_group(
     context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int
 ) -> bool:
@@ -308,7 +336,7 @@ async def _visible_group_data_for_user(
     active_data = {
         chat_id: cfg
         for chat_id, cfg in data.items()
-        if isinstance(cfg, dict) and bool(cfg.get("bot_in_group", True))
+        if isinstance(cfg, dict) and bool(cfg.get("bot_in_group", False))
     }
 
     if is_super_admin(user_id):
@@ -372,7 +400,9 @@ async def _open_group_panel(
 
     await query.answer()
     list_page = int(context.user_data.get("group_setting_list_page", 1) or 1)
-    keyboard = _build_group_panel_keyboard(chat_id_str, cfg, list_page=list_page)
+    keyboard = _build_group_panel_keyboard_for_user(
+        chat_id_str, cfg, user_id, list_page=list_page
+    )
     if context.user_data.get("start_panel"):
         rows = list(keyboard.inline_keyboard)
         rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
@@ -661,6 +691,51 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     if action == "open" and len(parts) >= 3:
         return await _open_group_panel(query, context, parts[2], user_id)
+
+    if action == "leave" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return await query.answer("群ID无效", show_alert=True)
+        if not _can_leave_group(user_id):
+            return await query.answer("仅高级管理员或机器人所有者可操作。", show_alert=True)
+
+        cfg = data.get(chat_id_str, {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        cfg["title"] = _group_title(chat_id_str, cfg)
+        cfg["type"] = "group"
+        cfg["bot_in_group"] = False
+        data[chat_id_str] = cfg
+        save_json(GROUP_LIST_FILE, data)
+
+        try:
+            await context.bot.leave_chat(chat_id)
+            await query.answer("已退出该群", show_alert=False)
+        except Exception as e:
+            cfg["bot_in_group"] = True
+            data[chat_id_str] = cfg
+            save_json(GROUP_LIST_FILE, data)
+            return await query.answer(f"退出群失败: {e}", show_alert=True)
+
+        visible_data = await _visible_group_data_for_user(context, user_id, data)
+        page = int(context.user_data.get("group_setting_list_page", 1) or 1)
+        keyboard = _build_group_list_keyboard(
+            visible_data,
+            page,
+            add_group_url=_add_group_url(context),
+        )
+        if not keyboard.inline_keyboard:
+            return await query.edit_message_text("已退出该群，暂无可配置的群记录。")
+        if context.user_data.get("start_panel"):
+            rows = list(keyboard.inline_keyboard)
+            rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
+            keyboard = InlineKeyboardMarkup(rows)
+        return await query.edit_message_text(
+            f"已退出群 {html.escape(_group_title(chat_id_str, cfg))}。\n\n"
+            f"{_group_list_text(visible_data, page)}",
+            reply_markup=keyboard,
+        )
 
     if action == "toggle" and len(parts) >= 4:
         chat_id_str = parts[2]
@@ -962,7 +1037,15 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
         save_json(GROUP_LIST_FILE, data)
 
     list_page = int(context.user_data.get("group_setting_list_page", 1) or 1)
-    keyboard = _build_group_panel_keyboard(chat_id_str, cfg, list_page=list_page)
+    user = update.effective_user
+    panel_user_id = user.id if user else 0
+    keyboard = _build_group_panel_keyboard_for_user(
+        chat_id_str, cfg, panel_user_id, list_page=list_page
+    )
+    if context.user_data.get("start_panel"):
+        rows = list(keyboard.inline_keyboard)
+        rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
+        keyboard = InlineKeyboardMarkup(rows)
     await update.message.reply_text(
         _build_group_panel_text(chat_id_str, cfg),
         reply_markup=keyboard,

@@ -1,93 +1,10 @@
 {
     "users": {
         "7357117687": {
-            "forward_rules": [
-                {
-                    "name": "未命名",
-                    "sources": [],
-                    "targets": [],
-                    "source_title": "",
-                    "target_title": "",
-                    "enabled": true,
-                    "mode": "listen",
-                    "filter": "all",
-                    "exclude_channels": [],
-                    "show_contact": true,
-                    "replace_channel_user": "",
-                    "replace_group_name": "",
-                    "replace_submit_user": "",
-                    "clear_links": false,
-                    "skip_links": false,
-                    "start_id": "",
-                    "end_id": "",
-                    "include_words": [],
-                    "replace_words": [],
-                    "block_words": [],
-                    "cut_words": "",
-                    "suffix": "",
-                    "media_replace": "",
-                    "speed": "",
-                    "session_name": ""
-                },
-                {
-                    "name": "未命名",
-                    "sources": [],
-                    "targets": [],
-                    "source_title": "",
-                    "target_title": "",
-                    "enabled": true,
-                    "mode": "listen",
-                    "filter": "all",
-                    "exclude_channels": [],
-                    "show_contact": true,
-                    "replace_channel_user": "",
-                    "replace_group_name": "",
-                    "replace_submit_user": "",
-                    "clear_links": false,
-                    "skip_links": false,
-                    "start_id": "",
-                    "end_id": "",
-                    "include_words": [],
-                    "replace_words": [],
-                    "block_words": [],
-                    "cut_words": "",
-                    "suffix": "",
-                    "media_replace": "",
-                    "speed": "",
-                    "session_name": ""
-                }
-            ]
+            "forward_rules": []
         },
         "6085551760": {
-            "forward_rules": [
-                {
-                    "name": "未命名",
-                    "sources": [],
-                    "targets": [],
-                    "source_title": "",
-                    "target_title": "",
-                    "enabled": true,
-                    "mode": "listen",
-                    "filter": "all",
-                    "exclude_channels": [],
-                    "show_contact": true,
-                    "replace_channel_user": "",
-                    "replace_group_name": "",
-                    "replace_submit_user": "",
-                    "clear_links": false,
-                    "skip_links": false,
-                    "start_id": "",
-                    "end_id": "",
-                    "include_words": [],
-                    "replace_words": [],
-                    "block_words": [],
-                    "cut_words": "",
-                    "suffix": "",
-                    "media_replace": "",
-                    "speed": "",
-                    "session_name": ""
-                }
-            ]
+            "forward_rules": []
         }
     }
 }
