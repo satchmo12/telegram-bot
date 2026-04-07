@@ -195,6 +195,7 @@ async def group_tts_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def voice_to_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 关掉语音识别
+    print("---123--")
     if not False:
         return
     # voice = update.message.voice

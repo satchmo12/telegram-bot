@@ -425,3 +425,142 @@ async def cmd_export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     with open(file_path, "rb") as f:
         await context.bot.send_document(chat_id=update.effective_chat.id, document=f)
+        
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    ContextTypes,
+    ConversationHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    CommandHandler,
+    filters,
+)
+
+# 状态机阶段
+SELECT_PAGE, TYPING_MESSAGE = range(2)
+page_size = 10  # 每页显示用户数量
+selected_users = {}  # 管理员ID -> set of选中用户ID
+
+# 1️⃣ 命令入口：显示用户列表第一页
+@register_command("发送消息用户")
+async def cmd_send_user_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != get_owner_id(context):
+        return await safe_reply(update, context, "⚠️ 仅管理员可用")
+
+    user_data = _load_user_data()
+    if not user_data:
+        return await safe_reply(update, context, "📭 当前没有用户记录")
+
+    selected_users[update.effective_user.id] = set()
+    return await show_user_page(update, context, page=1)
+
+# 2️⃣ 分页显示用户列表
+async def show_user_page(update: Update, context: ContextTypes.DEFAULT_TYPE, page=1):
+    user_data = _load_user_data()
+    user_list = list(user_data.items())
+    total_pages = (len(user_list) + page_size - 1) // page_size
+    if page < 1: page = 1
+    if page > total_pages: page = total_pages
+
+    start = (page - 1) * page_size
+    end = start + page_size
+    items = user_list[start:end]
+
+    admin_id = update.effective_user.id
+    selected_set = selected_users.get(admin_id, set())
+
+    keyboard = []
+    for uid, info in items:
+        name = info.get("name") or "无名"
+        username = info.get("username", "")
+        display = f"{name} (@{username})" if username else name
+        prefix = "✅" if str(uid) in selected_set else ""
+        keyboard.append([InlineKeyboardButton(f"{prefix}{display}", callback_data=f"user_{uid}_page{page}")])
+
+    # 翻页按钮
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"page_{page-1}"))
+    if page < total_pages:
+        nav_buttons.append(InlineKeyboardButton("下一页 ➡️", callback_data=f"page_{page+1}"))
+    if selected_set:
+        nav_buttons.append(InlineKeyboardButton("✅ 完成选择", callback_data="done"))
+
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if update.callback_query:
+        await update.callback_query.edit_message_text("请选择要发送消息的用户：", reply_markup=reply_markup)
+    else:
+        await update.message.reply_text("请选择要发送消息的用户：", reply_markup=reply_markup)
+
+    return SELECT_PAGE
+
+# 3️⃣ 按钮点击处理
+async def user_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    admin_id = query.from_user.id
+    data = query.data
+
+    if data.startswith("user_"):
+        uid = data.split("_")[1]
+        # 切换选择状态
+        if uid in selected_users.get(admin_id, set()):
+            selected_users[admin_id].remove(uid)
+        else:
+            selected_users[admin_id].add(uid)
+        page = int(data.split("page")[1])
+        return await show_user_page(update, context, page)
+    elif data.startswith("page_"):
+        page = int(data.split("_")[1])
+        return await show_user_page(update, context, page)
+    elif data == "done":
+        if not selected_users.get(admin_id):
+            await query.edit_message_text("❌ 未选择任何用户，请选择后再完成")
+            return SELECT_PAGE
+        await query.edit_message_text("✅ 已选择用户，请发送消息内容：")
+        return TYPING_MESSAGE
+
+# 4️⃣ 管理员输入消息 → 发送给选定用户
+async def send_message_to_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    admin_id = update.effective_user.id
+    uids = selected_users.get(admin_id, set())
+    if not uids:
+        return await safe_reply(update, context, "❌ 未选择用户，请重新操作。")
+
+    success, failed = 0, 0
+    for uid in uids:
+        try:
+            await safe_forward_media(context.bot, int(uid), update.message)
+            success += 1
+        except Exception as e:
+            print(f"发送失败 {uid}: {e}")
+            failed += 1
+
+    await safe_reply(update, context, f"📩 消息已发送完成\n✅ 成功: {success}\n❌ 失败: {failed}")
+    selected_users.pop(admin_id, None)
+    return ConversationHandler.END
+
+# 5️⃣ 取消操作
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    selected_users.pop(update.effective_user.id, None)
+    await safe_reply(update, context, "❌ 已取消操作")
+    return ConversationHandler.END
+
+
+def register_send_user_conv(app):
+    
+# 6️⃣ 注册 ConversationHandler
+    ConversationHandler(
+    entry_points=[CommandHandler("send_user_msg", cmd_send_user_list)],
+    states={
+        SELECT_PAGE: [CallbackQueryHandler(user_page_callback)],
+        TYPING_MESSAGE: [MessageHandler(filters.ALL, send_message_to_users)],
+    },
+    fallbacks=[CommandHandler("cancel", cancel)],
+    per_user=True,
+)
