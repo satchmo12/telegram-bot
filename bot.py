@@ -85,7 +85,7 @@ logging.getLogger("apscheduler").setLevel(logging.ERROR)
 
 
 DEFAULT_OWNER_ID = 6085551760
-MASTER_BOT_NAME = "小雅"
+MASTER_BOT_NAME = str(os.getenv("MASTER_BOT_NAME", "")).strip()
 MASTER_BOT_USERNAME = str(os.getenv("MASTER_BOT_USERNAME", "")).strip().lstrip("@")
 PRIVATE_FORWARD_SELF_SERVICE_STAGE_KEY = "private_forward_self_service_stage"
 MULTI_BOT_STAGE_KEY = "multi_bot_stage"

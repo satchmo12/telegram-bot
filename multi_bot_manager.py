@@ -1,4 +1,5 @@
 import html
+import os
 from typing import Optional
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -10,6 +11,7 @@ from telegram.ext import (
     filters,
 )
 
+MASTER_BOT_NAME = str(os.getenv("MASTER_BOT_NAME", "")).strip()
 from command_router import register_command
 from feature_flags import ALL_FEATURES, FEATURE_LABELS
 from multi_bot_registry import (
@@ -31,7 +33,7 @@ from utils import BOT_USER_FILE, get_runtime_owner_id, is_bot_owner, is_super_ad
 
 CALLBACK_PREFIX = "mbot"
 SELF_SERVICE_CALLBACK_PREFIX = "pfbot"
-MASTER_BOT_NAME = "小雅"
+
 TEXT_STAGE_KEY = "multi_bot_stage"
 SELF_SERVICE_STAGE_KEY = "private_forward_self_service_stage"
 SELF_SERVICE_FEATURES = ["private_forward"]
