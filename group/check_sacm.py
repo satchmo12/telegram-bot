@@ -84,10 +84,12 @@ def check_name_change(id: int, new_name: str, new_username: str = None, current_
                 continue
 
             old_name = info.get("full_name", "")
+            changed = False
 
             # 昵称变更
             if old_name != new_name:
                 info["full_name"] = new_name
+                changed = True
 
             # username 静默更新
             old_username = info.get("username")
@@ -95,9 +97,11 @@ def check_name_change(id: int, new_name: str, new_username: str = None, current_
                 if old_username:
                     info.setdefault("username_history", []).append(old_username)
                 info["username"] = new_username
+                changed = True
 
-            users[str(id)] = info
-            save_users(chat_id, users)
+            if changed:
+                users[str(id)] = info
+                save_users(chat_id, users)
 
             if old_name != new_name:
                 return old_name  # 只有昵称变更时返回旧昵称

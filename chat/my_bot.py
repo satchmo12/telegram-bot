@@ -3,6 +3,7 @@ import random
 import re
 import time
 import difflib
+import telegram
 from datetime import date
 from typing import Optional
 from telegram import Update
@@ -1351,6 +1352,20 @@ def _active_speak_jitter_sec(runtime_chat_key: str) -> int:
     return abs(hash(f"{runtime_chat_key}:jitter")) % 15
 
 
+def _set_group_bot_muted_flag(chat_id: str, muted: bool):
+    groups = load_json(GROUP_LIST_FILE)
+    if not isinstance(groups, dict):
+        groups = {}
+    cfg = groups.get(str(chat_id), {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    if bool(cfg.get("bot_muted", False)) == bool(muted):
+        return
+    cfg["bot_muted"] = bool(muted)
+    groups[str(chat_id)] = cfg
+    save_json(GROUP_LIST_FILE, groups)
+
+
 async def _send_active_speak_with_delay(bot, chat_id: int, text: str, delay_sec: int):
     if delay_sec > 0:
         await asyncio.sleep(delay_sec)
@@ -1374,6 +1389,8 @@ async def speaking_to(context: ContextTypes.DEFAULT_TYPE):
         if not cfg.get("enabled", True):
             continue
         if not cfg.get("bot_in_group", True):
+            continue
+        if bool(cfg.get("bot_muted", False)):
             continue
         if not bool(cfg.get(GROUP_KEY_ACTIVE_SPEAK, False)):
             continue
@@ -1413,6 +1430,11 @@ async def speaking_to(context: ContextTypes.DEFAULT_TYPE):
             )
             # print(f"✅ 主动说话发送成功: {chat_id} ({interval_min}min)")
         except Exception as e:
+            if isinstance(e, telegram.error.Forbidden) or (
+                isinstance(e, telegram.error.BadRequest)
+                and "Not enough rights" in str(e)
+            ):
+                _set_group_bot_muted_flag(str(chat_id), True)
             bot_name = get_runtime_bot_name() or getattr(context.bot, "username", "")
             print(f"⚠️ 主动说话发送失败: bot={bot_name} chat={chat_id}, {e}")
 

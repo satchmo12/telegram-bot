@@ -468,7 +468,7 @@ def get_group_whitelist(context: ContextTypes.DEFAULT_TYPE = None) -> dict:
         defaults = {
             "enabled": True,
             "bot_in_group": False,
-            "recommend": True,
+            "recommend": False,
             "exposure": 0,
             "recommend_last_ts": 0,
             "verify": False,

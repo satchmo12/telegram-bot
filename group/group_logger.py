@@ -22,6 +22,7 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title = chat.title or ""
     username = chat.username or ""
 
+    changed = False
     if chat_id_str not in groups:
         # 新群记录
         groups[chat_id_str] = {
@@ -31,7 +32,7 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "enabled": True,
             "bot_in_group": True,
             "bot_muted": False,
-            "recommend": True,
+            "recommend": False,
             "exposure": 0,
             "recommend_last_ts": 0,
             "verify": False,
@@ -50,42 +51,46 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "active_speak_enabled": False,  # 默认不主动说话
             "active_speak_interval_min": 120,
         }
+        changed = True
         print(f"✅ 已记录新群: {title} ({chat.id})")
     else:
         # 已有群，检查并更新信息
-        updated = False
         group = groups[chat_id_str]
 
         if group.get("title", "") != title:
             group["title"] = title
-            updated = True
+            changed = True
         if group.get("username", "") != username:
             group["username"] = username
-            updated = True
+            changed = True
         if group.get("bot_in_group", True) is not True:
             group["bot_in_group"] = True
-            updated = True
+            changed = True
         if "bot_muted" not in group:
             group["bot_muted"] = False
-            updated = True
+            changed = True
         if "learning_enabled" not in group:
             group["learning_enabled"] = True
-            updated = True
+            changed = True
         if "reply_enabled" not in group:
             group["reply_enabled"] = False
-            updated = True
+            changed = True
         if "active_speak_enabled" not in group:
             group["active_speak_enabled"] = False
-            updated = True
+            changed = True
         if "active_speak_interval_min" not in group:
             group["active_speak_interval_min"] = 120
-            updated = True
+            changed = True
 
-        if updated:
+        if changed:
             print(f"🔄 群信息更新: {title} ({chat.id})")
 
     # 保存到 JSON
-    save_json(GROUPS_FILE, groups)
+    if changed:
+        try:
+            save_json(GROUPS_FILE, groups)
+        except OSError as e:
+            print(f"❌ 保存群配置失败: {e}")
 
 
 def _is_bot_in_group_status(status: str) -> bool:

@@ -22,6 +22,7 @@ from channel.channel_force import unmute_force_subscribe_chat
 CALLBACK_PREFIX = "gcfg"
 FORCE_SUBSCRIBE_FILE = "config_data/force_subscribe.json"
 TOGGLE_FIELDS = [
+    ("reply_enabled", "开启回复"),
     ("verify", "身份验证"),
     ("welcome", "入群欢迎"),
     ("silent", "群静默"),
@@ -36,6 +37,7 @@ TOGGLE_FIELDS = [
     ("name_change_notice", "用户名变更提示"),
     ("recommend", "群推荐"),
 ]
+BOT_ADMIN_REQUIRED_FIELDS = {"verify", "ad_filter", "spam_limit", "force_subscribe"}
 ACTIVE_SPEAK_MIN_INTERVAL = 1
 ACTIVE_SPEAK_MAX_INTERVAL = 1440
 AD_PUSH_MIN_INTERVAL = 5
@@ -67,6 +69,7 @@ def _group_title(chat_id: str, cfg: dict) -> str:
     title = (cfg or {}).get("title", "") or (cfg or {}).get("username", "")
     return title or f"群 {chat_id}"
 
+
 def _get_force_channel(chat_id: str) -> str:
     data = load_json(FORCE_SUBSCRIBE_FILE)
     if not isinstance(data, dict):
@@ -87,6 +90,14 @@ def _set_force_channel(chat_id: str, channel_username: str):
 
 def _toggle_text(enabled: bool) -> str:
     return "✅ 开启" if enabled else "🚫 关闭"
+
+
+def _visible_toggle_fields(bot_is_admin: bool) -> list[tuple[str, str]]:
+    if bot_is_admin:
+        return TOGGLE_FIELDS
+    return [
+        item for item in TOGGLE_FIELDS if item[0] not in BOT_ADMIN_REQUIRED_FIELDS
+    ]
 
 
 def _normalize_business_coop_link(raw: str) -> str:
@@ -152,8 +163,10 @@ def _group_list_text(data: dict, page: int = 1) -> str:
     return f"请选择要配置的群：\n第 {page}/{total_pages} 页"
 
 
-def _build_group_panel_text(chat_id: str, cfg: dict) -> str:
+def _build_group_panel_text(chat_id: str, cfg: dict, *, bot_is_admin: bool = False) -> str:
     group_name = html.escape(_group_title(chat_id, cfg))
+    username = str(cfg.get("username", "") or "").strip()
+    username_text = f"@{username}" if username else "未设置"
     spam_limit_value = int(cfg.get("spam_limit_max_per_minute", 10))
     interval = int(cfg.get("active_speak_interval_min", 120))
     ad_mode = str(cfg.get("ad_push_mode", "interval"))
@@ -166,21 +179,27 @@ def _build_group_panel_text(chat_id: str, cfg: dict) -> str:
     lines = [
         "📊 群配置面板",
         f"🆔 群ID：<code>{chat_id}</code> | 群名：{group_name}",
+        f"👤 用户名：{html.escape(username_text)}",
+        f"🤖 机器人管理员：{'✅ 是' if bot_is_admin else '🚫 否'}",
         "",
     ]
-    for key, label in TOGGLE_FIELDS:
+    for key, label in _visible_toggle_fields(bot_is_admin):
         lines.append(f"{label}：{_toggle_text(bool(cfg.get(key, False)))}")
-    lines.append(f"限频条数：{spam_limit_value} 条/分钟")
+    if bot_is_admin:
+        lines.append(f"限频条数：{spam_limit_value} 条/分钟")
     lines.append(f"曝光度：{int(cfg.get('exposure', 0))}")
     lines.append(f"主动说话频率：每 {interval} 分钟")
-    lines.append(
-        f"广告推送：模式={'定时' if ad_mode == 'fixed' else '间隔'} "
-        f"间隔={ad_interval} 分钟 定时={ad_times} 文案={ad_has_text}"
-    )
-    force_channel = _get_force_channel(chat_id)
-    lines.append(f"强制关注频道：{force_channel if force_channel else '未设置'}")
+    if bot_is_admin:
+        lines.append(
+            f"广告推送：模式={'定时' if ad_mode == 'fixed' else '间隔'} "
+            f"间隔={ad_interval} 分钟 定时={ad_times} 文案={ad_has_text}"
+        )
+        force_channel = _get_force_channel(chat_id)
+        lines.append(f"强制关注频道：{force_channel if force_channel else '未设置'}")
     lines.append(f"商业合作：{html.escape(business_coop)}")
     lines.append("")
+    if not bot_is_admin:
+        lines.append("部分需要管理权限的功能已隐藏。")
     lines.append("仅群管理员或超级管理员可修改。")
     return "\n".join(lines)
 
@@ -189,10 +208,12 @@ def _can_leave_group(user_id: int) -> bool:
     return is_super_admin(user_id) or is_bot_owner(user_id)
 
 
-def _build_group_panel_keyboard(chat_id: str, cfg: dict, list_page: int = 1) -> InlineKeyboardMarkup:
+def _build_group_panel_keyboard(
+    chat_id: str, cfg: dict, list_page: int = 1, *, bot_is_admin: bool = False
+) -> InlineKeyboardMarkup:
     rows = []
     toggle_buttons = []
-    for key, label in TOGGLE_FIELDS:
+    for key, label in _visible_toggle_fields(bot_is_admin):
         is_on = bool(cfg.get(key, False))
         toggle_buttons.append(
             InlineKeyboardButton(
@@ -203,56 +224,66 @@ def _build_group_panel_keyboard(chat_id: str, cfg: dict, list_page: int = 1) -> 
     for i in range(0, len(toggle_buttons), 2):
         rows.append(toggle_buttons[i : i + 2])
 
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "📢 设置关注频道",
-                callback_data=f"{CALLBACK_PREFIX}:force_channel:{chat_id}",
-            ),
-            InlineKeyboardButton(
-                "🤝 商业合作",
-                callback_data=f"{CALLBACK_PREFIX}:business_coop:{chat_id}",
-            ),
-        ]
-    )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "📝 广告文案",
-                callback_data=f"{CALLBACK_PREFIX}:ad_text:{chat_id}",
-            ),
-            InlineKeyboardButton(
-                "⏱ 广告间隔",
-                callback_data=f"{CALLBACK_PREFIX}:ad_interval:{chat_id}",
-            ),
-        ]
-    )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "🕒 广告定时",
-                callback_data=f"{CALLBACK_PREFIX}:ad_times:{chat_id}",
-            ),
-            InlineKeyboardButton(
-                "🔀 推送模式",
-                callback_data=f"{CALLBACK_PREFIX}:ad_mode:{chat_id}",
-            ),
-        ]
-    )
+    if bot_is_admin:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "📢 设置关注频道",
+                    callback_data=f"{CALLBACK_PREFIX}:force_channel:{chat_id}",
+                ),
+                InlineKeyboardButton(
+                    "🤝 商业合作",
+                    callback_data=f"{CALLBACK_PREFIX}:business_coop:{chat_id}",
+                ),
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "📝 广告文案",
+                    callback_data=f"{CALLBACK_PREFIX}:ad_text:{chat_id}",
+                ),
+                InlineKeyboardButton(
+                    "⏱ 广告间隔",
+                    callback_data=f"{CALLBACK_PREFIX}:ad_interval:{chat_id}",
+                ),
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🕒 广告定时",
+                    callback_data=f"{CALLBACK_PREFIX}:ad_times:{chat_id}",
+                ),
+                InlineKeyboardButton(
+                    "🔀 推送模式",
+                    callback_data=f"{CALLBACK_PREFIX}:ad_mode:{chat_id}",
+                ),
+            ]
+        )
 
-    spam_limit = int(cfg.get("spam_limit_max_per_minute", 10))
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text=f"➖ 限频 {max(1, spam_limit - 1)}",
-                callback_data=f"{CALLBACK_PREFIX}:spam:{chat_id}:-1",
-            ),
-            InlineKeyboardButton(
-                text=f"➕ 限频 {min(200, spam_limit + 1)}",
-                callback_data=f"{CALLBACK_PREFIX}:spam:{chat_id}:+1",
-            ),
-        ]
-    )
+        spam_limit = int(cfg.get("spam_limit_max_per_minute", 10))
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"➖ 限频 {max(1, spam_limit - 1)}",
+                    callback_data=f"{CALLBACK_PREFIX}:spam:{chat_id}:-1",
+                ),
+                InlineKeyboardButton(
+                    text=f"➕ 限频 {min(200, spam_limit + 1)}",
+                    callback_data=f"{CALLBACK_PREFIX}:spam:{chat_id}:+1",
+                ),
+            ]
+        )
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🤝 商业合作",
+                    callback_data=f"{CALLBACK_PREFIX}:business_coop:{chat_id}",
+                )
+            ]
+        )
 
     interval = int(cfg.get("active_speak_interval_min", 120))
     rows.append(
@@ -290,9 +321,13 @@ def _build_group_panel_keyboard(chat_id: str, cfg: dict, list_page: int = 1) -> 
 
 
 def _build_group_panel_keyboard_for_user(
-    chat_id: str, cfg: dict, user_id: int, list_page: int = 1
+    chat_id: str, cfg: dict, user_id: int, list_page: int = 1, *, bot_is_admin: bool = False
 ) -> InlineKeyboardMarkup:
-    rows = list(_build_group_panel_keyboard(chat_id, cfg, list_page).inline_keyboard)
+    rows = list(
+        _build_group_panel_keyboard(
+            chat_id, cfg, list_page, bot_is_admin=bot_is_admin
+        ).inline_keyboard
+    )
     if _can_leave_group(user_id):
         rows.append(
             [
@@ -321,6 +356,28 @@ async def _can_manage_group(
 
     try:
         member = await context.bot.get_chat_member(chat_id, user_id)
+        ok = member.status in {"administrator", "creator"}
+        cache[cache_key] = {"ok": ok, "ts": now_ts}
+        return ok
+    except Exception:
+        cache[cache_key] = {"ok": False, "ts": now_ts}
+        return False
+
+
+async def _is_bot_group_admin(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int
+) -> bool:
+    cache = context.application.bot_data.setdefault("group_bot_admin_cache", {})
+    bot_id = getattr(context.bot, "id", 0)
+    cache_key = f"{bot_id}:{chat_id}"
+    now_ts = time.time()
+    hit = cache.get(cache_key)
+    if isinstance(hit, dict):
+        if now_ts - float(hit.get("ts", 0)) <= MANAGE_CHECK_CACHE_TTL_SEC:
+            return bool(hit.get("ok", False))
+
+    try:
+        member = await context.bot.get_chat_member(chat_id, bot_id)
         ok = member.status in {"administrator", "creator"}
         cache[cache_key] = {"ok": ok, "ts": now_ts}
         return ok
@@ -397,20 +454,22 @@ async def _open_group_panel(
     cfg = data.get(chat_id_str, {})
     if not isinstance(cfg, dict):
         cfg = {}
+    bot_is_admin = await _is_bot_group_admin(context, chat_id)
 
     await query.answer()
     list_page = int(context.user_data.get("group_setting_list_page", 1) or 1)
     keyboard = _build_group_panel_keyboard_for_user(
-        chat_id_str, cfg, user_id, list_page=list_page
+        chat_id_str, cfg, user_id, list_page=list_page, bot_is_admin=bot_is_admin
     )
     if context.user_data.get("start_panel"):
         rows = list(keyboard.inline_keyboard)
         rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
         keyboard = InlineKeyboardMarkup(rows)
     await query.edit_message_text(
-        text=_build_group_panel_text(chat_id_str, cfg),
+        text=_build_group_panel_text(chat_id_str, cfg, bot_is_admin=bot_is_admin),
         reply_markup=keyboard,
         parse_mode="HTML",
+        disable_web_page_preview=True,
     )
 
 
@@ -421,10 +480,15 @@ async def group_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_chat:
         return
     chat_id = str(update.effective_chat.id)
+    bot_is_admin = await _is_bot_group_admin(context, int(chat_id))
     group_config = get_group_whitelist(context).get(chat_id, {})
     if not group_config.get("enabled", False):
         return await safe_reply(update, context, "⚠️ 本群尚未启用主功能。")
-    await safe_reply(update, context, _build_group_panel_text(chat_id, group_config), html=True)
+    await update.message.reply_text(
+        _build_group_panel_text(chat_id, group_config, bot_is_admin=bot_is_admin),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
 
 
 @register_command("群开关", "群配置", "群设置")
@@ -745,6 +809,11 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             return
         if not await _can_manage_group(context, user_id, chat_id):
             return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        if (
+            feature_key in BOT_ADMIN_REQUIRED_FIELDS
+            and not await _is_bot_group_admin(context, chat_id)
+        ):
+            return await query.answer("机器人不是该群管理员，无法配置此项。", show_alert=True)
         cfg = data.get(chat_id_str, {})
         if not isinstance(cfg, dict):
             cfg = {}
@@ -764,6 +833,8 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             return
         if not await _can_manage_group(context, user_id, chat_id):
             return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        if not await _is_bot_group_admin(context, chat_id):
+            return await query.answer("机器人不是该群管理员，无法配置此项。", show_alert=True)
         context.user_data["group_setting_stage"] = "force_channel"
         context.user_data["group_setting_chat_id"] = chat_id_str
         await query.answer()
@@ -807,6 +878,8 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             return
         if not await _can_manage_group(context, user_id, chat_id):
             return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        if not await _is_bot_group_admin(context, chat_id):
+            return await query.answer("机器人不是该群管理员，无法配置此项。", show_alert=True)
         context.user_data["group_setting_chat_id"] = chat_id_str
         back_markup = InlineKeyboardMarkup(
             [[InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:ad_back")]]
@@ -853,6 +926,8 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             return
         if not await _can_manage_group(context, user_id, chat_id):
             return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        if not await _is_bot_group_admin(context, chat_id):
+            return await query.answer("机器人不是该群管理员，无法配置此项。", show_alert=True)
         _set_force_channel(chat_id_str, "")
         context.user_data.pop("group_setting_stage", None)
         context.user_data.pop("group_setting_chat_id", None)
@@ -881,6 +956,8 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             return
         if not await _can_manage_group(context, user_id, chat_id):
             return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        if not await _is_bot_group_admin(context, chat_id):
+            return await query.answer("机器人不是该群管理员，无法配置此项。", show_alert=True)
         cfg = data.get(chat_id_str, {})
         if not isinstance(cfg, dict):
             cfg = {}
