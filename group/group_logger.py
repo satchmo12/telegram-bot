@@ -50,6 +50,15 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "reply_enabled": False,     # 默认不自动回复
             "active_speak_enabled": False,  # 默认不主动说话
             "active_speak_interval_min": 120,
+            "points_lottery_enabled": False,
+            "points_lottery_cost": 100,
+            "talk_points_enabled": False,
+            "talk_points_amount": 1,
+            "talk_points_daily_limit": 20,
+            "talk_points_min_length": 5,
+            "invite_points_enabled": False,
+            "invite_points_amount": 100,
+            "invite_points_daily_limit": 500,
         }
         changed = True
         print(f"✅ 已记录新群: {title} ({chat.id})")
@@ -80,6 +89,33 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             changed = True
         if "active_speak_interval_min" not in group:
             group["active_speak_interval_min"] = 120
+            changed = True
+        if "points_lottery_enabled" not in group:
+            group["points_lottery_enabled"] = False
+            changed = True
+        if "points_lottery_cost" not in group:
+            group["points_lottery_cost"] = 100
+            changed = True
+        if "talk_points_enabled" not in group:
+            group["talk_points_enabled"] = False
+            changed = True
+        if "talk_points_amount" not in group:
+            group["talk_points_amount"] = 1
+            changed = True
+        if "talk_points_daily_limit" not in group:
+            group["talk_points_daily_limit"] = 20
+            changed = True
+        if "talk_points_min_length" not in group:
+            group["talk_points_min_length"] = 5
+            changed = True
+        if "invite_points_enabled" not in group:
+            group["invite_points_enabled"] = False
+            changed = True
+        if "invite_points_amount" not in group:
+            group["invite_points_amount"] = 100
+            changed = True
+        if "invite_points_daily_limit" not in group:
+            group["invite_points_daily_limit"] = 500
             changed = True
 
         if changed:

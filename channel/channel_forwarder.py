@@ -6,7 +6,7 @@ from telegram import Update, InputMediaPhoto, InputMediaVideo, InputMediaDocumen
 import telegram
 from telegram.ext import MessageHandler, ContextTypes, filters
 from channel.access_control import is_channel_subscription_required
-from utils import load_json, is_super_admin
+from utils import get_runtime_bot_name, load_json, is_super_admin
 
 MEDIA_GROUP_CACHE = {}
 MEDIA_GROUP_TASKS = {}
@@ -360,11 +360,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if mode != "listen":
             continue
         sources = set(rule.get("sources", []))
+        targets = rule.get("targets", []) or []
         exclude_channels = set(rule.get("exclude_channels", []))
         filter_type = str(rule.get("filter", "all") or "all").lower()
         if filter_type not in {"all", "text", "photo", "video"}:
             filter_type = "all"
 
+        if not sources and not targets:
+            continue
         if sources and source_channel_ids.isdisjoint(sources):
             continue
         if exclude_channels and not source_channel_ids.isdisjoint(exclude_channels):
@@ -392,7 +395,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if _should_skip_by_links(rule, text, entities):
             continue
 
-        print(f"📥 监听到频道消息: source={list(source_channel_ids)} rule={rule.get('name','')} targets={rule.get('targets', [])}")
+        bot_name = get_runtime_bot_name() or getattr(context.bot, "username", "")
+        print(
+            f"📥 监听到频道消息: bot={bot_name} source={list(source_channel_ids)} "
+            f"rule={rule.get('name','')} targets={rule.get('targets', [])}"
+        )
 
         # === MediaGroup 处理 ===
         media_group_id = getattr(msg, "media_group_id", None)
@@ -410,7 +417,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             continue
 
         # === 单条消息处理 ===
-        targets = rule.get("targets", [])
         src = _get_source_id_from_msg(msg)
         if msg.photo:
             caption = _processed_text_or_original(msg.caption or "", rule) if msg.caption else None

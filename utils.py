@@ -44,6 +44,7 @@ INTEREST_LOG_FILE = os.path.join(DATA_DIR, "bank_interest_log.json")
 
 INVENTORY_DATA_FILE = os.path.join(DATA_DIR, "inventory.json")
 LOTTERY_FILE = os.path.join(DATA_DIR, "lottery.json")
+POINTS_LOTTERY_FILE = os.path.join(DATA_DIR, "points_lottery.json")
 
 COOLDOWN_FILE = os.path.join(DATA_DIR, "cooldown.json")
 
@@ -98,6 +99,7 @@ IDIOM_TEXT = os.path.join(CON_DATA_DIR, "chengyu_words.txt")
 
 # 群特别关心
 SPECIAL_FOLLOW_FILE = os.path.join(DATA_DIR, "special_follow.json")
+POINTS_REWARD_LOG_FILE = os.path.join(DATA_DIR, "points_reward_log.json")
 
 
 _cache_data = {}
@@ -486,6 +488,15 @@ def get_group_whitelist(context: ContextTypes.DEFAULT_TYPE = None) -> dict:
             "reply_enabled": False,
             "active_speak_enabled": False,
             "active_speak_interval_min": 120,
+            "points_lottery_enabled": False,
+            "points_lottery_cost": 100,
+            "talk_points_enabled": False,
+            "talk_points_amount": 1,
+            "talk_points_daily_limit": 20,
+            "talk_points_min_length": 5,
+            "invite_points_enabled": False,
+            "invite_points_amount": 100,
+            "invite_points_daily_limit": 500,
             "force_subscribe": False,
             "name_change_notice": False,
         }

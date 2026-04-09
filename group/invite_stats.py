@@ -3,7 +3,8 @@ from telegram.ext import CommandHandler, MessageHandler, ContextTypes, filters
 from html import escape
 
 from command_router import register_command
-from utils import load_json, save_json, safe_reply
+from group.points_rules import award_invite_points
+from utils import get_group_whitelist, load_json, save_json, safe_reply
 
 INVITE_STATS_FILE = "data/invite_stats.json"
 INVITE_LINK_MAP_FILE = "data/invite_link_map.json"
@@ -69,7 +70,7 @@ def update_invite_stats_by_user(
     inviter_id: int,
     inviter_name: str,
     new_member_ids: list[int],
-):
+)-> list[int]:
     group_id = str(chat_id)
     inviter_id_str = str(inviter_id)
 
@@ -81,12 +82,15 @@ def update_invite_stats_by_user(
 
     stat["username"] = inviter_name or stat.get("username", "未知用户")
 
+    added_invitees = []
     for uid in new_member_ids:
         if uid not in stat["invitees"]:
             stat["invitees"].add(uid)
             stat["count"] += 1
+            added_invitees.append(uid)
 
     save_invite_stats(stats_data)
+    return added_invitees
 
 
 @register_command("邀请链接")
@@ -172,16 +176,26 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             inviter_id = int(owner_info.get("inviter_id", 0))
             inviter_name = owner_info.get("inviter_name", "未知用户")
             if inviter_id:
-                update_invite_stats_by_user(
+                added_invitees = update_invite_stats_by_user(
                     stats_data, chat_id, inviter_id, inviter_name, new_member_ids
                 )
+                try:
+                    group_cfg = get_group_whitelist(context).get(str(chat_id), {})
+                    award_invite_points(str(chat_id), inviter_id, added_invitees, group_cfg)
+                except Exception as e:
+                    print(f"⚠️ 邀请积分发放失败: chat={chat_id} inviter={inviter_id}, {e}")
                 return
 
     inviter = update.message.from_user
     if inviter and any(uid != inviter.id for uid in new_member_ids):
-        update_invite_stats_by_user(
+        added_invitees = update_invite_stats_by_user(
             stats_data, chat_id, inviter.id, inviter.full_name, new_member_ids
         )
+        try:
+            group_cfg = get_group_whitelist(context).get(str(chat_id), {})
+            award_invite_points(str(chat_id), inviter.id, added_invitees, group_cfg)
+        except Exception as e:
+            print(f"⚠️ 邀请积分发放失败: chat={chat_id} inviter={inviter.id}, {e}")
 
 
 @register_command("邀请统计")

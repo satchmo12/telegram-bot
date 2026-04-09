@@ -1,61 +1,180 @@
 from datetime import datetime
-import random
-from telegram import Update
-from telegram.ext import CommandHandler, ContextTypes
+from html import escape
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import CallbackQueryHandler, ContextTypes
+
 from command_router import register_command
-from utils import LOTTERY_FILE, apply_reward, format_reward_text, group_allowed, load_json, save_json
-from info.economy import INFO_FILE, get_user_data, save_user_data
+from game.points_lottery_core import (
+    draw_points_lottery,
+    get_group_points_lottery,
+    get_points_lottery_config,
+    get_user_wins,
+    list_prizes,
+)
+from info.economy import get_points
+from utils import get_group_whitelist, safe_reply
+
+CALLBACK_PREFIX = "plot"
+USER_WINS_RESPONDED = set()
 
 
-    
-@register_command("抽奖")
-async def lottery(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+def _lottery_keyboard(chat_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🎁 开始抽奖", callback_data=f"{CALLBACK_PREFIX}:draw:{chat_id}:1"),
+                InlineKeyboardButton("🎁 3连抽", callback_data=f"{CALLBACK_PREFIX}:draw:{chat_id}:3"),
+            ],
+            [
+                InlineKeyboardButton("🎁 5连抽", callback_data=f"{CALLBACK_PREFIX}:draw:{chat_id}:5"),
+                InlineKeyboardButton("🎁 10连抽", callback_data=f"{CALLBACK_PREFIX}:draw:{chat_id}:10"),
+            ],
+            [InlineKeyboardButton("我的中奖", callback_data=f"{CALLBACK_PREFIX}:my:{chat_id}")],
+        ]
+    )
 
-    # 加载抽奖记录，避免重复抽奖
-    lottery_data = load_json(LOTTERY_FILE)
-    chat_str = str(chat_id)
-    user_str = str(user.id)
 
-    if chat_str not in lottery_data:
-        lottery_data[chat_str] = {}
-    if today not in lottery_data[chat_str]:
-        lottery_data[chat_str][today] = {}
+def _format_panel(chat_id: str, cfg: dict) -> str:
+    lottery_cfg = get_points_lottery_config(cfg)
+    state = get_group_points_lottery(chat_id)
+    prizes = list_prizes(chat_id)
+    recent = state.get("recent_winners", [])
+    lines = [
+        "🎰 积分抽奖",
+        f"状态：{'✅ 开启' if lottery_cfg['enabled'] else '🚫 关闭'}",
+        f"单次消耗：{lottery_cfg['cost']} 积分",
+        "",
+        "🎁 奖池：",
+    ]
+    if prizes:
+        for prize in prizes:
+            lines.append(
+                f"- {escape(str(prize.get('name', '未命名')))} | 概率 {int(prize.get('rate', 0) or 0)} | 数量 {int(prize.get('stock', 0) or 0)}"
+            )
+    else:
+        lines.append("- 暂无奖品")
+    lines.append("")
+    lines.append("🏆 最近中奖：")
+    if recent:
+        for item in recent[-10:]:
+            lines.append(
+                f"- {escape(str(item.get('user_name', '未知用户')))} 抽中 {escape(str(item.get('prize_name', '未知奖品')))}"
+            )
+    else:
+        lines.append("- 暂无记录")
+    return "\n".join(lines)
 
-    if user_str in lottery_data[chat_str][today]:
-        await update.message.reply_text(f"🎰 {user.first_name}，你今天已经抽过奖了，明天再来！")
+
+def _format_draw_result(user_name: str, draw_count: int, cost: int, current_points: int, results: list[dict]) -> str:
+    lines = [
+        f"🎰 {escape(user_name)} 进行了 {draw_count} 次积分抽奖",
+        f"消耗积分：{cost}",
+        f"剩余积分：{current_points}",
+        "",
+        "抽奖结果：",
+    ]
+    won = False
+    for idx, item in enumerate(results, start=1):
+        if item.get("win"):
+            won = True
+            lines.append(f"{idx}. 🎉 {escape(str(item.get('name', '未知奖品')))}")
+        else:
+            lines.append(f"{idx}. 谢谢参与")
+    if won:
+        lines.append("")
+        lines.append("已记录到“我的中奖”。")
+    return "\n".join(lines)
+
+
+def _format_user_wins(chat_id: str, user_id: int) -> str:
+    wins = get_user_wins(chat_id, user_id)
+    if not wins:
+        return ""
+    lines = ["🎁 我的中奖："]
+    for idx, item in enumerate(reversed(wins[-20:]), start=1):
+        ts = int(item.get("ts", 0) or 0)
+        when = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M") if ts else "--"
+        lines.append(f"{idx}. {escape(str(item.get('name', '未知奖品')))} | {when}")
+    return "\n".join(lines)
+
+
+@register_command("积分抽奖")
+async def points_lottery_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.effective_chat:
+        return
+    if update.effective_chat.type not in {"group", "supergroup"}:
+        return await safe_reply(update, context, "请在群里发送“积分抽奖”。")
+    chat_id = str(update.effective_chat.id)
+    cfg = get_group_whitelist(context).get(chat_id, {})
+    await update.message.reply_text(
+        _format_panel(chat_id, cfg),
+        reply_markup=_lottery_keyboard(chat_id),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+async def points_lottery_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    parts = query.data.split(":")
+    if len(parts) < 3 or parts[0] != CALLBACK_PREFIX:
         return
 
-    # 奖励池
-    rewards = [
-        {"text": "🎁 你获得了 {balance} 金币！", "balance": 50},
-        {"text": "🎉 你获得了 {points} 积分！", "points": 5},
-        {"text": "🍀 幸运女神眷顾你，幸运值 +{luck}", "luck": 10},
-        {"text": "😢 啥也没抽到，下次好运！心情 {mood}", "mood": -3},
-        {"text": "💰 恭喜中大奖！金币 +{balance}", "balance": 100},
-        {"text": "🍀 幸运值提升 +{luck}！", "luck": 5},
-        {"text": "💪 体力恢复 {stamina} 点", "stamina": 10},
-        {"text": "✨ 魅力值增加 {charm} 点", "charm": 3},
-        {"text": "😊 心情提升 {mood} 点", "mood": 5}
-    ]
+    action = parts[1]
+    chat_id = str(parts[2])
+    cfg = get_group_whitelist(context).get(chat_id, {})
 
-    reward = random.choice(rewards)
+    if action == "my":
+        response_key = (chat_id, int(query.from_user.id))
+        user_wins_text = _format_user_wins(chat_id, query.from_user.id)
+        if not user_wins_text:
+            return await query.answer("🎁 你还没有中奖记录。", show_alert=False)
+        if response_key in USER_WINS_RESPONDED:
+            return await query.answer("🎁 你的中奖记录已经显示过了。", show_alert=False)
+        USER_WINS_RESPONDED.add(response_key)
+        await query.answer()
+        return await query.message.reply_text(
+            user_wins_text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
 
-    # 记录今日抽奖
-    lottery_data[chat_str][today][user_str] = format_reward_text(reward)
-    save_json(LOTTERY_FILE, lottery_data)
+    if action != "draw" or len(parts) < 4:
+        return
 
-    # 加载并更新用户数据
-    user_data = get_user_data(chat_id, user.id)
+    try:
+        draw_count = int(parts[3])
+    except Exception:
+        return await query.answer("参数错误", show_alert=True)
 
-    user_data = apply_reward(user_data, reward)
+    lottery_cfg = get_points_lottery_config(cfg)
+    ok, err, results = draw_points_lottery(
+        chat_id,
+        query.from_user.id,
+        query.from_user.full_name,
+        draw_count,
+        cfg,
+    )
+    if not ok:
+        return await query.answer(err, show_alert=True)
 
-    save_user_data(chat_id, user.id, user_data) 
+    current_points = get_points(chat_id, query.from_user.id)
+    await query.answer("抽奖完成", show_alert=False)
+    return await query.message.reply_text(
+        _format_draw_result(
+            query.from_user.full_name,
+            draw_count,
+            lottery_cfg["cost"] * draw_count,
+            current_points,
+            results,
+        ),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
 
-    msg = format_reward_text(reward)
-    await update.message.reply_text(msg)
 
 def register_lottery_handlers(app):
-    app.add_handler(CommandHandler("lottery", lottery))
+    app.add_handler(CallbackQueryHandler(points_lottery_callback, pattern=rf"^{CALLBACK_PREFIX}:"))

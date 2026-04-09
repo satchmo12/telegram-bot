@@ -37,10 +37,10 @@ async def checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_json(CHECKIN_FILE, checkin_data)
 
     # 加积分
-    change_points(chat_id, user.id, 2)
+    change_points(chat_id, user.id, 10)
     points = get_points(chat_id, user.id)
     await safe_reply(update, context,
-        f"🎉 签到成功，{user.full_name}！你获得了 2 积分，当前积分：{points} 🎯"
+        f"🎉 签到成功，{user.full_name}！你获得了 10 积分，当前积分：{points} 🎯"
     )
 
 

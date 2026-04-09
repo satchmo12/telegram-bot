@@ -13,6 +13,7 @@ import calendar
 from command_router import register_command
 from tool.pagination_helper import generic_pagination_callback, send_paginated_list
 from utils import get_group_whitelist, is_admin, is_bot_admin, load_json, save_json, safe_reply
+from group.points_rules import award_talk_points
 
 DATA_FILE = "data/talk_count.json"
 FREQ_SHORT_WINDOW_SECONDS = 10
@@ -95,6 +96,7 @@ async def count_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     date_key = now.strftime("%Y-%m-%d")
     month_key = now.strftime("%Y-%m")
+    group_config = get_group_whitelist(context).get(chat_id, {})
 
     data = load_talk_data()
     # print(f"📊 记录发言：{chat_id} - {user.full_name}")
@@ -124,13 +126,19 @@ async def count_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     save_talk_data(data)
 
+    if update.message.text:
+        try:
+            award_talk_points(chat_id, user_id, update.message.text, group_config)
+        except Exception as e:
+            print(f"⚠️ 发言积分发放失败: chat={chat_id} user={user_id}, {e}")
+
     # ===== 实时频率统计（用于防刷屏）=====
     q = _get_user_freq_queue(chat_id, user_id)
     q.append(now_ts)
     _cleanup_queue(q, now_ts)
 
     per_minute_count = _count_in_window(q, now_ts, FREQ_LONG_WINDOW_SECONDS)
-    group_config = get_group_whitelist(context).get(chat_id, {})
+    group_config = group_config if isinstance(group_config, dict) else {}
     spam_limit_enabled = bool(group_config.get("spam_limit", False))
     if not spam_limit_enabled:
         return
