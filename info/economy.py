@@ -13,7 +13,17 @@ from tool.pagination_helper import (
     generic_pagination_callback,
     send_paginated_list,
 )
-from utils import INFO_FILE, get_group_whitelist, load_json, save_json, safe_reply, is_super_admin 
+from utils import (
+    INFO_FILE,
+    can_use_command,
+    get_group_whitelist,
+    is_bot_owner,
+    is_owner,
+    load_json,
+    save_json,
+    safe_reply,
+    is_super_admin,
+)
 
 
 # 支持添加的属性名映射
@@ -212,9 +222,7 @@ async def my_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, chat_id = update.effective_user, update.effective_chat.id
     ensure_user_exists(chat_id, user.id, user.full_name)
     points = get_points(chat_id, user.id)
-    await safe_reply(update, context,f"🏅 当前积分：{points} 分")
-
-
+    await safe_reply(update, context, f"🏅 当前积分：{points} 分")
 
 
 def format_rich_item(i, item):
@@ -266,7 +274,7 @@ async def top_richest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     users = get_all_users(chat_id)
 
     if not users:
-        return await safe_reply(update, context,"目前还没有任何人的金币记录。")
+        return await safe_reply(update, context, "目前还没有任何人的金币记录。")
 
     sorted_users = sorted(
         users.items(), key=lambda x: x[1].get("balance", 0), reverse=True
@@ -325,7 +333,7 @@ async def top_charm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     users = get_all_users(chat_id)
 
     if not users:
-        return await safe_reply(update, context,"目前还没有任何人的魅力记录。")
+        return await safe_reply(update, context, "目前还没有任何人的魅力记录。")
 
     sorted_users = sorted(
         users.items(), key=lambda x: x[1].get("charm", 0), reverse=True
@@ -350,8 +358,9 @@ async def top_charm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def add_info_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat_id = str(update.effective_chat.id)
+    
 
-    if not is_super_admin(user.id):
+    if  not await  can_use_command(context, user.id, chat_id):
         return
 
     if not update.message or not update.message.reply_to_message:
@@ -390,6 +399,27 @@ async def add_info_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"已给 {target_user.full_name} 添加 {value} 点「{attr_name}」。当前{attr_name}为：{data[attr_key]}",
         True,
     )
+
+
+def clean_point(chat_id: str):
+    data = load_json(INFO_FILE)
+
+    chat = data.get(str(chat_id))
+    if not chat:
+        return False, "该群不存在"
+
+    users = chat.get("users", {})
+    if not users:
+        return False, "没有用户数据"
+
+    # 🔥 清空所有用户积分
+    for user_id in users:
+        users[user_id]["points"] = 0
+
+    # ✅ 写回
+    save_json(INFO_FILE, data)
+
+    return True, "✅ 所有用户积分已清零"
 
 
 def register_economy_handlers(app):

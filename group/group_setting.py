@@ -33,6 +33,7 @@ from group.points_rules import (
     get_invite_points_config,
     get_talk_points_config,
 )
+from info.economy import clean_point
 from utils import (
     GROUP_LIST_FILE,
     get_group_whitelist,
@@ -62,6 +63,7 @@ TOGGLE_FIELDS = [
     (FEATURE_FRIENDS, "群好友功能"),
     ("active_speak_enabled", "主动说话"),
     ("force_subscribe", "强制关注频道"),
+    ("force_subscribe_new_only", "强制关注仅新成员"),
     ("name_change_notice", "用户名变更提示"),
     ("recommend", "群推荐"),
 ]
@@ -114,6 +116,18 @@ def _set_force_channel(chat_id: str, channel_username: str):
     else:
         data.pop(chat_id, None)
     save_json(FORCE_SUBSCRIBE_FILE, data)
+
+
+def _mark_force_subscribe_set_ts(chat_id: str, ts: Optional[int] = None):
+    data = load_json(GROUP_LIST_FILE)
+    if not isinstance(data, dict):
+        data = {}
+    cfg = data.get(chat_id, {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    cfg["force_subscribe_set_ts"] = int(ts or time.time())
+    data[chat_id] = cfg
+    save_json(GROUP_LIST_FILE, data)
 
 
 def _toggle_text(enabled: bool) -> str:
@@ -405,6 +419,20 @@ def _build_group_panel_keyboard(
                 "👥 邀请积分规则",
                 callback_data=f"{CALLBACK_PREFIX}:invite_points:{chat_id}",
             ),
+        ],
+    )
+    
+    rows.insert(
+        len(rows) - 1,
+        [
+            InlineKeyboardButton(
+                "💬 清空积分",
+                callback_data=f"{CALLBACK_PREFIX}:clean_point:{chat_id}",
+            ),
+            # InlineKeyboardButton(
+            #     "👥 邀请积分规则",
+            #     callback_data=f"{CALLBACK_PREFIX}:invite_points:{chat_id}",
+            # ),
         ],
     )
     return InlineKeyboardMarkup(rows)
@@ -910,6 +938,8 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         if feature_key in {item[0] for item in TOGGLE_FIELDS}:
             new_value = not bool(cfg.get(feature_key, False))
             cfg[feature_key] = new_value
+            if feature_key == "force_subscribe" and new_value:
+                cfg["force_subscribe_set_ts"] = int(time.time())
             data[chat_id_str] = cfg
             save_json(GROUP_LIST_FILE, data)
             if feature_key == "force_subscribe" and not new_value:
@@ -1276,6 +1306,22 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     if action == "noop":
         return await query.answer("当前主动说话频率", show_alert=False)
+    if action == "clean_point":
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+
+        if chat_id is None:
+            return
+
+        # ✅ 权限检查
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法清空积分。", show_alert=True)
+
+        # ✅ 执行清空
+        success, msg = clean_point(chat_id_str)
+
+        # ✅ 返回提示
+        return await query.answer(msg, show_alert=True)
 
 
 async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1310,6 +1356,7 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
             if not text.startswith("@"):
                 text = f"@{text}"
             _set_force_channel(chat_id_str, text)
+            _mark_force_subscribe_set_ts(chat_id_str)
             context.user_data.pop("group_setting_stage", None)
             context.user_data.pop("group_setting_chat_id", None)
             await update.message.reply_text(f"✅ 已设置强制关注频道为：{text}")

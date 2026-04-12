@@ -5,6 +5,7 @@ import os
 import sys
 import re
 import logging
+from datetime import datetime
 from datetime import time
 from typing import Optional
 from dotenv import load_dotenv
@@ -25,7 +26,14 @@ from telegram.request import HTTPXRequest
 from telegram.error import NetworkError, TimedOut, InvalidToken
 
 from group.group_logger import GROUPS_FILE
-from forward.message_forward import forward_to_owner, reply_from_owner
+from forward.message_forward import (
+    _debug_private_forward,
+    forward_to_owner,
+    handle_private_dialog_callback,
+    owner_auto_forward_in_dialog,
+    register_send_user_conv,
+    reply_from_owner,
+)
 from menu import build_feature_intro
 from modules import register_all_handlers  # 注册各功能模块
 from dispatcher import message_router  # 最终文本处理路由器
@@ -68,6 +76,9 @@ async def error_handler(update, context):
         msg = str(err).lower()
         if "message to delete not found" in msg:
             return
+        if "not enough rights to send text messages" in msg:
+            logging.warning("机器人在目标群没有发言权限: %s", err)
+            return
         logging.warning("网络错误，可能是Telegram服务器临时不可用: %s", err)
         return
     if isinstance(err, TimedOut):
@@ -89,6 +100,17 @@ MASTER_BOT_NAME = str(os.getenv("MASTER_BOT_NAME", "")).strip()
 MASTER_BOT_USERNAME = str(os.getenv("MASTER_BOT_USERNAME", "")).strip().lstrip("@")
 PRIVATE_FORWARD_SELF_SERVICE_STAGE_KEY = "private_forward_self_service_stage"
 MULTI_BOT_STAGE_KEY = "multi_bot_stage"
+STARTUP_DEBUG_FILE = os.path.join("data", "startup_debug.log")
+
+
+def write_startup_debug(message: str) -> None:
+    try:
+        os.makedirs(os.path.dirname(STARTUP_DEBUG_FILE), exist_ok=True)
+        with open(STARTUP_DEBUG_FILE, "a", encoding="utf-8") as f:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"{ts} {message}\n")
+    except Exception:
+        pass
 
 
 def load_bot_configs():
@@ -132,6 +154,19 @@ async def owner_reply_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bind_runtime_bot_context(context)
+    user = update.effective_user
+    chat = update.effective_chat
+    _debug_private_forward(
+        f"[private_forward_router] bot={context.application.bot_data.get('name')} "
+        f"chat_type={getattr(chat, 'type', None)} "
+        f"user_id={getattr(user, 'id', None)} "
+        f"text={getattr(update.message, 'text', None)!r}"
+    )
+    print(
+        f"[private_forward_router] chat_type={getattr(chat, 'type', None)} "
+        f"user_id={getattr(user, 'id', None)} "
+        f"text={getattr(update.message, 'text', None)!r}"
+    )
     if (
         str(context.application.bot_data.get("name", "")).strip() == MASTER_BOT_NAME
         and (
@@ -139,6 +174,8 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
             or isinstance(context.user_data.get(MULTI_BOT_STAGE_KEY), dict)
         )
     ):
+        _debug_private_forward("[private_forward_router] skip self-service stage")
+        print("[private_forward_router] 忽略：主机器人当前处于自助/多机器人输入阶段")
         return
     msg = update.message
     if msg:
@@ -284,6 +321,7 @@ def _build_help_text(context: ContextTypes.DEFAULT_TYPE, user_id: Optional[int] 
         if can_manage_private_forward:
             lines.extend(
                 [
+                    "双向模式 / 私聊面板 打开当前私聊会话面板",
                     "用户列表 查看已私聊过机器人的用户",
                     "拉黑用户 回复用户消息或者 拉黑用户 用户ID 将用户拉黑 ",
                     "移除拉黑 回复用户消息或者 移除拉黑 用户ID 将用户解除拉黑 ",
@@ -402,6 +440,10 @@ def create_app(bot_cfg: dict):
     token = bot_cfg["token"]
     owner_id = bot_cfg["owner_id"]
     bot_name = bot_cfg["name"]
+    write_startup_debug(
+        f"[create_app] bot={bot_name} owner_id={owner_id} "
+        f"features={','.join(bot_cfg.get('enabled_features', []))}"
+    )
 
     request = HTTPXRequest(
         connect_timeout=10.0,
@@ -436,17 +478,32 @@ def create_app(bot_cfg: dict):
 
     # ===== 私聊转发逻辑 =====
     if is_feature_enabled(app, "private_forward"):
+        write_startup_debug(f"[create_app] register private_forward handlers bot={bot_name}")
         app.add_handler(
             MessageHandler(
                 filters.ChatType.PRIVATE & filters.REPLY & ~filters.COMMAND,
                 owner_reply_router,
-            )
+            ),
+            group=0,
+        )
+        app.add_handler(
+            MessageHandler(
+                filters.ChatType.PRIVATE & ~filters.REPLY & ~filters.COMMAND,
+                private_forward_router,
+            ),
+            group=0,
         )
 
         app.add_handler(
             MessageHandler(
-                filters.ChatType.PRIVATE & ~filters.COMMAND,
-                private_forward_router,
+                filters.ChatType.PRIVATE & ~filters.REPLY & ~filters.COMMAND,
+                owner_auto_forward_in_dialog,
+            ),
+            group=1,
+        )
+        app.add_handler(
+            CallbackQueryHandler(
+                handle_private_dialog_callback, pattern=r"^pfmode:"
             )
         )
     app.add_handler(CallbackQueryHandler(clear_login_prompt_on_callback), group=-900)
@@ -454,6 +511,7 @@ def create_app(bot_cfg: dict):
 
     # ===== 注册所有功能模块 =====
     register_all_handlers(app)
+    register_send_user_conv(app)
     # 兜底 /start（放在更后 group，避免覆盖 verification 的 /start 校验逻辑）
     app.add_handler(CommandHandler("start", start_fallback), group=50)
 
@@ -626,13 +684,16 @@ async def leave_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def post_init_setup(app):
     set_runtime_bot_name(app.bot_data.get("name", ""))
+    write_startup_debug(f"[post_init_setup] bot={app.bot_data.get('name')} post-init start")
     await set_bot_commands(app)  # 直接 await，事件循环已运行
+    write_startup_debug(f"[post_init_setup] bot={app.bot_data.get('name')} post-init done")
 
 
 configure_runtime_hooks(create_app, post_init_setup)
 
 
 async def main():
+    write_startup_debug(f"[main] process start cwd={os.getcwd()} argv={' '.join(sys.argv)}")
     bot_configs = load_startup_bot_configs()
     if not bot_configs:
         raise RuntimeError("没有可用的机器人配置，请检查 BOT_TOKEN/BOT_ENABLE 环境变量")
@@ -644,6 +705,7 @@ async def main():
     try:
         for app in apps:
             try:
+                write_startup_debug(f"[main] initializing bot={app.bot_data.get('name')}")
                 await app.initialize()
                 # 主动验证 token，避免进入 polling 后才刷 InvalidToken 错误
                 await app.bot.get_me()
@@ -651,10 +713,16 @@ async def main():
                 await app.start()
                 await app.updater.start_polling()
                 register_running_app(app)
+                write_startup_debug(
+                    f"[main] started bot={app.bot_data.get('name')} username=@{app.bot.username}"
+                )
                 print(
                     f"✅ 已启动: {app.bot_data.get('name')} (owner={app.bot_data.get('owner_id')}, username=@{app.bot.username})"
                 )
             except InvalidToken:
+                write_startup_debug(
+                    f"[main] invalid token bot={app.bot_data.get('name')}"
+                )
                 logging.error(
                     "❌ 机器人 token 无效，已跳过: %s",
                     app.bot_data.get("name"),
@@ -671,6 +739,7 @@ async def main():
 
         await asyncio.Event().wait()
     except KeyboardInterrupt:
+        write_startup_debug("[main] keyboard interrupt")
         print("🛑 收到 Ctrl+C，正在安全关闭机器人...")
     finally:
         for app in reversed(apps):
@@ -681,7 +750,11 @@ async def main():
                     await app.stop()
                 await app.shutdown()
                 unregister_running_app(app.bot_data.get("name"))
+                write_startup_debug(f"[main] stopped bot={app.bot_data.get('name')}")
             except Exception as e:
+                write_startup_debug(
+                    f"[main] stop failed bot={app.bot_data.get('name')} error={e}"
+                )
                 logging.exception(
                     "停止机器人失败 [%s]: %s", app.bot_data.get("name"), e
                 )

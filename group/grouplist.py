@@ -26,6 +26,17 @@ def save_users(chat_id, users):
     save_json(path, users)
 
 
+def get_user_join_time(chat_id, user_id) -> int:
+    users = load_users(chat_id)
+    info = users.get(str(user_id), {})
+    if not isinstance(info, dict):
+        return 0
+    try:
+        return int(info.get("join_time", 0) or 0)
+    except Exception:
+        return 0
+
+
 def _merge_user_records(dst: dict, src: dict) -> dict:
     if not isinstance(dst, dict):
         return src if isinstance(src, dict) else {}
@@ -148,6 +159,7 @@ async def record_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "full_name": new_full_name,
         "username": new_username,
         "username_history": history,
+        "join_time": int(old.get("join_time", 0) or 0),
         "last_seen": int(time.time()),
     }
 
@@ -177,6 +189,7 @@ async def new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "full_name": member.full_name,
             "username": member.username,
             "username_history": [],
+            "join_time": int(time.time()),
             "last_seen": int(time.time()),
         }
 

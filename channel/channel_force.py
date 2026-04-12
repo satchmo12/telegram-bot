@@ -14,6 +14,7 @@ from telegram.ext import (
 from command_router import register_command
 from typing import Optional
 from utils import get_group_whitelist, load_json, save_json
+from group.grouplist import get_user_join_time
 from group.mute_registry import add_mute, remove_mute
 
 
@@ -127,6 +128,12 @@ async def check_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     channel_username = data[chat_id]
+    apply_new_only = bool(group_config.get("force_subscribe_new_only", True))
+    force_set_ts = int(group_config.get("force_subscribe_set_ts", 0) or 0)
+    if apply_new_only and force_set_ts > 0:
+        join_time = get_user_join_time(update.effective_chat.id, user_id)
+        if join_time <= 0 or join_time <= force_set_ts:
+            return
 
     try:
         group_member = await context.bot.get_chat_member(update.effective_chat.id, user_id)

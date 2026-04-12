@@ -20,6 +20,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from group.grouplist import load_users, save_users
 
 from command_router import (
     FEATURE_WELCOME,
@@ -275,6 +276,18 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
 
         await context.bot.approve_chat_join_request(chat_id=chat_id, user_id=user_id)
+
+        users = load_users(chat_id)
+        uid = str(user_id)
+        existing = users.get(uid, {}) if isinstance(users.get(uid, {}), dict) else {}
+        users[uid] = {
+            "full_name": query.from_user.full_name,
+            "username": query.from_user.username,
+            "username_history": existing.get("username_history", []),
+            "join_time": int(time.time()),
+            "last_seen": int(time.time()),
+        }
+        save_users(chat_id, users)
 
         await query.edit_message_text("✅ 已批准入群")
 

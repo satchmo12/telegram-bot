@@ -52,6 +52,8 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "active_speak_interval_min": 120,
             "points_lottery_enabled": False,
             "points_lottery_cost": 100,
+            "force_subscribe_new_only": True,
+            "force_subscribe_set_ts": 0,
             "talk_points_enabled": False,
             "talk_points_amount": 1,
             "talk_points_daily_limit": 20,
@@ -89,6 +91,12 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             changed = True
         if "active_speak_interval_min" not in group:
             group["active_speak_interval_min"] = 120
+            changed = True
+        if "force_subscribe_new_only" not in group:
+            group["force_subscribe_new_only"] = True
+            changed = True
+        if "force_subscribe_set_ts" not in group:
+            group["force_subscribe_set_ts"] = 0
             changed = True
         if "points_lottery_enabled" not in group:
             group["points_lottery_enabled"] = False

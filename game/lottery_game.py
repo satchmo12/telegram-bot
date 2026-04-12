@@ -47,13 +47,14 @@ def _format_panel(chat_id: str, cfg: dict) -> str:
         "",
         "🎁 奖池：",
     ]
-    if prizes:
-        for prize in prizes:
-            lines.append(
-                f"- {escape(str(prize.get('name', '未命名')))} | 概率 {int(prize.get('rate', 0) or 0)} | 数量 {int(prize.get('stock', 0) or 0)}"
-            )
-    else:
-        lines.append("- 暂无奖品")
+    # if prizes:
+    #     for prize in prizes:
+    #         lines.append(
+    #             f"- {escape(str(prize.get('name', '未命名')))} | 概率 {int(prize.get('rate', 0) or 0)} | 数量 {int(prize.get('stock', 0) or 0)}"
+    #         )
+    # else:
+    #     lines.append("- 暂无奖品")
+    
     lines.append("")
     lines.append("🏆 最近中奖：")
     if recent:
@@ -99,7 +100,7 @@ def _format_user_wins(chat_id: str, user_id: int) -> str:
     return "\n".join(lines)
 
 
-@register_command("积分抽奖")
+@register_command("抽奖", "积分抽奖")
 async def points_lottery_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_chat:
         return

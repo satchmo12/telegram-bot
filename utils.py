@@ -113,6 +113,9 @@ BOT_OWNER_MAP = {}
 
 SHARED_SESSION_NAME = "main"
 
+ALLOWED_ADMINS = {
+    "-1003648060909": [6247279560],  # 允许的管理员 user_id
+}
 
 def set_runtime_bot_name(bot_name: str):
     BOT_RUNTIME_NAME.set((bot_name or "").strip())
@@ -320,8 +323,8 @@ def save_json(path: str, data):
     path = _resolve_json_path(path)
     with _cache_lock:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        use_pretty_indent = not str(path).replace("\\", "/").endswith(
-            "learned_pairs.json"
+        use_pretty_indent = (
+            not str(path).replace("\\", "/").endswith("learned_pairs.json")
         )
         with open(path, "w", encoding="utf-8") as f:
             json.dump(
@@ -490,6 +493,8 @@ def get_group_whitelist(context: ContextTypes.DEFAULT_TYPE = None) -> dict:
             "active_speak_interval_min": 120,
             "points_lottery_enabled": False,
             "points_lottery_cost": 100,
+            "force_subscribe_new_only": True,
+            "force_subscribe_set_ts": 0,
             "talk_points_enabled": False,
             "talk_points_amount": 1,
             "talk_points_daily_limit": 20,
@@ -619,6 +624,9 @@ async def delete_later(msg: Message, delay: int):
     except asyncio.CancelledError:
         pass
     except Exception as e:
+        msg_text = str(e).lower()
+        if "message to delete not found" in msg_text:
+            return
         print("[Warning] 删除消息失败：", e)
 
 
@@ -667,6 +675,36 @@ async def is_admin(update, context):
     admin_ids = await get_admin_ids(update.effective_chat.id, context)
     return user_id in admin_ids
 
+
+@group_allowed
+async def is_owner(update, context):
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    member = await context.bot.get_chat_member(chat_id, user_id)
+    return member.status == "creator"
+
+# 可以操作的人
+async def can_use_command(context, user_id, chat_id):
+    # ⭐ 超级管理员
+    if user_id in SUPER_ADMINS:
+        return True
+
+    try:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+    except Exception:
+        return False
+
+    # 👑 群主
+    if member.status == "creator":
+        return True
+
+    # 🛡 在白名单里的管理员
+    if member.status == "administrator":
+        allowed = ALLOWED_ADMINS.get(str(chat_id), [])
+        return user_id in allowed
+
+    return False
 
 def format_duration(seconds):
     hours = seconds // 3600
