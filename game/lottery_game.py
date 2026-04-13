@@ -16,7 +16,6 @@ from info.economy import get_points
 from utils import get_group_whitelist, safe_reply
 
 CALLBACK_PREFIX = "plot"
-USER_WINS_RESPONDED = set()
 
 
 def _lottery_keyboard(chat_id: str) -> InlineKeyboardMarkup:
@@ -47,20 +46,16 @@ def _format_panel(chat_id: str, cfg: dict) -> str:
         "",
         "🎁 奖池：",
     ]
-    # if prizes:
-    #     for prize in prizes:
-    #         lines.append(
-    #             f"- {escape(str(prize.get('name', '未命名')))} | 概率 {int(prize.get('rate', 0) or 0)} | 数量 {int(prize.get('stock', 0) or 0)}"
-    #         )
-    # else:
-    #     lines.append("- 暂无奖品")
+    lines.append(f"- {escape(str(lottery_cfg.get('display_text', '') or '奖池丰厚，祝您好运。'))}")
     
     lines.append("")
     lines.append("🏆 最近中奖：")
     if recent:
         for item in recent[-10:]:
+            ts = int(item.get("ts", 0) or 0)
+            when = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M") if ts else "--"
             lines.append(
-                f"- {escape(str(item.get('user_name', '未知用户')))} 抽中 {escape(str(item.get('prize_name', '未知奖品')))}"
+                f"- {escape(str(item.get('user_name', '未知用户')))} 抽中 {escape(str(item.get('prize_name', '未知奖品')))} | {when}"
             )
     else:
         lines.append("- 暂无记录")
@@ -129,13 +124,9 @@ async def points_lottery_callback(update: Update, context: ContextTypes.DEFAULT_
     cfg = get_group_whitelist(context).get(chat_id, {})
 
     if action == "my":
-        response_key = (chat_id, int(query.from_user.id))
         user_wins_text = _format_user_wins(chat_id, query.from_user.id)
         if not user_wins_text:
             return await query.answer("🎁 你还没有中奖记录。", show_alert=False)
-        if response_key in USER_WINS_RESPONDED:
-            return await query.answer("🎁 你的中奖记录已经显示过了。", show_alert=False)
-        USER_WINS_RESPONDED.add(response_key)
         await query.answer()
         return await query.message.reply_text(
             user_wins_text,

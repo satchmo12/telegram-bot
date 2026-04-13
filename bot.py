@@ -156,6 +156,7 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
     bind_runtime_bot_context(context)
     user = update.effective_user
     chat = update.effective_chat
+    
     _debug_private_forward(
         f"[private_forward_router] bot={context.application.bot_data.get('name')} "
         f"chat_type={getattr(chat, 'type', None)} "
@@ -481,17 +482,16 @@ def create_app(bot_cfg: dict):
         write_startup_debug(f"[create_app] register private_forward handlers bot={bot_name}")
         app.add_handler(
             MessageHandler(
-                filters.ChatType.PRIVATE & filters.REPLY & ~filters.COMMAND,
+                filters.ChatType.PRIVATE & ~filters.COMMAND,
                 owner_reply_router,
             ),
-            group=0,
         )
+        
         app.add_handler(
             MessageHandler(
-                filters.ChatType.PRIVATE & ~filters.REPLY & ~filters.COMMAND,
+                filters.ChatType.PRIVATE & ~filters.COMMAND,
                 private_forward_router,
             ),
-            group=0,
         )
 
         app.add_handler(

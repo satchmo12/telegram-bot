@@ -52,6 +52,7 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "active_speak_interval_min": 120,
             "points_lottery_enabled": False,
             "points_lottery_cost": 100,
+            "points_lottery_display_text": "奖池丰厚，祝您好运。",
             "force_subscribe_new_only": True,
             "force_subscribe_set_ts": 0,
             "talk_points_enabled": False,
@@ -103,6 +104,9 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             changed = True
         if "points_lottery_cost" not in group:
             group["points_lottery_cost"] = 100
+            changed = True
+        if "points_lottery_display_text" not in group:
+            group["points_lottery_display_text"] = "奖池丰厚，祝您好运。"
             changed = True
         if "talk_points_enabled" not in group:
             group["talk_points_enabled"] = False

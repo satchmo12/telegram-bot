@@ -48,9 +48,6 @@ from channel.channel_force import unmute_force_subscribe_chat
 CALLBACK_PREFIX = "gcfg"
 FORCE_SUBSCRIBE_FILE = "config_data/force_subscribe.json"
 TOGGLE_FIELDS = [
-    ("points_lottery_enabled", "积分抽奖"),
-    ("talk_points_enabled", "发言积分"),
-    ("invite_points_enabled", "邀请积分"),
     ("reply_enabled", "开启回复"),
     ("verify", "身份验证"),
     ("welcome", "入群欢迎"),
@@ -67,6 +64,12 @@ TOGGLE_FIELDS = [
     ("name_change_notice", "用户名变更提示"),
     ("recommend", "群推荐"),
 ]
+LOTTERY_TOGGLE_FIELDS = [
+    ("points_lottery_enabled", "积分抽奖"),
+    ("talk_points_enabled", "发言积分"),
+    ("invite_points_enabled", "邀请积分"),
+]
+LOTTERY_TOGGLE_KEYS = {item[0] for item in LOTTERY_TOGGLE_FIELDS}
 BOT_ADMIN_REQUIRED_FIELDS = {"verify", "ad_filter", "spam_limit", "force_subscribe"}
 ACTIVE_SPEAK_MIN_INTERVAL = 1
 ACTIVE_SPEAK_MAX_INTERVAL = 1440
@@ -154,8 +157,14 @@ def _normalize_business_coop_link(raw: str) -> str:
 
 
 def _build_lottery_prizes_text(chat_id: str) -> str:
+    cfg = get_group_whitelist(None).get(chat_id, {})
+    lottery_cfg = get_points_lottery_config(cfg if isinstance(cfg, dict) else {})
     prizes = list_points_lottery_prizes(chat_id)
-    prize_lines = ["🎁 当前奖池："]
+    prize_lines = [
+        "🎁 当前奖池：",
+        f"抽奖显示文案：{html.escape(str(lottery_cfg.get('display_text', '') or '奖池丰厚，祝您好运。'))}",
+        "",
+    ]
     if prizes:
         for idx, prize in enumerate(prizes, start=1):
             prize_lines.append(
@@ -168,12 +177,81 @@ def _build_lottery_prizes_text(chat_id: str) -> str:
 
 def _build_lottery_prizes_keyboard(chat_id: str) -> InlineKeyboardMarkup:
     rows = [
+        [InlineKeyboardButton("📝 抽奖显示文案", callback_data=f"{CALLBACK_PREFIX}:lottery_display_text:{chat_id}")],
         [InlineKeyboardButton("➕ 添加奖品", callback_data=f"{CALLBACK_PREFIX}:lottery_prize_add:{chat_id}")],
         [InlineKeyboardButton("✏️ 修改奖品", callback_data=f"{CALLBACK_PREFIX}:lottery_prize_edit_menu:{chat_id}")],
         [InlineKeyboardButton("🗑 删除奖品", callback_data=f"{CALLBACK_PREFIX}:lottery_prize_delete_menu:{chat_id}")],
         [InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:lottery_back:{chat_id}")],
     ]
     return InlineKeyboardMarkup(rows)
+
+
+def _build_lottery_settings_text(chat_id: str, cfg: dict) -> str:
+    talk_points = get_talk_points_config(cfg)
+    invite_points = get_invite_points_config(cfg)
+    lottery_cfg = get_points_lottery_config(cfg)
+    prize_count = len(list_points_lottery_prizes(chat_id))
+    lines = [
+        "🎰 积分抽奖设置",
+        f"积分抽奖：{_toggle_text(bool(cfg.get('points_lottery_enabled', False)))}",
+        f"发言积分：{_toggle_text(bool(cfg.get('talk_points_enabled', False)))}",
+        f"邀请积分：{_toggle_text(bool(cfg.get('invite_points_enabled', False)))}",
+        f"抽奖积分：单次 {lottery_cfg['cost']} 分",
+        f"奖池设置：{prize_count} 个奖品",
+        f"抽奖显示文案：{html.escape(str(lottery_cfg.get('display_text', '') or '奖池丰厚，祝您好运。'))}",
+        f"发言积分规则：每次 {talk_points['amount']} 分 每日上限 {talk_points['daily_limit']} 分 最小字数 {talk_points['min_length']}",
+        f"邀请积分规则：每邀请 1 人 {invite_points['amount']} 分 每日上限 {invite_points['daily_limit']} 分",
+    ]
+    return "\n".join(lines)
+
+
+def _build_lottery_settings_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardMarkup:
+    rows = []
+    toggle_buttons = []
+    for key, label in LOTTERY_TOGGLE_FIELDS:
+        is_on = bool(cfg.get(key, False))
+        toggle_buttons.append(
+            InlineKeyboardButton(
+                text=f"{'✅' if is_on else '🚫'} {label}",
+                callback_data=f"{CALLBACK_PREFIX}:toggle:{chat_id}:{key}",
+            )
+        )
+    for i in range(0, len(toggle_buttons), 2):
+        rows.append(toggle_buttons[i : i + 2])
+
+    rows.append(
+        [
+            InlineKeyboardButton("🎰 抽奖积分", callback_data=f"{CALLBACK_PREFIX}:lottery_cost:{chat_id}"),
+            InlineKeyboardButton("🎁 奖池设置", callback_data=f"{CALLBACK_PREFIX}:lottery_prizes:{chat_id}"),
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton("💬 发言积分规则", callback_data=f"{CALLBACK_PREFIX}:talk_points:{chat_id}"),
+            InlineKeyboardButton("👥 邀请积分规则", callback_data=f"{CALLBACK_PREFIX}:invite_points:{chat_id}"),
+        ]
+    )
+    rows.append([InlineKeyboardButton("💬 清空积分", callback_data=f"{CALLBACK_PREFIX}:clean_point:{chat_id}")])
+    rows.append([InlineKeyboardButton("⬅️ 返回群设置", callback_data=f"{CALLBACK_PREFIX}:open:{chat_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _open_lottery_settings_panel(query, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str, user_id: int):
+    chat_id = _parse_chat_id(chat_id_str)
+    if chat_id is None:
+        return
+    if not await _can_manage_group(context, user_id, chat_id):
+        return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+    data = get_group_whitelist(context)
+    cfg = data.get(chat_id_str, {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    return await query.edit_message_text(
+        _build_lottery_settings_text(chat_id_str, cfg),
+        reply_markup=_build_lottery_settings_keyboard(chat_id_str, cfg),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
 
 
 def _build_group_list_keyboard(
@@ -252,8 +330,16 @@ def _build_group_panel_text(chat_id: str, cfg: dict, *, bot_is_admin: bool = Fal
         f"🤖 机器人管理员：{'✅ 是' if bot_is_admin else '🚫 否'}",
         "",
     ]
-    for key, label in _visible_toggle_fields(bot_is_admin):
-        lines.append(f"{label}：{_toggle_text(bool(cfg.get(key, False)))}")
+    enabled_toggles = [
+        (key, label)
+        for key, label in _visible_toggle_fields(bot_is_admin)
+        if bool(cfg.get(key, False))
+    ]
+    if enabled_toggles:
+        lines.append("已开启功能：")
+        for _, label in enabled_toggles:
+            lines.append(f"- {label}")
+        lines.append("")
     if bot_is_admin:
         lines.append(f"限频条数：{spam_limit_value} 条/分钟")
     lines.append(f"曝光度：{int(cfg.get('exposure', 0))}")
@@ -261,6 +347,7 @@ def _build_group_panel_text(chat_id: str, cfg: dict, *, bot_is_admin: bool = Fal
     lines.append(
         f"积分抽奖：{'✅ 开启' if lottery_cfg['enabled'] else '🚫 关闭'} 单次消耗 {lottery_cfg['cost']} 分 奖品数 {prize_count}"
     )
+    lines.append(f"抽奖显示文案：{html.escape(str(lottery_cfg.get('display_text', '') or '奖池丰厚，祝您好运。'))}")
     lines.append(
         f"发言积分规则：每次 {talk_points['amount']} 分 每日上限 {talk_points['daily_limit']} 分 最小字数 {talk_points['min_length']}"
     )
@@ -399,40 +486,9 @@ def _build_group_panel_keyboard(
         len(rows) - 1,
         [
             InlineKeyboardButton(
-                "🎰 抽奖积分",
-                callback_data=f"{CALLBACK_PREFIX}:lottery_cost:{chat_id}",
+                "🎰 积分抽奖设置",
+                callback_data=f"{CALLBACK_PREFIX}:lottery_menu:{chat_id}",
             ),
-            InlineKeyboardButton(
-                "🎁 奖池设置",
-                callback_data=f"{CALLBACK_PREFIX}:lottery_prizes:{chat_id}",
-            ),
-        ],
-    )
-    rows.insert(
-        len(rows) - 1,
-        [
-            InlineKeyboardButton(
-                "💬 发言积分规则",
-                callback_data=f"{CALLBACK_PREFIX}:talk_points:{chat_id}",
-            ),
-            InlineKeyboardButton(
-                "👥 邀请积分规则",
-                callback_data=f"{CALLBACK_PREFIX}:invite_points:{chat_id}",
-            ),
-        ],
-    )
-    
-    rows.insert(
-        len(rows) - 1,
-        [
-            InlineKeyboardButton(
-                "💬 清空积分",
-                callback_data=f"{CALLBACK_PREFIX}:clean_point:{chat_id}",
-            ),
-            # InlineKeyboardButton(
-            #     "👥 邀请积分规则",
-            #     callback_data=f"{CALLBACK_PREFIX}:invite_points:{chat_id}",
-            # ),
         ],
     )
     return InlineKeyboardMarkup(rows)
@@ -935,7 +991,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         cfg = data.get(chat_id_str, {})
         if not isinstance(cfg, dict):
             cfg = {}
-        if feature_key in {item[0] for item in TOGGLE_FIELDS}:
+        if feature_key in ({item[0] for item in TOGGLE_FIELDS} | LOTTERY_TOGGLE_KEYS):
             new_value = not bool(cfg.get(feature_key, False))
             cfg[feature_key] = new_value
             if feature_key == "force_subscribe" and new_value:
@@ -944,7 +1000,15 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             save_json(GROUP_LIST_FILE, data)
             if feature_key == "force_subscribe" and not new_value:
                 await unmute_force_subscribe_chat(context, chat_id_str)
+        if feature_key in LOTTERY_TOGGLE_KEYS:
+            await query.answer("✅ 已更新", show_alert=False)
+            return await _open_lottery_settings_panel(query, context, chat_id_str, user_id)
         return await _open_group_panel(query, context, chat_id_str, user_id)
+
+    if action == "lottery_menu" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        await query.answer()
+        return await _open_lottery_settings_panel(query, context, chat_id_str, user_id)
 
     if action == "force_channel" and len(parts) >= 3:
         chat_id_str = parts[2]
@@ -1041,7 +1105,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
         context.user_data["group_setting_chat_id"] = chat_id_str
         back_markup = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:points_back")]]
+            [[InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:lottery_menu:{chat_id_str}")]]
         )
         if action == "talk_points":
             cfg = data.get(chat_id_str, {})
@@ -1092,7 +1156,29 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                 f"范围：{LOTTERY_COST_MIN}-{LOTTERY_COST_MAX}"
             ),
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:lottery_back")]]
+                [[InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:lottery_menu:{chat_id_str}")]]
+            ),
+        )
+    if action == "lottery_display_text" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        context.user_data["group_setting_stage"] = "lottery_display_text"
+        context.user_data["group_setting_chat_id"] = chat_id_str
+        cfg = data.get(chat_id_str, {})
+        lottery_cfg = get_points_lottery_config(cfg if isinstance(cfg, dict) else {})
+        await query.answer()
+        return await query.edit_message_text(
+            (
+                "请输入抽奖显示文案。\n"
+                f"当前：{lottery_cfg['display_text']}\n"
+                "发送“默认”可恢复默认文案。"
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:lottery_prizes:{chat_id_str}")]]
             ),
         )
     if action == "lottery_prizes" and len(parts) >= 3:
@@ -1201,7 +1287,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         chat_id_str = context.user_data.pop("group_setting_chat_id", None)
         await query.answer()
         if chat_id_str:
-            return await _open_group_panel(query, context, chat_id_str, user_id)
+            return await _open_lottery_settings_panel(query, context, chat_id_str, user_id)
         return
     if action == "lottery_back":
         context.user_data.pop("group_setting_stage", None)
@@ -1210,7 +1296,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer()
         if chat_id_str:
             context.user_data["group_setting_chat_id"] = chat_id_str
-            return await _open_group_panel(query, context, chat_id_str, user_id)
+            return await _open_lottery_settings_panel(query, context, chat_id_str, user_id)
         return
     if action == "force_channel_clear" and len(parts) >= 3:
         chat_id_str = parts[2]
@@ -1334,7 +1420,7 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
     if update.effective_chat.type != "private":
         return
     stage = context.user_data.get("group_setting_stage")
-    if stage not in {"force_channel", "ad_text", "ad_interval", "ad_times", "ad_mode", "business_coop", "talk_points", "invite_points", "lottery_cost", "lottery_prize_add", "lottery_prize_edit"}:
+    if stage not in {"force_channel", "ad_text", "ad_interval", "ad_times", "ad_mode", "business_coop", "talk_points", "invite_points", "lottery_cost", "lottery_display_text", "lottery_prize_add", "lottery_prize_edit"}:
         return
 
     chat_id_str = context.user_data.get("group_setting_chat_id")
@@ -1468,6 +1554,13 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
                 )
             cfg["points_lottery_cost"] = cost
             await update.message.reply_text(f"✅ 已设置单次抽奖积分：{cost}")
+        elif stage == "lottery_display_text":
+            if text in {"默认", "恢复默认"}:
+                cfg["points_lottery_display_text"] = "奖池丰厚，祝您好运。"
+                await update.message.reply_text("✅ 已恢复默认抽奖显示文案。")
+            else:
+                cfg["points_lottery_display_text"] = text
+                await update.message.reply_text("✅ 抽奖显示文案已保存。")
         elif stage in {"lottery_prize_add", "lottery_prize_edit"}:
             parts = [p.strip() for p in text.replace("｜", "|").split("|")]
             if len(parts) != 3:

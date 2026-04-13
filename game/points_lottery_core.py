@@ -14,6 +14,7 @@ PRIZE_STOCK_MIN = 0
 PRIZE_STOCK_MAX = 999999
 LOTTERY_COST_MIN = 1
 LOTTERY_COST_MAX = 999999
+DEFAULT_LOTTERY_DISPLAY_TEXT = "奖池丰厚，祝您好运。"
 
 
 def _normalize_int(value, default: int, min_value: int, max_value: int) -> int:
@@ -29,6 +30,11 @@ def get_points_lottery_config(cfg: dict) -> dict:
     return {
         "enabled": bool(cfg.get("points_lottery_enabled", False)),
         "cost": _normalize_int(cfg.get("points_lottery_cost", 100), 100, LOTTERY_COST_MIN, LOTTERY_COST_MAX),
+        "display_text": str(
+            cfg.get("points_lottery_display_text", DEFAULT_LOTTERY_DISPLAY_TEXT)
+            or DEFAULT_LOTTERY_DISPLAY_TEXT
+        ).strip()
+        or DEFAULT_LOTTERY_DISPLAY_TEXT,
     }
 
 

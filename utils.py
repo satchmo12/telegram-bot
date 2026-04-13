@@ -493,6 +493,7 @@ def get_group_whitelist(context: ContextTypes.DEFAULT_TYPE = None) -> dict:
             "active_speak_interval_min": 120,
             "points_lottery_enabled": False,
             "points_lottery_cost": 100,
+            "points_lottery_display_text": "奖池丰厚，祝您好运。",
             "force_subscribe_new_only": True,
             "force_subscribe_set_ts": 0,
             "talk_points_enabled": False,
