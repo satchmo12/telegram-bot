@@ -371,6 +371,10 @@ async def command_voice_to_text(update: Update, context: ContextTypes.DEFAULT_TY
                 os.remove(f)
 
 
+async def ignore_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return None
+
+
 # =========================
 # HANDLERS
 # =========================
@@ -390,5 +394,5 @@ def register_voice_handlers(application):
     application.add_handler(CommandHandler("showvoice", show_voice_config))
     # 语音识别（保留）
     application.add_handler(
-        MessageHandler(filters.VOICE | filters.AUDIO, lambda u, c: None)
+        MessageHandler(filters.VOICE | filters.AUDIO, ignore_voice_message)
     )

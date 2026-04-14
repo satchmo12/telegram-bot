@@ -3,8 +3,6 @@ from registries.economy_registry import register_economy_handlers_group
 from registries.entertainment_registry import register_entertainment_handlers
 from registries.group_registry import register_group_handlers
 from registries.simulation_registry import register_simulation_handlers
-from voice.record_voice import register_record_voice
-
 
 def register_all_handlers(app):
     register_multi_bot_manager_handlers(app)
@@ -12,4 +10,4 @@ def register_all_handlers(app):
     register_entertainment_handlers(app)
     register_simulation_handlers(app)
     register_group_handlers(app)
-    register_record_voice(app)
+

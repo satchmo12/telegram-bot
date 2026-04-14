@@ -7,6 +7,48 @@ from utils import load_json, save_json, INVITE_BOT_USERS_FILE
 
 GROUPS_FILE = "data/groups.json"
 
+
+def update_bot_group_presence(
+    chat,
+    *,
+    in_group: bool,
+    bot_muted: bool = False,
+) -> bool:
+    if not chat or chat.type not in ["group", "supergroup"]:
+        return False
+
+    groups = load_json(GROUPS_FILE) or {}
+    if not isinstance(groups, dict):
+        groups = {}
+
+    chat_id_str = str(chat.id)
+    cfg = groups.get(chat_id_str, {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    changed = False
+    if cfg.get("title", "") != (chat.title or ""):
+        cfg["title"] = chat.title or ""
+        changed = True
+    if cfg.get("username", "") != (chat.username or ""):
+        cfg["username"] = chat.username or ""
+        changed = True
+    if cfg.get("type", "") != chat.type:
+        cfg["type"] = chat.type
+        changed = True
+    if bool(cfg.get("bot_in_group", False)) != bool(in_group):
+        cfg["bot_in_group"] = bool(in_group)
+        changed = True
+    if bool(cfg.get("bot_muted", False)) != bool(bot_muted):
+        cfg["bot_muted"] = bool(bot_muted)
+        changed = True
+
+    if changed:
+        groups[chat_id_str] = cfg
+        save_json(GROUPS_FILE, groups)
+
+    return changed
+
 async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -228,29 +270,10 @@ async def track_bot_group_membership(
     groups = load_json(GROUPS_FILE) or {}
     if not isinstance(groups, dict):
         groups = {}
-
     chat_id_str = str(chat.id)
-    cfg = groups.get(chat_id_str, {})
-    if not isinstance(cfg, dict):
-        cfg = {}
+    prev_cfg = groups.get(chat_id_str, {})
+    prev_type = prev_cfg.get("type", "") if isinstance(prev_cfg, dict) else ""
 
-    changed = False
-    if cfg.get("title", "") != (chat.title or ""):
-        cfg["title"] = chat.title or ""
-        changed = True
-    if cfg.get("username", "") != (chat.username or ""):
-        cfg["username"] = chat.username or ""
-        changed = True
-    prev_type = cfg.get("type", "")
-    if prev_type != chat.type:
-        cfg["type"] = chat.type
-        changed = True
-    if bool(cfg.get("bot_in_group", True)) != in_group:
-        cfg["bot_in_group"] = in_group
-        changed = True
-    if bool(cfg.get("bot_muted", False)) != bot_muted:
-        cfg["bot_muted"] = bot_muted
-        changed = True
     if in_group and not was_in_group and chat.type == "supergroup":
         inviter = getattr(update.my_chat_member, "from_user", None)
         _reward_inviter(chat.id, inviter)
@@ -259,9 +282,8 @@ async def track_bot_group_membership(
         inviter = getattr(update.my_chat_member, "from_user", None)
         _reward_inviter(chat.id, inviter)
 
+    changed = update_bot_group_presence(chat, in_group=in_group, bot_muted=bot_muted)
     if changed:
-        groups[chat_id_str] = cfg
-        save_json(GROUPS_FILE, groups)
         print(f"🤖 机器人群状态变更: {chat.title}({chat.id}) -> bot_in_group={in_group}")
 
 

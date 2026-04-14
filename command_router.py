@@ -65,7 +65,6 @@ def _feature_for_handler(handler) -> Optional[str]:
         ("game.voice_reply", "entertainment"),
         ("game.answer_book", "entertainment"),
         ("group.admin", "group"),
-        ("group.group_setting", "group"),
         ("group.invite_stats", "group"),
         ("group.verify", "group"),
         ("group.talk_stats", "group"),
