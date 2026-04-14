@@ -22,6 +22,14 @@ except ModuleNotFoundError:
 
 whisper_model = None
 
+
+def _get_whisper_model():
+    global whisper_model
+    if whisper_model is None:
+        whisper_model = whisper.load_model("base")  # 可改 tiny / small / medium
+    return whisper_model
+
+
 CONFIG_PATH = "config_data/group_tts_config.json"
 VOICE_STATE = {}
 
@@ -257,6 +265,57 @@ async def voice_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
 
+async def voice_select_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data  # voice_女 / voice_男 ...
+    chat_id = str(query.message.chat.id)
+
+    voice = data.replace("voice_", "")
+
+    # 临时存状态
+    VOICE_STATE[chat_id] = {"voice": voice}
+
+    await query.edit_message_text(
+        "🎚 请选择语速：",
+        reply_markup=speed_menu(chat_id),
+    )
+
+
+async def speed_select_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data  # s_慢 / s_快 / s_默认 / s_很快
+    chat_id = str(query.message.chat.id)
+
+    parts = data.split("_", 1)
+    speed = parts[1]
+
+    state = VOICE_STATE.get(chat_id)
+
+    if not state:
+        await query.edit_message_text("❌ 状态失效，请重新 /setvoice")
+        return
+
+    config = load_config()
+
+    config[chat_id] = {
+        "voice": VOICE_MAP[state["voice"]],
+        "rate": RATE_MAP[speed],
+        "pitch": PITCH_MAP["默认"],
+    }
+
+    save_config(config)
+
+    VOICE_STATE.pop(chat_id, None)
+
+    await query.edit_message_text(
+        f"✅ 设置成功：\n声音：{state['voice']}\n语速：{speed}"
+    )
+
+
 @register_command("声音配置")
 async def show_voice_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
@@ -271,6 +330,47 @@ async def show_voice_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+@register_command("语音识别")
+async def command_voice_to_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not update.message.reply_to_message:
+        await update.message.reply_text("⚠️ 请回复一条语音再使用该命令")
+        return
+
+    replied_msg = update.message.reply_to_message
+    voice = replied_msg.voice or replied_msg.audio
+
+    if not voice:
+        await update.message.reply_text("⚠️ 你回复的不是语音消息")
+        return
+
+    await update.message.reply_text("🎧 正在识别中...")
+
+    file = await context.bot.get_file(voice.file_id)
+
+    ogg_path = _bot_temp_path(context, "reply_voice_in", "ogg", voice.file_id)
+    await file.download_to_drive(ogg_path)
+
+    wav_path = _bot_temp_path(context, "reply_voice_in", "wav", voice.file_id)
+
+    os.system(f'ffmpeg -y -i "{ogg_path}" -ar 16000 -ac 1 "{wav_path}"')
+
+    try:
+        model = _get_whisper_model()
+        result = model.transcribe(wav_path, language="zh")
+        text = result["text"]
+
+        await safe_reply(update, context, f"📝 识别结果：\n{text}")
+
+    except Exception as e:
+        await safe_reply(update, context, f"❌ 识别失败：{e}")
+
+    finally:
+        for f in [ogg_path, wav_path]:
+            if os.path.exists(f):
+                os.remove(f)
+
+
 # =========================
 # HANDLERS
 # =========================
@@ -281,7 +381,11 @@ def register_voice_handlers(application):
     application.add_handler(CommandHandler("setvoice", voice_menu))
 
     # ❗必须无 pattern
-    application.add_handler(CallbackQueryHandler(voice_button_handler))
+    application.add_handler(
+        CallbackQueryHandler(voice_select_handler, pattern=r"^voice_")
+    )
+
+    application.add_handler(CallbackQueryHandler(speed_select_handler, pattern=r"^s_"))
 
     application.add_handler(CommandHandler("showvoice", show_voice_config))
     # 语音识别（保留）
