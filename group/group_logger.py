@@ -72,6 +72,7 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "username": username,
             "type": chat.type,
             "enabled": True,
+            "bot_enabled": True,
             "bot_in_group": True,
             "bot_muted": False,
             "recommend": False,
@@ -90,12 +91,13 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "welcome": False,
             "learning_enabled": True,   # 默认启用学习
             "reply_enabled": False,     # 默认不自动回复
+            "voice_reply_enabled": False,
             "active_speak_enabled": False,  # 默认不主动说话
             "active_speak_interval_min": 120,
             "points_lottery_enabled": False,
             "points_lottery_cost": 100,
             "points_lottery_display_text": "奖池丰厚，祝您好运。",
-            "force_subscribe_new_only": True,
+            "force_subscribe_new_only": False,
             "force_subscribe_set_ts": 0,
             "talk_points_enabled": False,
             "talk_points_amount": 1,
@@ -126,8 +128,14 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "learning_enabled" not in group:
             group["learning_enabled"] = True
             changed = True
+        if "bot_enabled" not in group:
+            group["bot_enabled"] = True
+            changed = True
         if "reply_enabled" not in group:
             group["reply_enabled"] = False
+            changed = True
+        if "voice_reply_enabled" not in group:
+            group["voice_reply_enabled"] = False
             changed = True
         if "active_speak_enabled" not in group:
             group["active_speak_enabled"] = False
@@ -136,7 +144,7 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             group["active_speak_interval_min"] = 120
             changed = True
         if "force_subscribe_new_only" not in group:
-            group["force_subscribe_new_only"] = True
+            group["force_subscribe_new_only"] = False
             changed = True
         if "force_subscribe_set_ts" not in group:
             group["force_subscribe_set_ts"] = 0

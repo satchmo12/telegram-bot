@@ -472,6 +472,7 @@ def get_group_whitelist(context: ContextTypes.DEFAULT_TYPE = None) -> dict:
 
         defaults = {
             "enabled": True,
+            "bot_enabled": True,
             "bot_in_group": False,
             "recommend": False,
             "exposure": 0,
@@ -489,12 +490,13 @@ def get_group_whitelist(context: ContextTypes.DEFAULT_TYPE = None) -> dict:
             "welcome": False,
             "learning_enabled": True,
             "reply_enabled": False,
+            "voice_reply_enabled": False,
             "active_speak_enabled": False,
             "active_speak_interval_min": 120,
             "points_lottery_enabled": False,
             "points_lottery_cost": 100,
             "points_lottery_display_text": "奖池丰厚，祝您好运。",
-            "force_subscribe_new_only": True,
+            "force_subscribe_new_only": False,
             "force_subscribe_set_ts": 0,
             "talk_points_enabled": False,
             "talk_points_amount": 1,
@@ -530,7 +532,7 @@ def group_allowed(func):
         if not isinstance(group_config, dict):
             return
 
-        if group_config.get("enabled", True):
+        if group_config.get("enabled", True) and group_config.get("bot_enabled", True):
             return await func(update, context)
         else:
             return

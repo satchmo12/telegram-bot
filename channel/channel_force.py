@@ -128,7 +128,7 @@ async def check_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     channel_username = data[chat_id]
-    apply_new_only = bool(group_config.get("force_subscribe_new_only", True))
+    apply_new_only = bool(group_config.get("force_subscribe_new_only", False))
     force_set_ts = int(group_config.get("force_subscribe_set_ts", 0) or 0)
     if apply_new_only and force_set_ts > 0:
         join_time = get_user_join_time(update.effective_chat.id, user_id)

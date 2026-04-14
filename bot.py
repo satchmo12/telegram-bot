@@ -56,6 +56,7 @@ from runtime_bot_manager import (
     unregister_running_app,
 )
 from utils import (
+    get_group_whitelist,
     is_super_admin,
     load_json,
     save_json,
@@ -138,6 +139,19 @@ def bind_runtime_bot_context(context: ContextTypes.DEFAULT_TYPE):
 
 async def runtime_context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bind_runtime_bot_context(context)
+
+
+async def block_disabled_group_messages(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    bind_runtime_bot_context(context)
+    chat = update.effective_chat
+    if not update.message or not chat or chat.type not in {"group", "supergroup"}:
+        return
+
+    cfg = get_group_whitelist(context).get(str(chat.id), {})
+    if isinstance(cfg, dict) and not bool(cfg.get("bot_enabled", True)):
+        raise ApplicationHandlerStop
 
 
 async def owner_reply_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -461,6 +475,10 @@ def create_app(bot_cfg: dict):
     app.bot_data["enabled_features"] = set(bot_cfg.get("enabled_features", []))
     set_bot_owner(bot_name, owner_id)
     app.add_handler(TypeHandler(Update, runtime_context_handler), group=-1000)
+    app.add_handler(
+        MessageHandler(filters.ChatType.GROUPS, block_disabled_group_messages),
+        group=-950,
+    )
 
     # ===== 基础命令 =====
     if bot_name == MASTER_BOT_NAME:

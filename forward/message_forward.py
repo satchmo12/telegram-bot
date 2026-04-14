@@ -312,33 +312,7 @@ async def safe_forward_media(bot, chat_id, msg):
 async def send_to_targets(bot, target_ids: list[int], src):
     for chat_id in target_ids:
         try:
-            if src.sticker:
-                await bot.send_sticker(chat_id, src.sticker.file_id)
-
-            elif src.photo:
-                await bot.send_photo(
-                    chat_id, src.photo[-1].file_id, caption=src.caption
-                )
-
-            elif src.video:
-                await bot.send_video(chat_id, src.video.file_id, caption=src.caption)
-
-            elif src.animation:
-                await bot.send_animation(
-                    chat_id, src.animation.file_id, caption=src.caption
-                )
-
-            elif src.document:
-                await bot.send_document(
-                    chat_id, src.document.file_id, caption=src.caption
-                )
-
-            elif src.text:
-                await bot.send_message(chat_id, src.text)
-
-            else:
-                print(f"⚠️ 不支持的消息类型: {chat_id}")
-                continue
+            await safe_forward_media(bot, chat_id, src)
 
             print(f"✅ 已发送到 {chat_id}")
 

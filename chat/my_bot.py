@@ -1388,6 +1388,8 @@ async def speaking_to(context: ContextTypes.DEFAULT_TYPE):
             continue
         if not cfg.get("enabled", True):
             continue
+        if not cfg.get("bot_enabled", True):
+            continue
         if not cfg.get("bot_in_group", True):
             continue
         if bool(cfg.get("bot_muted", False)):
@@ -1469,6 +1471,8 @@ async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
         if not isinstance(cfg, dict):
             continue
         if not cfg.get("enabled", True):
+            continue
+        if not cfg.get("bot_enabled", True):
             continue
         if not bool(cfg.get(GROUP_KEY_AD_PUSH_ENABLED, False)):
             continue

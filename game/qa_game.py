@@ -13,9 +13,7 @@ from telegram.ext import (
     CallbackQueryHandler,
 )
 from command_router import register_command
-from config import MESSAGE_VOICE
-from game.voice_reply import group_tts_voice, tts_voice_reply
-
+from game.voice_reply import group_tts_voice
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 
 from utils import GROUP_LIST_FILE, QA_FILE, RE_FILE, load_json, safe_reply, save_json
@@ -160,16 +158,18 @@ async def handle_qa_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     thread_id = (
         update.effective_message.message_thread_id if update.effective_message else None
     )
+    groups = load_json(GROUP_LIST_FILE)
+    group_cfg = groups.get(chat_id, {}) if isinstance(groups, dict) else {}
+    voice_reply_enabled = bool(group_cfg.get("voice_reply_enabled", False))
 
     data = load_qa_data()
     group_qa = data.get(chat_id, {})
     match_key = text if text in group_qa else _find_best_match(text, list(group_qa.keys()))
     if match_key:
         context.args = group_qa[match_key]
-        if MESSAGE_VOICE:
-            await tts_voice_reply(update, context)
+        if  voice_reply_enabled:
+            await group_tts_voice(update, context)
         else:
-            # await group_tts_voice(update, context)
             await _send_qa_message(update, context, str(group_qa[match_key]), thread_id)
         return
 

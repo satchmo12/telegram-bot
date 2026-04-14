@@ -48,7 +48,9 @@ from channel.channel_force import unmute_force_subscribe_chat
 CALLBACK_PREFIX = "gcfg"
 FORCE_SUBSCRIBE_FILE = "config_data/force_subscribe.json"
 TOGGLE_FIELDS = [
+    ("bot_enabled", "启用机器人"),
     ("reply_enabled", "开启回复"),
+    ("voice_reply_enabled", "语音回复"),
     ("verify", "身份验证"),
     ("welcome", "入群欢迎"),
     ("silent", "群静默"),
