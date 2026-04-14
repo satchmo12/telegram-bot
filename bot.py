@@ -482,7 +482,7 @@ def create_app(bot_cfg: dict):
         write_startup_debug(f"[create_app] register private_forward handlers bot={bot_name}")
         app.add_handler(
             MessageHandler(
-                filters.ChatType.PRIVATE & ~filters.COMMAND,
+                filters.ChatType.PRIVATE & filters.REPLY & ~filters.COMMAND,
                 owner_reply_router,
             ),
         )
