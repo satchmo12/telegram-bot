@@ -47,6 +47,9 @@ PRIVATE_CONFIG_COMMANDS = {
     "主动说话",
     "频道配置",
     "会员订阅",
+    "讲",
+    "说",
+    "叫",
 }
 
 
@@ -98,7 +101,9 @@ def _build_private_dialog_text(
     state = _get_owner_runtime_state(context)
     current_uid = str(state.get("current_uid") or "")
     total = len(users)
-    total_pages = max(1, (total + PRIVATE_DIALOG_PAGE_SIZE - 1) // PRIVATE_DIALOG_PAGE_SIZE)
+    total_pages = max(
+        1, (total + PRIVATE_DIALOG_PAGE_SIZE - 1) // PRIVATE_DIALOG_PAGE_SIZE
+    )
     page = max(1, min(page, total_pages))
 
     lines = ["🤖 双向机器人模式"]
@@ -106,7 +111,9 @@ def _build_private_dialog_text(
         lines.extend(["", notice])
 
     if current_uid and current_uid in user_data:
-        lines.extend(["", f"当前会话：{_display_user_name(current_uid, user_data[current_uid])}"])
+        lines.extend(
+            ["", f"当前会话：{_display_user_name(current_uid, user_data[current_uid])}"]
+        )
     elif current_uid:
         lines.extend(["", f"当前会话：{current_uid}"])
     else:
@@ -134,7 +141,9 @@ def _build_private_dialog_keyboard(
     users = _sorted_private_users(user_data)
     state = _get_owner_runtime_state(context)
     current_uid = str(state.get("current_uid") or "")
-    total_pages = max(1, (len(users) + PRIVATE_DIALOG_PAGE_SIZE - 1) // PRIVATE_DIALOG_PAGE_SIZE)
+    total_pages = max(
+        1, (len(users) + PRIVATE_DIALOG_PAGE_SIZE - 1) // PRIVATE_DIALOG_PAGE_SIZE
+    )
     page = max(1, min(page, total_pages))
     start = (page - 1) * PRIVATE_DIALOG_PAGE_SIZE
     end = start + PRIVATE_DIALOG_PAGE_SIZE
@@ -157,13 +166,15 @@ def _build_private_dialog_keyboard(
     if page > 1:
         nav_row.append(
             InlineKeyboardButton(
-                "⬅️ 上一页", callback_data=f"{PRIVATE_DIALOG_CALLBACK_PREFIX}:page:{page-1}"
+                "⬅️ 上一页",
+                callback_data=f"{PRIVATE_DIALOG_CALLBACK_PREFIX}:page:{page-1}",
             )
         )
     if page < total_pages:
         nav_row.append(
             InlineKeyboardButton(
-                "➡️ 下一页", callback_data=f"{PRIVATE_DIALOG_CALLBACK_PREFIX}:page:{page+1}"
+                "➡️ 下一页",
+                callback_data=f"{PRIVATE_DIALOG_CALLBACK_PREFIX}:page:{page+1}",
             )
         )
     if nav_row:
@@ -172,9 +183,12 @@ def _build_private_dialog_keyboard(
     rows.append(
         [
             InlineKeyboardButton(
-                "🔄 刷新", callback_data=f"{PRIVATE_DIALOG_CALLBACK_PREFIX}:refresh:{page}"
+                "🔄 刷新",
+                callback_data=f"{PRIVATE_DIALOG_CALLBACK_PREFIX}:refresh:{page}",
             ),
-            InlineKeyboardButton("❌ 退出模式", callback_data=f"{PRIVATE_DIALOG_CALLBACK_PREFIX}:exit"),
+            InlineKeyboardButton(
+                "❌ 退出模式", callback_data=f"{PRIVATE_DIALOG_CALLBACK_PREFIX}:exit"
+            ),
         ]
     )
     return InlineKeyboardMarkup(rows)
@@ -239,7 +253,9 @@ def _save_user_data(data: dict):
     save_json(BOT_USER_FILE, data)
 
 
-def _resolve_target_uid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
+def _resolve_target_uid(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> Optional[str]:
     if update.message and update.message.reply_to_message:
         reply_msg_id = update.message.reply_to_message.message_id
         forward_map = load_forward_map()
@@ -282,16 +298,12 @@ async def safe_forward_media(bot, chat_id, msg):
 
     if msg.location:
         return await bot.send_location(
-            chat_id,
-            msg.location.latitude,
-            msg.location.longitude
+            chat_id, msg.location.latitude, msg.location.longitude
         )
 
     if msg.contact:
         return await bot.send_contact(
-            chat_id,
-            msg.contact.phone_number,
-            msg.contact.first_name
+            chat_id, msg.contact.phone_number, msg.contact.first_name
         )
 
     raise ValueError("不支持的消息类型")
@@ -365,13 +377,17 @@ async def forward_to_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 忽略命令消息
     if update.message.text and update.message.text.startswith("/"):
-        _debug_private_forward(f"[forward_to_owner] skip slash command text={update.message.text!r}")
+        _debug_private_forward(
+            f"[forward_to_owner] skip slash command text={update.message.text!r}"
+        )
         print(f"[private_forward] 忽略：slash 命令 text={update.message.text!r}")
         return
     if update.message.text:
         matched = get_matched_command(update.message.text)
         if matched in PRIVATE_CONFIG_COMMANDS:
-            _debug_private_forward(f"[forward_to_owner] skip private config cmd={matched}")
+            _debug_private_forward(
+                f"[forward_to_owner] skip private config cmd={matched}"
+            )
             print(f"[private_forward] 忽略：命中私聊配置命令 cmd={matched}")
             return
 
@@ -382,7 +398,9 @@ async def forward_to_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=f'来自 <a href="tg://user?id={user.id}">{safe_name}</a> 的消息：',
             parse_mode="HTML",
         )
-        _debug_private_forward(f"[forward_to_owner] owner notice sent owner_id={owner_id}")
+        _debug_private_forward(
+            f"[forward_to_owner] owner notice sent owner_id={owner_id}"
+        )
         print(f"[private_forward] 已发送提示消息给主人 owner_id={owner_id}")
     except Exception as e:
         _debug_private_forward(f"[forward_to_owner] owner notice failed error={e}")
@@ -469,7 +487,9 @@ async def reply_from_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_reply(update, context, f"发送失败: {e}")
 
 
-async def owner_auto_forward_in_dialog(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def owner_auto_forward_in_dialog(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
     if not update.effective_user or update.effective_user.id != get_owner_id(context):
         return
     if not update.effective_chat or update.effective_chat.type != "private":
@@ -489,7 +509,9 @@ async def owner_auto_forward_in_dialog(update: Update, context: ContextTypes.DEF
 
     target_uid = str(state.get("current_uid") or "")
     if not target_uid:
-        await safe_reply(update, context, "当前没有选中的私聊用户，先用面板选择一个用户。")
+        await safe_reply(
+            update, context, "当前没有选中的私聊用户，先用面板选择一个用户。"
+        )
         raise ApplicationHandlerStop
 
     try:
@@ -502,7 +524,9 @@ async def owner_auto_forward_in_dialog(update: Update, context: ContextTypes.DEF
             f"target_uid={target_uid}"
         )
     except Exception as e:
-        _debug_private_forward(f"[dialog_mode] failed target_uid={target_uid} error={e}")
+        _debug_private_forward(
+            f"[dialog_mode] failed target_uid={target_uid} error={e}"
+        )
         await safe_reply(update, context, f"发送失败: {e}")
         raise ApplicationHandlerStop
 
@@ -527,7 +551,9 @@ async def cmd_private_dialog_mode(update: Update, context: ContextTypes.DEFAULT_
     await show_private_dialog_panel(update, context, page=page)
 
 
-async def handle_private_dialog_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_private_dialog_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
     query = update.callback_query
     if not query or not query.data:
         return
@@ -569,9 +595,15 @@ async def handle_private_dialog_callback(update: Update, context: ContextTypes.D
         return await show_private_dialog_panel(update, context, page=page)
 
     if action == "refresh":
-        page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else int(state.get("page") or 1)
+        page = (
+            int(parts[2])
+            if len(parts) > 2 and parts[2].isdigit()
+            else int(state.get("page") or 1)
+        )
         state["page"] = page
-        return await show_private_dialog_panel(update, context, page=page, notice="列表已刷新")
+        return await show_private_dialog_panel(
+            update, context, page=page, notice="列表已刷新"
+        )
 
     if action == "exit":
         state.clear()
@@ -712,7 +744,9 @@ async def cmd_blacklist_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return await safe_reply(update, context, "⚠️ 仅管理员可用")
 
     user_data = _load_user_data()
-    black_users = [(uid, info) for uid, info in user_data.items() if info.get("blocked")]
+    black_users = [
+        (uid, info) for uid, info in user_data.items() if info.get("blocked")
+    ]
     if not black_users:
         return await safe_reply(update, context, "当前黑名单为空。")
 
@@ -757,7 +791,7 @@ async def cmd_export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     with open(file_path, "rb") as f:
         await context.bot.send_document(chat_id=update.effective_chat.id, document=f)
-        
+
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -774,6 +808,7 @@ SELECT_PAGE, TYPING_MESSAGE = range(2)
 page_size = 10  # 每页显示用户数量
 selected_users = {}  # 管理员ID -> set of选中用户ID
 
+
 # 1️⃣ 命令入口：显示用户列表第一页
 @register_command("发送消息用户")
 async def cmd_send_user_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -788,6 +823,7 @@ async def cmd_send_user_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data[SEND_USER_STAGE_KEY] = "selecting"
     return await show_user_page(update, context, page=1)
 
+
 # 2️⃣ 分页显示用户列表
 async def show_user_page(update: Update, context: ContextTypes.DEFAULT_TYPE, page=1):
     user_data = _load_user_data()
@@ -795,8 +831,10 @@ async def show_user_page(update: Update, context: ContextTypes.DEFAULT_TYPE, pag
     total_pages = (len(user_list) + page_size - 1) // page_size
     if total_pages <= 0:
         total_pages = 1
-    if page < 1: page = 1
-    if page > total_pages: page = total_pages
+    if page < 1:
+        page = 1
+    if page > total_pages:
+        page = total_pages
 
     start = (page - 1) * page_size
     end = start + page_size
@@ -811,14 +849,24 @@ async def show_user_page(update: Update, context: ContextTypes.DEFAULT_TYPE, pag
         username = info.get("username", "")
         display = f"{name} (@{username})" if username else name
         prefix = "✅" if str(uid) in selected_set else ""
-        keyboard.append([InlineKeyboardButton(f"{prefix}{display}", callback_data=f"user_{uid}_page{page}")])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    f"{prefix}{display}", callback_data=f"user_{uid}_page{page}"
+                )
+            ]
+        )
 
     # 翻页按钮
     nav_buttons = []
     if page > 1:
-        nav_buttons.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"page_{page-1}"))
+        nav_buttons.append(
+            InlineKeyboardButton("⬅️ 上一页", callback_data=f"page_{page-1}")
+        )
     if page < total_pages:
-        nav_buttons.append(InlineKeyboardButton("下一页 ➡️", callback_data=f"page_{page+1}"))
+        nav_buttons.append(
+            InlineKeyboardButton("下一页 ➡️", callback_data=f"page_{page+1}")
+        )
     if selected_set:
         nav_buttons.append(InlineKeyboardButton("✅ 完成选择", callback_data="done"))
 
@@ -828,12 +876,17 @@ async def show_user_page(update: Update, context: ContextTypes.DEFAULT_TYPE, pag
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     if update.callback_query:
-        await update.callback_query.edit_message_text("请选择要发送消息的用户：", reply_markup=reply_markup)
+        await update.callback_query.edit_message_text(
+            "请选择要发送消息的用户：", reply_markup=reply_markup
+        )
     else:
-        await update.message.reply_text("请选择要发送消息的用户：", reply_markup=reply_markup)
+        await update.message.reply_text(
+            "请选择要发送消息的用户：", reply_markup=reply_markup
+        )
 
     context.user_data[SEND_USER_STAGE_KEY] = "selecting"
     return SELECT_PAGE
+
 
 # 3️⃣ 按钮点击处理
 async def user_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -864,6 +917,7 @@ async def user_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("✅ 已选择用户，请发送消息内容：")
         return TYPING_MESSAGE
 
+
 # 4️⃣ 管理员输入消息 → 发送给选定用户
 async def send_message_to_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get(SEND_USER_STAGE_KEY) != "typing":
@@ -882,10 +936,13 @@ async def send_message_to_users(update: Update, context: ContextTypes.DEFAULT_TY
             print(f"发送失败 {uid}: {e}")
             failed += 1
 
-    await safe_reply(update, context, f"📩 消息已发送完成\n✅ 成功: {success}\n❌ 失败: {failed}")
+    await safe_reply(
+        update, context, f"📩 消息已发送完成\n✅ 成功: {success}\n❌ 失败: {failed}"
+    )
     selected_users.pop(admin_id, None)
     context.user_data.pop(SEND_USER_STAGE_KEY, None)
     return ConversationHandler.END
+
 
 # 5️⃣ 取消操作
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -896,7 +953,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def register_send_user_conv(app):
-    app.add_handler(CallbackQueryHandler(user_page_callback, pattern=r"^(user_|page_|done$)"))
+    app.add_handler(
+        CallbackQueryHandler(user_page_callback, pattern=r"^(user_|page_|done$)")
+    )
     app.add_handler(
         MessageHandler(
             filters.ChatType.PRIVATE & ~filters.COMMAND,
