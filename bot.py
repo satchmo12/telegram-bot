@@ -101,7 +101,7 @@ MASTER_BOT_USERNAME = str(os.getenv("MASTER_BOT_USERNAME", "")).strip().lstrip("
 PRIVATE_FORWARD_SELF_SERVICE_STAGE_KEY = "private_forward_self_service_stage"
 MULTI_BOT_STAGE_KEY = "multi_bot_stage"
 STARTUP_DEBUG_FILE = os.path.join("data", "startup_debug.log")
-
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 def write_startup_debug(message: str) -> None:
     try:
