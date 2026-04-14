@@ -1,5 +1,5 @@
-import os
 import asyncio
+import os
 import uuid
 import edge_tts
 from gtts import gTTS
@@ -11,7 +11,6 @@ from telegram.ext import (
     filters,
     CallbackQueryHandler,
 )
-
 from command_router import register_command
 from utils import load_json, save_json, safe_reply
 
@@ -30,16 +29,42 @@ def _get_whisper_model():
     return whisper_model
 
 
-CONFIG_PATH = "config_data/group_tts_config.json"
-VOICE_STATE = {}
+# =========================
+CONFIG_PATH = "config_data/user_tts_config.json"
+
+# VOICE_MAP = {
+#     "女": "zh-CN-XiaoxiaoNeural",
+#     "男": "zh-CN-YunxiNeural",
+#     "御姐": "zh-CN-XiaoyiNeural",
+#     "播报": "zh-CN-YunjianNeural",
+#     "客服": "zh-CN-XiaohanNeural",
+# }
+
 
 VOICE_MAP = {
-    "女": "zh-CN-XiaoxiaoNeural",
-    "男": "zh-CN-YunxiNeural",
-    "御姐": "zh-CN-XiaoyiNeural",
-    "播报": "zh-CN-YunjianNeural",
-    "客服": "zh-CN-XiaohanNeural",
+    # 👧 女声系
+    "女": "zh-CN-XiaoxiaoNeural",  # 标准女声（默认）
+    "御姐": "zh-CN-XiaoyiNeural",  # 温柔御姐
+    "客服": "zh-CN-XiaohanNeural",  # 温柔御姐
+    # 👨 男声系
+    "年轻": "zh-CN-YunxiNeural",  # 年轻男声（默认）
+    "播报": "zh-CN-YunjianNeural",  # 播音/系统播报
+    "男": "zh-CN-YunyangNeural",  # 自然男声
 }
+
+RATE_MAP = {
+    "慢": "-25%",
+    "默认": "+0%",
+    "快": "+20%",
+    "很快": "+35%",
+}
+
+PITCH_MAP = {
+    "高": "+50Hz",
+    "低": "-50Hz",
+    "默认": "+0Hz",
+}
+
 
 STYLE_MAP = {
     "温柔": "affectionate",
@@ -50,21 +75,12 @@ STYLE_MAP = {
     "默认": "general",
 }
 
-RATE_MAP = {
-    "慢": "-25%",
-    "默认": "+0%",
-    "快": "+20%",
-    "很快": "+35%",
-}
-
-PITCH_MAP = {"高": "+50Hz", "低": "-50Hz", "默认": "+0Hz"}
 
 TEMP_AUDIO_DIR = "downloads/voice_tmp"
 os.makedirs(TEMP_AUDIO_DIR, exist_ok=True)
 
 
-# =========================
-# CONFIG
+# CONFIG TOOLS
 # =========================
 def load_config():
     data = load_json(CONFIG_PATH)
@@ -75,10 +91,10 @@ def save_config(config):
     save_json(CONFIG_PATH, config)
 
 
-def get_group_config(chat_id: str):
+def get_user_config(user_id: str):
     config = load_config()
     return config.get(
-        chat_id,
+        user_id,
         {
             "voice": VOICE_MAP["女"],
             "rate": RATE_MAP["默认"],
@@ -87,8 +103,128 @@ def get_group_config(chat_id: str):
     )
 
 
+async def _edge_tts(text, voice, rate, pitch, path):
+    communicate = edge_tts.Communicate(
+        text=text,
+        voice=voice,
+        rate=rate,
+        pitch=pitch,
+    )
+
+    await communicate.save(path)
+
+
+async def _safe_edge_tts(text, voice, rate, pitch, path, retry=2):
+    for i in range(retry):
+        try:
+            await _edge_tts(text, voice, rate, pitch, path)
+            return True
+        except Exception as e:
+            print(f"[edge-tts失败] 第{i+1}次:", e)
+            await asyncio.sleep(0.5)
+
+    return False
+
+
+def _gtts_fallback(text, path):
+    try:
+        tts = gTTS(text=text, lang="zh")
+        tts.save(path)
+        return True
+    except Exception as e:
+        print("[gTTS也失败]:", e)
+        return False
+    
 # =========================
-# TEMP FILE
+# MENU
+# =========================
+@register_command("声音设置")
+async def voice_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        # 👧 女声一组
+        [
+            InlineKeyboardButton("👧 女", callback_data="voice_女"),
+            InlineKeyboardButton("💃 御姐", callback_data="voice_御姐"),
+            InlineKeyboardButton("🎧 客服", callback_data="voice_客服"),
+        ],
+        # 👨 男声一组
+        [
+            InlineKeyboardButton("👨 男", callback_data="voice_男"),
+            InlineKeyboardButton("📢 播报", callback_data="voice_播报"),
+            InlineKeyboardButton("🧑‍💼 年轻", callback_data="voice_年轻"),
+        ],
+      
+    ]
+
+    await update.message.reply_text(
+        "🎙 请选择语音类型：",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+def speed_menu(voice: str):
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🐢 慢", callback_data=f"s_{voice}_慢"),
+                InlineKeyboardButton("🙂 默认", callback_data=f"s_{voice}_默认"),
+            ],
+            [
+                InlineKeyboardButton("⚡ 快", callback_data=f"s_{voice}_快"),
+                InlineKeyboardButton("🚀 很快", callback_data=f"s_{voice}_很快"),
+            ],
+        ]
+    )
+
+
+async def voice_select_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    voice = query.data.replace("voice_", "")
+
+    await query.edit_message_text(
+        "🎚 请选择语速：",
+        reply_markup=speed_menu(voice),
+    )
+
+
+async def speed_select_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    _, voice, speed = query.data.split("_")
+
+    user_id = str(query.from_user.id)
+
+    config = load_config()
+
+    config[user_id] = {
+        "voice": VOICE_MAP.get(voice),
+        "rate": RATE_MAP.get(speed, RATE_MAP["默认"]),
+        "pitch": PITCH_MAP["默认"],
+    }
+
+    save_config(config)
+
+    await query.edit_message_text(f"✅ 设置成功：\n声音：{voice}\n语速：{speed}")
+
+
+# =========================
+@register_command("声音配置")
+async def show_voice_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    config = get_user_config(user_id)
+
+    voice = next((k for k, v in VOICE_MAP.items() if v == config["voice"]), "女")
+    rate = next((k for k, v in RATE_MAP.items() if v == config["rate"]), "默认")
+    pitch = next((k for k, v in PITCH_MAP.items() if v == config["pitch"]), "默认")
+
+    await update.message.reply_text(
+        f"🎙 你的语音配置：\n" f"声音：{voice}\n" f"语速：{rate}\n" f"音调：{pitch}"
+    )
+
+
 # =========================
 def _bot_temp_path(context, suffix, ext, file_id=""):
     bot_name = context.application.bot_data.get("name", "bot")
@@ -104,8 +240,7 @@ def _bot_temp_path(context, suffix, ext, file_id=""):
 async def tts_voice_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = " ".join(context.args).strip() or "你好，这是一个语音测试。"
 
-    chat_id = str(update.effective_chat.id)
-    config = get_group_config(chat_id)
+    user_config = get_user_config(str(update.effective_user.id))
 
     mp3_path = _bot_temp_path(context, "tts", "mp3")
     ogg_path = _bot_temp_path(context, "tts", "ogg")
@@ -113,9 +248,9 @@ async def tts_voice_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         communicate = edge_tts.Communicate(
             text=text,
-            voice=config["voice"],
-            rate=config["rate"],
-            pitch=config["pitch"],
+            voice=user_config["voice"],
+            rate=user_config["rate"],
+            pitch=user_config["pitch"],
         )
         await communicate.save(mp3_path)
 
@@ -136,199 +271,88 @@ async def tts_voice_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(f)
 
 
-# =========================
 # GROUP TTS (edge-tts)
-@register_command("讲")
-async def group_tts_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# async def group_tts_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+#     text = " ".join(context.args).strip()
+#     if not text:
+#         await update.message.reply_text("请输入内容")
+#         return
+
+#     user_config = get_user_config(str(update.effective_user.id))
+
+#     mp3_path = _bot_temp_path(context, "group_tts", "mp3")
+#     ogg_path = _bot_temp_path(context, "group_tts", "ogg")
+
+#     try:
+#         communicate = edge_tts.Communicate(
+#             text=text,
+#             voice=user_config["voice"],
+#             rate=user_config["rate"],
+#             pitch=user_config["pitch"],
+#         )
+#         await communicate.save(mp3_path)
+
+#         os.system(
+#             f'ffmpeg -i "{mp3_path}" -c:a libopus -ar 24000 -ac 1 "{ogg_path}" -y'
+#         )
+
+#         with open(ogg_path, "rb") as f:
+#             await update.message.reply_voice(voice=f)
+
+#     finally:
+#         for f in [mp3_path, ogg_path]:
+#             if os.path.exists(f):
+#                 os.remove(f)
+
+async def group_tts_voice(update, context):
+
     text = " ".join(context.args).strip()
     if not text:
         await update.message.reply_text("请输入内容")
         return
 
-    chat_id = str(update.effective_chat.id)
-    config = get_group_config(chat_id)
 
-    mp3_path = _bot_temp_path(context, "group_tts", "mp3")
-    ogg_path = _bot_temp_path(context, "group_tts", "ogg")
+    user_config = get_user_config(str(update.effective_user.id))
+
+    mp3_path = _bot_temp_path(context, "tts", "mp3")
+    ogg_path = _bot_temp_path(context, "tts", "ogg")
+
+    voice = user_config["voice"]
+    rate = user_config["rate"]
+    pitch = user_config["pitch"]
+
+    # 🧯 限制防炸
+    text = text[:200]
+
+    success = await _safe_edge_tts(
+        text=text,
+        voice=voice,
+        rate=rate,
+        pitch=pitch,
+        path=mp3_path
+    )
+
+    # ❗ edge失败 → gTTS兜底
+    if not success:
+        print("⚠️ edge失败，切换gTTS")
+        success = _gtts_fallback(text, mp3_path)
+
+    if not success:
+        await update.message.reply_text("❌ TTS失败，请稍后再试")
+        return
+
+    # 🎧 转音频
+    os.system(
+        f'ffmpeg -i "{mp3_path}" -c:a libopus -ar 24000 -ac 1 "{ogg_path}" -y'
+    )
 
     try:
-        communicate = edge_tts.Communicate(
-            text=text,
-            voice=config["voice"],
-            rate=config["rate"],
-            pitch=config["pitch"],
-        )
-        await communicate.save(mp3_path)
-
-        os.system(
-            f'ffmpeg -i "{mp3_path}" -c:a libopus -ar 24000 -ac 1 "{ogg_path}" -y'
-        )
-
         with open(ogg_path, "rb") as f:
             await update.message.reply_voice(voice=f)
-
     finally:
         for f in [mp3_path, ogg_path]:
             if os.path.exists(f):
                 os.remove(f)
-
-
-# =========================
-# 🎛️ 按钮菜单（新增）
-@register_command("声音设置")
-async def voice_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [
-            InlineKeyboardButton("👧 女声", callback_data="voice_女"),
-            InlineKeyboardButton("👨 男声", callback_data="voice_男"),
-        ],
-        [
-            InlineKeyboardButton("👩 御姐", callback_data="voice_御姐"),
-            InlineKeyboardButton("🎧 客服", callback_data="voice_客服"),
-        ],
-        [
-            InlineKeyboardButton("📢 播报", callback_data="voice_播报"),
-        ],
-    ]
-
-    await update.message.reply_text(
-        "🎙 请选择语音：",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-
-
-def speed_menu(chat_id: str):
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("🐢 慢", callback_data=f"s_慢_{chat_id}"),
-                InlineKeyboardButton("🙂 正常", callback_data=f"s_默认_{chat_id}"),
-            ],
-            [
-                InlineKeyboardButton("⚡ 快", callback_data=f"s_快_{chat_id}"),
-                InlineKeyboardButton("🚀 很快", callback_data=f"s_很快_{chat_id}"),
-            ],
-        ]
-    )
-
-
-# =========================
-# 🎛️ 按钮处理（核心）
-# =========================
-async def voice_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data
-    chat_id = str(query.message.chat.id)
-
-    # ======================
-    # 第一步：选声音
-    # ======================
-    if data.startswith("voice_"):
-        voice = data.replace("voice_", "")
-
-        VOICE_STATE[chat_id] = {"voice": voice}
-
-        await query.edit_message_text(
-            "🎚 请选择语速：",
-            reply_markup=speed_menu(chat_id),
-        )
-        return
-
-    # ======================
-    # 第二步：选语速
-    # ======================
-    if data.startswith("s_"):
-        parts = data.split("_", 2)
-        speed = parts[1]
-        origin_chat = parts[2]
-
-        state = VOICE_STATE.get(origin_chat)
-        if not state:
-            await query.edit_message_text("❌ 选择失效，请重新 /setvoice")
-            return
-
-        config = load_config()
-
-        config[origin_chat] = {
-            "voice": VOICE_MAP[state["voice"]],
-            "rate": RATE_MAP[speed],
-            "pitch": PITCH_MAP["默认"],
-        }
-
-        save_config(config)
-
-        VOICE_STATE.pop(origin_chat, None)
-
-        await query.edit_message_text(f"✅ 已设置：{state['voice']} + {speed}")
-        return
-
-
-async def voice_select_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data  # voice_女 / voice_男 ...
-    chat_id = str(query.message.chat.id)
-
-    voice = data.replace("voice_", "")
-
-    # 临时存状态
-    VOICE_STATE[chat_id] = {"voice": voice}
-
-    await query.edit_message_text(
-        "🎚 请选择语速：",
-        reply_markup=speed_menu(chat_id),
-    )
-
-
-async def speed_select_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data  # s_慢 / s_快 / s_默认 / s_很快
-    chat_id = str(query.message.chat.id)
-
-    parts = data.split("_", 1)
-    speed = parts[1]
-
-    state = VOICE_STATE.get(chat_id)
-
-    if not state:
-        await query.edit_message_text("❌ 状态失效，请重新 /setvoice")
-        return
-
-    config = load_config()
-
-    config[chat_id] = {
-        "voice": VOICE_MAP[state["voice"]],
-        "rate": RATE_MAP[speed],
-        "pitch": PITCH_MAP["默认"],
-    }
-
-    save_config(config)
-
-    VOICE_STATE.pop(chat_id, None)
-
-    await query.edit_message_text(
-        f"✅ 设置成功：\n声音：{state['voice']}\n语速：{speed}"
-    )
-
-
-@register_command("声音配置")
-async def show_voice_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    config = get_group_config(chat_id)
-
-    voice = next((k for k, v in VOICE_MAP.items() if v == config.get("voice")), "女")
-    rate = next((k for k, v in RATE_MAP.items() if v == config.get("rate")), "默认")
-    pitch = next((k for k, v in PITCH_MAP.items() if v == config.get("pitch")), "默认")
-
-    await update.message.reply_text(
-        f"🎙 当前语音配置：\n" f"声音：{voice}\n" f"语速：{rate}\n" f"音调：{pitch}"
-    )
-
 
 @register_command("语音识别")
 async def command_voice_to_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -381,17 +405,11 @@ async def ignore_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 def register_voice_handlers(application):
     application.add_handler(CommandHandler("tts", tts_voice_reply))
     application.add_handler(CommandHandler("newtts", group_tts_voice))
-
     application.add_handler(CommandHandler("setvoice", voice_menu))
-
-    # ❗必须无 pattern
     application.add_handler(
         CallbackQueryHandler(voice_select_handler, pattern=r"^voice_")
     )
-
     application.add_handler(CallbackQueryHandler(speed_select_handler, pattern=r"^s_"))
-
-    application.add_handler(CommandHandler("showvoice", show_voice_config))
     # 语音识别（保留）
     application.add_handler(
         MessageHandler(filters.VOICE | filters.AUDIO, ignore_voice_message)

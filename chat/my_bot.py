@@ -19,7 +19,7 @@ from telegram.helpers import escape
 import requests
 from telegram.constants import ParseMode
 from command_router import register_command
-from game.voice_reply import tts_voice_reply
+from game.voice_reply import group_tts_voice, tts_voice_reply
 from utils import (
     AD_KEYWORDS_FILE,
     BOT_OWNER_ID,
@@ -1562,7 +1562,7 @@ async def handle_remove_mosaic(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 @group_allowed
-@register_command("叫", "说")
+@register_command("叫", "说", "讲")
 async def add_joke(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not update.message:
@@ -1575,7 +1575,7 @@ async def add_joke(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not joke_text:
         return
 
-    await tts_voice_reply(update, context)
+    await group_tts_voice(update, context)
 
 
 @group_allowed
