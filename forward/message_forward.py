@@ -254,50 +254,45 @@ def _resolve_target_uid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> O
 
 #  机器人代发
 async def safe_forward_media(bot, chat_id, msg):
-    """机器人代发消息，不显示原用户信息"""
-    # 文字 + Emoji
+    caption = (msg.caption or "")[:1024]
+
     if msg.text:
-        return await bot.send_message(chat_id=chat_id, text=msg.text)
+        return await bot.send_message(chat_id, msg.text)
 
-    # 照片
     if msg.photo:
-        return await bot.send_photo(
-            chat_id=chat_id, photo=msg.photo[-1].file_id, caption=msg.caption or ""
-        )
+        return await bot.send_photo(chat_id, msg.photo[-1].file_id, caption=caption)
 
-    # GIF / 动画
     if msg.animation:
-        return await bot.send_animation(
-            chat_id=chat_id, animation=msg.animation.file_id, caption=msg.caption or ""
-        )
+        return await bot.send_animation(chat_id, msg.animation.file_id, caption=caption)
 
-    # 视频
     if msg.video:
-        return await bot.send_video(
-            chat_id=chat_id, video=msg.video.file_id, caption=msg.caption or ""
-        )
+        return await bot.send_video(chat_id, msg.video.file_id, caption=caption)
 
-    # 文件 / 文档
     if msg.document:
-        return await bot.send_document(
-            chat_id=chat_id, document=msg.document.file_id, caption=msg.caption or ""
+        return await bot.send_document(chat_id, msg.document.file_id, caption=caption)
+
+    if msg.sticker:
+        return await bot.send_sticker(chat_id, msg.sticker.file_id)
+
+    if msg.voice:
+        return await bot.send_voice(chat_id, msg.voice.file_id, caption=caption)
+
+    if msg.audio:
+        return await bot.send_audio(chat_id, msg.audio.file_id, caption=caption)
+
+    if msg.location:
+        return await bot.send_location(
+            chat_id,
+            msg.location.latitude,
+            msg.location.longitude
         )
 
-    # 静态贴纸
-    if msg.sticker and not msg.sticker.is_animated:
-        return await bot.send_sticker(chat_id=chat_id, sticker=msg.sticker.file_id)
-
-    # 动画贴纸（TGS） → 会变成文件
-    if msg.sticker and msg.sticker.is_animated:
-        file = await bot.get_file(msg.sticker.file_id)
-        temp_path = f"temp_{msg.sticker.file_id}.tgs"
-        await file.download_to_drive(temp_path)
-        with open(temp_path, "rb") as f:
-            res = await bot.send_document(
-                chat_id=chat_id, document=f, filename="sticker.tgs"
-            )
-        os.remove(temp_path)
-        return res
+    if msg.contact:
+        return await bot.send_contact(
+            chat_id,
+            msg.contact.phone_number,
+            msg.contact.first_name
+        )
 
     raise ValueError("不支持的消息类型")
 
