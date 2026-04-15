@@ -80,7 +80,7 @@ async def handle_text_dispatcher(update: Update, context: ContextTypes.DEFAULT_T
         await handle_qa_message(update, context)  # 问答模块
         await handle_chengyu(update, context)  # 成语接龙模块
         
-        # await handle_text_message(update, context)  # 群聊天记录
+        await handle_text_message(update, context)  # 聊天记录 (只记录私聊)
         # 会中断后面的
 
         # await on_text(update, context)

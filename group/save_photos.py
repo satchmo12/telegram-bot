@@ -8,6 +8,9 @@ PHOTO_SAVE_DIR = "photos"
 os.makedirs(PHOTO_SAVE_DIR, exist_ok=True)
 
 async def save_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 为防止磁盘爆满，关闭此功能
+    return
+    
     if not update.message or not update.message.photo:
         return
 
@@ -39,11 +42,7 @@ async def save_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 下载照片
     file = await context.bot.get_file(photo.file_id)
     await file.download_to_drive(custom_path=file_path)
-    # print(f"📥 照片已保存: {file_path}")
 
-    # 回复用户
-    # await update.message.reply_text("✅ 照片已保存！")
-    
 # 注册
 def register_save_photos_handlers(app):
     app.add_handler(MessageHandler(filters.PHOTO, save_photo))

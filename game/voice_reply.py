@@ -32,15 +32,6 @@ def _get_whisper_model():
 # =========================
 CONFIG_PATH = "config_data/user_tts_config.json"
 
-# VOICE_MAP = {
-#     "女": "zh-CN-XiaoxiaoNeural",
-#     "男": "zh-CN-YunxiNeural",
-#     "御姐": "zh-CN-XiaoyiNeural",
-#     "播报": "zh-CN-YunjianNeural",
-#     "客服": "zh-CN-XiaohanNeural",
-# }
-
-
 VOICE_MAP = {
     # 👧 女声系
     "女": "zh-CN-XiaoxiaoNeural",  # 标准女声（默认）
@@ -66,19 +57,8 @@ PITCH_MAP = {
 }
 
 
-STYLE_MAP = {
-    "温柔": "affectionate",
-    "聊天": "chat",
-    "播报": "newscast",
-    "专业": "narration-professional",
-    "严肃": "serious",
-    "默认": "general",
-}
-
-
 TEMP_AUDIO_DIR = "downloads/voice_tmp"
 os.makedirs(TEMP_AUDIO_DIR, exist_ok=True)
-
 
 # CONFIG TOOLS
 # =========================

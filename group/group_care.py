@@ -161,11 +161,17 @@ async def watch_special_users(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
 
-# ---------------- 群消息记录 ----------------
+# ---------------- 消息记录 ---------------- 群聊天记录记录没用，只记录私聊，为后续双向机器人的聊天记录准备。
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    if not msg or not msg.text:
+    if not msg:
+    # or not msg.text:
         return
+
+    # 👇 只允许私聊
+    if msg.chat.type != "private":
+        return
+
     chat_id = msg.chat_id
     user = msg.from_user
     timestamp = int(msg.date.timestamp())
@@ -178,12 +184,33 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     data = load_json(file_path)
     data.setdefault("messages", [])
+
+    msg_type = "text"
+    content = msg.text
+
+    if msg.photo:
+        msg_type = "photo"
+        content = msg.photo[-1].file_id
+    elif msg.video:
+        msg_type = "video"
+        content = msg.video.file_id
+    elif msg.voice:
+        msg_type = "voice"
+        content = msg.voice.file_id
+    elif msg.document:
+        msg_type = "document"
+        content = msg.document.file_id
+    elif msg.sticker:
+        msg_type = "sticker"
+        content = msg.sticker.file_id
+        
     data["messages"].append(
         {
             "message_id": msg.message_id,
             "user_id": user.id,
             "user_name": user.full_name,
-            "text": msg.text,
+            "type": msg_type,
+            "content": content,
             "timestamp": timestamp,
             "date": date_str,
             "datetime": datetime_str,
@@ -196,16 +223,18 @@ def _get_today_chat_items(chat_id: str) -> list[str]:
     date_str = datetime.now().strftime("%Y-%m-%d")
     # _resolve_json_path
     file_path = os.path.join(GROUP_LOG_DIR, chat_id, f"{date_str}.json")
-    file_path =  _resolve_json_path(file_path)
+    file_path = _resolve_json_path(file_path)
     if not os.path.exists(file_path):
         return []
 
     data = load_json(file_path)
-    messages = data.get("messages", [])
+    messages = data.get("content", [])
     if not messages:
         return []
 
-    return [f"[{m['datetime']}] {m['user_name']}：{m['text']}" for m in reversed(messages)]
+    return [
+        f"[{m['datetime']}] {m['user_name']}：{m['text']}" for m in reversed(messages)
+    ]
 
 
 # ---------------- 今天群聊 ----------------
