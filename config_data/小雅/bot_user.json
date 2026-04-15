@@ -10,7 +10,7 @@
         "name": "沙",
         "username": "du7789",
         "join_time": 1773327099,
-        "last_active": 1776248972,
+        "last_active": 1776262920,
         "blocked": false
     },
     "8571338710": {
@@ -285,11 +285,12 @@
         "blocked": false
     },
     "6650107999": {
-        "name": "专群出货万人交流群",
-        "username": "xbdb345",
+        "name": "真可乐🥤六合彩交流群",
+        "username": "keLe4567",
         "join_time": 1774793411,
-        "last_active": 1775062314,
-        "blocked": false
+        "last_active": 1776252671,
+        "blocked": true,
+        "blocked_at": 1776252721
     },
     "7139028339": {
         "name": "范伟",
@@ -515,7 +516,8 @@
         "username": "rr3366518",
         "join_time": 1775645252,
         "last_active": 1776250370,
-        "blocked": false
+        "blocked": true,
+        "blocked_at": 1776251034
     },
     "6165548313": {
         "name": "HR （Bode)换汇 移民局业务",
@@ -740,6 +742,20 @@
         "username": "wansan1588",
         "join_time": 1776224716,
         "last_active": 1776224716,
+        "blocked": false
+    },
+    "6475239289": {
+        "name": "财",
+        "username": "yr8883",
+        "join_time": 1776256922,
+        "last_active": 1776256922,
+        "blocked": false
+    },
+    "8587038708": {
+        "name": "Er",
+        "username": "",
+        "join_time": 1776259099,
+        "last_active": 1776259099,
         "blocked": false
     }
 }

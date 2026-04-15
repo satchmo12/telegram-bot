@@ -31,7 +31,6 @@ from forward.message_forward import (
     forward_to_owner,
     handle_private_dialog_callback,
     owner_auto_forward_in_dialog,
-    register_send_user_conv,
     reply_from_owner,
 )
 from menu import build_feature_intro
@@ -529,7 +528,6 @@ def create_app(bot_cfg: dict):
 
     # ===== 注册所有功能模块 =====
     register_all_handlers(app)
-    register_send_user_conv(app)
     # 兜底 /start（放在更后 group，避免覆盖 verification 的 /start 校验逻辑）
     app.add_handler(CommandHandler("start", start_fallback), group=50)
 

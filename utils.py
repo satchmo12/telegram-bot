@@ -810,3 +810,60 @@ async def get_admin_ids(chat_id, context):
         if cache_key in ADMIN_CACHE:
             return ADMIN_CACHE[cache_key]["admins"]
         return set()
+
+def save_chat_message(log_dir: str, chat_id: str, msg):
+    date_str = msg.date.strftime("%Y-%m-%d")
+    file_path = os.path.join(log_dir, str(chat_id), f"{date_str}.json")
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+    data = load_json(file_path) or {}
+    print("SAVE PATH:", os.path.abspath(file_path))
+    data.setdefault("messages", [])
+
+    content = {
+        "text": msg.text or msg.caption or "",
+        "file_id": None,
+    }
+
+    msg_type = "text"
+
+    # -------- media 统一处理 --------
+    if msg.photo:
+        msg_type = "photo"
+        content["file_id"] = msg.photo[-1].file_id
+
+    elif msg.video:
+        msg_type = "video"
+        content["file_id"] = msg.video.file_id
+
+    elif msg.voice:
+        msg_type = "voice"
+        content["file_id"] = msg.voice.file_id
+
+    elif msg.document:
+        msg_type = "document"
+        content["file_id"] = msg.document.file_id
+
+    elif msg.sticker:
+        msg_type = "sticker"
+        content["file_id"] = msg.sticker.file_id
+
+    elif msg.animation:
+        msg_type = "animation"
+        content["file_id"] = msg.animation.file_id
+
+    elif msg.video_note:
+        msg_type = "video_note"
+        content["file_id"] = msg.video_note.file_id
+
+    data["messages"].append({
+        "message_id": msg.message_id,
+        "user_id": msg.from_user.id,
+        "user_name": msg.from_user.full_name,
+        "type": msg_type,
+        "content": content,
+        "timestamp": int(msg.date.timestamp()),
+        "datetime": msg.date.strftime("%Y-%m-%d %H:%M:%S"),
+    })
+
+    save_json(file_path, data)
