@@ -93,7 +93,7 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "reply_enabled": False,     # 默认不自动回复
             "voice_reply_enabled": False,
             "active_speak_enabled": False,  # 默认不主动说话
-            "active_speak_interval_min": 120,
+            "active_speak_interval_min": 2,
             "points_lottery_enabled": False,
             "points_lottery_cost": 100,
             "points_lottery_display_text": "奖池丰厚，祝您好运。",
@@ -141,7 +141,7 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             group["active_speak_enabled"] = False
             changed = True
         if "active_speak_interval_min" not in group:
-            group["active_speak_interval_min"] = 120
+            group["active_speak_interval_min"] = 2
             changed = True
         if "force_subscribe_new_only" not in group:
             group["force_subscribe_new_only"] = False

@@ -309,6 +309,119 @@ async def safe_forward_media(bot, chat_id, msg):
     raise ValueError("不支持的消息类型")
 
 
+def build_message_payload(msg) -> dict:
+    if not msg:
+        raise ValueError("消息为空")
+
+    caption = (getattr(msg, "caption", None) or "")[:1024]
+    text = getattr(msg, "text", None)
+    if text:
+        return {"type": "text", "text": text}
+    if getattr(msg, "photo", None):
+        return {
+            "type": "photo",
+            "file_id": msg.photo[-1].file_id,
+            "caption": caption,
+        }
+    if getattr(msg, "animation", None):
+        return {
+            "type": "animation",
+            "file_id": msg.animation.file_id,
+            "caption": caption,
+        }
+    if getattr(msg, "video", None):
+        return {
+            "type": "video",
+            "file_id": msg.video.file_id,
+            "caption": caption,
+        }
+    if getattr(msg, "document", None):
+        return {
+            "type": "document",
+            "file_id": msg.document.file_id,
+            "caption": caption,
+        }
+    if getattr(msg, "sticker", None):
+        return {"type": "sticker", "file_id": msg.sticker.file_id}
+    if getattr(msg, "voice", None):
+        return {
+            "type": "voice",
+            "file_id": msg.voice.file_id,
+            "caption": caption,
+        }
+    if getattr(msg, "audio", None):
+        return {
+            "type": "audio",
+            "file_id": msg.audio.file_id,
+            "caption": caption,
+        }
+    if getattr(msg, "video_note", None):
+        return {"type": "video_note", "file_id": msg.video_note.file_id}
+    if getattr(msg, "location", None):
+        return {
+            "type": "location",
+            "latitude": msg.location.latitude,
+            "longitude": msg.location.longitude,
+        }
+    if getattr(msg, "contact", None):
+        return {
+            "type": "contact",
+            "phone_number": msg.contact.phone_number,
+            "first_name": msg.contact.first_name,
+            "last_name": getattr(msg.contact, "last_name", None),
+        }
+    raise ValueError("不支持的消息类型")
+
+
+async def send_message_payload(bot, chat_id, payload: dict):
+    if not isinstance(payload, dict):
+        raise ValueError("消息载荷无效")
+
+    payload_type = str(payload.get("type", "")).strip().lower()
+    if payload_type == "text":
+        return await bot.send_message(chat_id, payload.get("text", ""))
+    if payload_type == "photo":
+        return await bot.send_photo(
+            chat_id, payload.get("file_id"), caption=payload.get("caption", "")
+        )
+    if payload_type == "animation":
+        return await bot.send_animation(
+            chat_id, payload.get("file_id"), caption=payload.get("caption", "")
+        )
+    if payload_type == "video":
+        return await bot.send_video(
+            chat_id, payload.get("file_id"), caption=payload.get("caption", "")
+        )
+    if payload_type == "document":
+        return await bot.send_document(
+            chat_id, payload.get("file_id"), caption=payload.get("caption", "")
+        )
+    if payload_type == "sticker":
+        return await bot.send_sticker(chat_id, payload.get("file_id"))
+    if payload_type == "voice":
+        return await bot.send_voice(
+            chat_id, payload.get("file_id"), caption=payload.get("caption", "")
+        )
+    if payload_type == "audio":
+        return await bot.send_audio(
+            chat_id, payload.get("file_id"), caption=payload.get("caption", "")
+        )
+    if payload_type == "video_note":
+        return await bot.send_video_note(chat_id, payload.get("file_id"))
+    if payload_type == "location":
+        return await bot.send_location(
+            chat_id, payload.get("latitude"), payload.get("longitude")
+        )
+    if payload_type == "contact":
+        return await bot.send_contact(
+            chat_id,
+            payload.get("phone_number"),
+            payload.get("first_name", ""),
+            last_name=payload.get("last_name"),
+        )
+    raise ValueError("不支持的消息类型")
+
+
 async def send_to_targets(bot, target_ids: list[int], src):
     for chat_id in target_ids:
         try:

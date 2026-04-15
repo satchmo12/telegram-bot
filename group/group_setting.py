@@ -4,7 +4,14 @@ import time
 from typing import Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters, ApplicationHandlerStop
+from telegram.ext import (
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+    ApplicationHandlerStop,
+)
 
 from command_router import FEATURE_FRIENDS, register_command
 from feature_flags import is_feature_enabled
@@ -44,9 +51,11 @@ from utils import (
     save_json,
 )
 from channel.channel_force import unmute_force_subscribe_chat
+from forward.message_forward import build_message_payload, send_message_payload
 
 CALLBACK_PREFIX = "gcfg"
 FORCE_SUBSCRIBE_FILE = "config_data/force_subscribe.json"
+AD_PUSH_MESSAGE_KEY = "ad_push_message"
 TOGGLE_FIELDS = [
     ("bot_enabled", "启用机器人"),
     ("reply_enabled", "开启回复"),
@@ -55,16 +64,12 @@ TOGGLE_FIELDS = [
     ("welcome", "入群欢迎"),
     ("silent", "群静默"),
     ("ad_filter", "广告拦截"),
-    ("ad_push_enabled", "广告定时推送"),
     ("chengyu_game", "成语接龙"),
-    ("spam_limit", "防刷屏限频"),
     ("manor", "庄园系统"),
     (FEATURE_FRIENDS, "群好友功能"),
-    ("active_speak_enabled", "主动说话"),
-    ("force_subscribe", "强制关注频道"),
-    ("force_subscribe_new_only", "强制关注仅新成员"),
-    ("name_change_notice", "用户名变更提示"),
     ("recommend", "群推荐"),
+    ("name_change_notice", "用户名变更提示"),
+    ("active_speak_enabled", "主动说话"),
 ]
 LOTTERY_TOGGLE_FIELDS = [
     ("points_lottery_enabled", "积分抽奖"),
@@ -72,9 +77,16 @@ LOTTERY_TOGGLE_FIELDS = [
     ("invite_points_enabled", "邀请积分"),
 ]
 LOTTERY_TOGGLE_KEYS = {item[0] for item in LOTTERY_TOGGLE_FIELDS}
-BOT_ADMIN_REQUIRED_FIELDS = {"verify", "ad_filter", "spam_limit", "force_subscribe"}
+BOT_ADMIN_REQUIRED_FIELDS = {
+    "verify",
+    "ad_filter",
+    "spam_limit",
+    "force_subscribe",
+    "force_subscribe_new_only",
+}
 ACTIVE_SPEAK_MIN_INTERVAL = 1
 ACTIVE_SPEAK_MAX_INTERVAL = 1440
+ACTIVE_SPEAK_DEFAULT_INTERVAL = 2
 AD_PUSH_MIN_INTERVAL = 5
 AD_PUSH_MAX_INTERVAL = 1440
 MANAGE_CHECK_CACHE_TTL_SEC = 60
@@ -82,7 +94,9 @@ GROUP_LIST_PAGE_SIZE = 10
 
 
 def _is_group_chat(update: Update) -> bool:
-    chat_type = (update.effective_chat.type or "").lower() if update.effective_chat else ""
+    chat_type = (
+        (update.effective_chat.type or "").lower() if update.effective_chat else ""
+    )
     return chat_type in {"group", "supergroup"}
 
 
@@ -142,9 +156,7 @@ def _toggle_text(enabled: bool) -> str:
 def _visible_toggle_fields(bot_is_admin: bool) -> list[tuple[str, str]]:
     if bot_is_admin:
         return TOGGLE_FIELDS
-    return [
-        item for item in TOGGLE_FIELDS if item[0] not in BOT_ADMIN_REQUIRED_FIELDS
-    ]
+    return [item for item in TOGGLE_FIELDS if item[0] not in BOT_ADMIN_REQUIRED_FIELDS]
 
 
 def _normalize_business_coop_link(raw: str) -> str:
@@ -179,11 +191,35 @@ def _build_lottery_prizes_text(chat_id: str) -> str:
 
 def _build_lottery_prizes_keyboard(chat_id: str) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton("📝 抽奖显示文案", callback_data=f"{CALLBACK_PREFIX}:lottery_display_text:{chat_id}")],
-        [InlineKeyboardButton("➕ 添加奖品", callback_data=f"{CALLBACK_PREFIX}:lottery_prize_add:{chat_id}")],
-        [InlineKeyboardButton("✏️ 修改奖品", callback_data=f"{CALLBACK_PREFIX}:lottery_prize_edit_menu:{chat_id}")],
-        [InlineKeyboardButton("🗑 删除奖品", callback_data=f"{CALLBACK_PREFIX}:lottery_prize_delete_menu:{chat_id}")],
-        [InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:lottery_back:{chat_id}")],
+        [
+            InlineKeyboardButton(
+                "📝 抽奖显示文案",
+                callback_data=f"{CALLBACK_PREFIX}:lottery_display_text:{chat_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "➕ 添加奖品",
+                callback_data=f"{CALLBACK_PREFIX}:lottery_prize_add:{chat_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "✏️ 修改奖品",
+                callback_data=f"{CALLBACK_PREFIX}:lottery_prize_edit_menu:{chat_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🗑 删除奖品",
+                callback_data=f"{CALLBACK_PREFIX}:lottery_prize_delete_menu:{chat_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:lottery_back:{chat_id}"
+            )
+        ],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -218,27 +254,52 @@ def _build_lottery_settings_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardM
                 callback_data=f"{CALLBACK_PREFIX}:toggle:{chat_id}:{key}",
             )
         )
-    for i in range(0, len(toggle_buttons), 2):
-        rows.append(toggle_buttons[i : i + 2])
+    for i in range(0, len(toggle_buttons), 3):
+        rows.append(toggle_buttons[i : i + 3])
 
     rows.append(
         [
-            InlineKeyboardButton("🎰 抽奖积分", callback_data=f"{CALLBACK_PREFIX}:lottery_cost:{chat_id}"),
-            InlineKeyboardButton("🎁 奖池设置", callback_data=f"{CALLBACK_PREFIX}:lottery_prizes:{chat_id}"),
+            InlineKeyboardButton(
+                "🎰 抽奖积分", callback_data=f"{CALLBACK_PREFIX}:lottery_cost:{chat_id}"
+            ),
+            InlineKeyboardButton(
+                "🎁 奖池设置",
+                callback_data=f"{CALLBACK_PREFIX}:lottery_prizes:{chat_id}",
+            ),
         ]
     )
     rows.append(
         [
-            InlineKeyboardButton("💬 发言积分规则", callback_data=f"{CALLBACK_PREFIX}:talk_points:{chat_id}"),
-            InlineKeyboardButton("👥 邀请积分规则", callback_data=f"{CALLBACK_PREFIX}:invite_points:{chat_id}"),
+            InlineKeyboardButton(
+                "💬 发言积分规则",
+                callback_data=f"{CALLBACK_PREFIX}:talk_points:{chat_id}",
+            ),
+            InlineKeyboardButton(
+                "👥 邀请积分规则",
+                callback_data=f"{CALLBACK_PREFIX}:invite_points:{chat_id}",
+            ),
         ]
     )
-    rows.append([InlineKeyboardButton("💬 清空积分", callback_data=f"{CALLBACK_PREFIX}:clean_point:{chat_id}")])
-    rows.append([InlineKeyboardButton("⬅️ 返回群设置", callback_data=f"{CALLBACK_PREFIX}:open:{chat_id}")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "💬 清空积分", callback_data=f"{CALLBACK_PREFIX}:clean_point:{chat_id}"
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "⬅️ 返回群设置", callback_data=f"{CALLBACK_PREFIX}:open:{chat_id}"
+            )
+        ]
+    )
     return InlineKeyboardMarkup(rows)
 
 
-async def _open_lottery_settings_panel(query, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str, user_id: int):
+async def _open_lottery_settings_panel(
+    query, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str, user_id: int
+):
     chat_id = _parse_chat_id(chat_id_str)
     if chat_id is None:
         return
@@ -253,6 +314,148 @@ async def _open_lottery_settings_panel(query, context: ContextTypes.DEFAULT_TYPE
         reply_markup=_build_lottery_settings_keyboard(chat_id_str, cfg),
         parse_mode="HTML",
         disable_web_page_preview=True,
+    )
+
+
+def _build_ad_push_settings_text(chat_id: str, cfg: dict) -> str:
+    mode = str(cfg.get("ad_push_mode", "interval"))
+    interval = int(cfg.get("ad_push_interval_min", 120))
+    times = str(cfg.get("ad_push_times", "")).strip() or "未设置"
+    text = (
+        "已设置"
+        if isinstance(cfg.get(AD_PUSH_MESSAGE_KEY), dict)
+        or str(cfg.get("ad_push_text", "")).strip()
+        else "未设置"
+    )
+    enabled = "✅ 开启" if bool(cfg.get("ad_push_enabled", False)) else "🚫 关闭"
+    lines = [
+        "📢 广告推送设置",
+        f"状态：{enabled}",
+        f"模式：{'定时' if mode == 'fixed' else '间隔'}",
+        f"间隔：每 {interval} 分钟",
+        f"定时：{times}",
+        f"消息：{text}",
+    ]
+    return "\n".join(lines)
+
+
+def _build_ad_push_settings_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardMarkup:
+    enabled = bool(cfg.get("ad_push_enabled", False))
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"{'✅' if enabled else '🚫'} 广告推送",
+                callback_data=f"{CALLBACK_PREFIX}:toggle:{chat_id}:ad_push_enabled",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📝 推送消息", callback_data=f"{CALLBACK_PREFIX}:ad_message:{chat_id}"
+            ),
+            InlineKeyboardButton(
+                "🔀 推送模式", callback_data=f"{CALLBACK_PREFIX}:ad_mode:{chat_id}"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "⏱ 广告间隔", callback_data=f"{CALLBACK_PREFIX}:ad_interval:{chat_id}"
+            ),
+            InlineKeyboardButton(
+                "🕒 广告定时", callback_data=f"{CALLBACK_PREFIX}:ad_times:{chat_id}"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "⬅️ 返回群设置", callback_data=f"{CALLBACK_PREFIX}:open:{chat_id}"
+            )
+        ],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+async def _open_ad_push_settings_panel(
+    query, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str, user_id: int
+):
+    chat_id = _parse_chat_id(chat_id_str)
+    if chat_id is None:
+        return
+    if not await _can_manage_group(context, user_id, chat_id):
+        return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+    if not await _is_bot_group_admin(context, chat_id):
+        return await query.answer(
+            "机器人不是该群管理员，无法配置此项。", show_alert=True
+        )
+    data = get_group_whitelist(context)
+    cfg = data.get(chat_id_str, {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    return await query.edit_message_text(
+        _build_ad_push_settings_text(chat_id_str, cfg),
+        reply_markup=_build_ad_push_settings_keyboard(chat_id_str, cfg),
+    )
+
+
+def _build_force_subscribe_settings_text(chat_id: str, cfg: dict) -> str:
+    force_on = bool(cfg.get("force_subscribe", False))
+    new_only = bool(cfg.get("force_subscribe_new_only", False))
+    force_channel = _get_force_channel(chat_id)
+    lines = [
+        "📢 强制关注设置",
+        f"强制关注：{_toggle_text(force_on)}",
+        f"仅新成员：{_toggle_text(new_only)}",
+        f"关注频道：{force_channel if force_channel else '未设置'}",
+    ]
+    return "\n".join(lines)
+
+
+def _build_force_subscribe_settings_keyboard(
+    chat_id: str, cfg: dict
+) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"{'✅' if bool(cfg.get('force_subscribe', False)) else '🚫'} 强制关注频道",
+                callback_data=f"{CALLBACK_PREFIX}:toggle:{chat_id}:force_subscribe",
+            ),
+            InlineKeyboardButton(
+                f"{'✅' if bool(cfg.get('force_subscribe_new_only', False)) else '🚫'} 强制关注仅新成员",
+                callback_data=f"{CALLBACK_PREFIX}:toggle:{chat_id}:force_subscribe_new_only",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📢 设置关注频道",
+                callback_data=f"{CALLBACK_PREFIX}:force_channel:{chat_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "⬅️ 返回群设置", callback_data=f"{CALLBACK_PREFIX}:open:{chat_id}"
+            )
+        ],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+async def _open_force_subscribe_settings_panel(
+    query, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str, user_id: int
+):
+    chat_id = _parse_chat_id(chat_id_str)
+    if chat_id is None:
+        return
+    if not await _can_manage_group(context, user_id, chat_id):
+        return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+    if not await _is_bot_group_admin(context, chat_id):
+        return await query.answer(
+            "机器人不是该群管理员，无法配置此项。", show_alert=True
+        )
+    data = get_group_whitelist(context)
+    cfg = data.get(chat_id_str, {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    return await query.edit_message_text(
+        _build_force_subscribe_settings_text(chat_id_str, cfg),
+        reply_markup=_build_force_subscribe_settings_keyboard(chat_id_str, cfg),
     )
 
 
@@ -288,11 +491,15 @@ def _build_group_list_keyboard(
     nav_row = []
     if page > 1:
         nav_row.append(
-            InlineKeyboardButton("⬅️ 上一页", callback_data=f"{CALLBACK_PREFIX}:list:{page - 1}")
+            InlineKeyboardButton(
+                "⬅️ 上一页", callback_data=f"{CALLBACK_PREFIX}:list:{page - 1}"
+            )
         )
     if page < total_pages:
         nav_row.append(
-            InlineKeyboardButton("➡️ 下一页", callback_data=f"{CALLBACK_PREFIX}:list:{page + 1}")
+            InlineKeyboardButton(
+                "➡️ 下一页", callback_data=f"{CALLBACK_PREFIX}:list:{page + 1}"
+            )
         )
     if nav_row:
         rows.append(nav_row)
@@ -308,16 +515,23 @@ def _group_list_text(data: dict, page: int = 1) -> str:
     return f"请选择要配置的群：\n第 {page}/{total_pages} 页"
 
 
-def _build_group_panel_text(chat_id: str, cfg: dict, *, bot_is_admin: bool = False) -> str:
+def _build_group_panel_text(
+    chat_id: str, cfg: dict, *, bot_is_admin: bool = False
+) -> str:
     group_name = html.escape(_group_title(chat_id, cfg))
     username = str(cfg.get("username", "") or "").strip()
     username_text = f"@{username}" if username else "未设置"
     spam_limit_value = int(cfg.get("spam_limit_max_per_minute", 10))
-    interval = int(cfg.get("active_speak_interval_min", 120))
+    interval = int(cfg.get("active_speak_interval_min", ACTIVE_SPEAK_DEFAULT_INTERVAL))
     ad_mode = str(cfg.get("ad_push_mode", "interval"))
     ad_interval = int(cfg.get("ad_push_interval_min", 120))
     ad_times = str(cfg.get("ad_push_times", "")).strip() or "未设置"
-    ad_has_text = "已设置" if str(cfg.get("ad_push_text", "")).strip() else "未设置"
+    ad_has_text = (
+        "已设置"
+        if isinstance(cfg.get(AD_PUSH_MESSAGE_KEY), dict)
+        or str(cfg.get("ad_push_text", "")).strip()
+        else "未设置"
+    )
     business_coop = (
         _normalize_business_coop_link(cfg.get("business_coop_link", "")) or "未设置"
     )
@@ -330,7 +544,6 @@ def _build_group_panel_text(chat_id: str, cfg: dict, *, bot_is_admin: bool = Fal
         f"🆔 群ID：<code>{chat_id}</code> | 群名：{group_name}",
         f"👤 用户名：{html.escape(username_text)}",
         f"🤖 机器人管理员：{'✅ 是' if bot_is_admin else '🚫 否'}",
-        "",
     ]
     enabled_toggles = [
         (key, label)
@@ -338,36 +551,45 @@ def _build_group_panel_text(chat_id: str, cfg: dict, *, bot_is_admin: bool = Fal
         if bool(cfg.get(key, False))
     ]
     if enabled_toggles:
+        lines.append("")
         lines.append("已开启功能：")
         for _, label in enabled_toggles:
             lines.append(f"- {label}")
-        lines.append("")
-    if bot_is_admin:
+
+    if bot_is_admin and bool(cfg.get("spam_limit", False)):
         lines.append(f"限频条数：{spam_limit_value} 条/分钟")
-    lines.append(f"曝光度：{int(cfg.get('exposure', 0))}")
-    lines.append(f"主动说话频率：每 {interval} 分钟")
-    lines.append(
-        f"积分抽奖：{'✅ 开启' if lottery_cfg['enabled'] else '🚫 关闭'} 单次消耗 {lottery_cfg['cost']} 分 奖品数 {prize_count}"
-    )
-    lines.append(f"抽奖显示文案：{html.escape(str(lottery_cfg.get('display_text', '') or '奖池丰厚，祝您好运。'))}")
-    lines.append(
-        f"发言积分规则：每次 {talk_points['amount']} 分 每日上限 {talk_points['daily_limit']} 分 最小字数 {talk_points['min_length']}"
-    )
-    lines.append(
-        f"邀请积分规则：每邀请 1 人 {invite_points['amount']} 分 每日上限 {invite_points['daily_limit']} 分"
-    )
-    if bot_is_admin:
+    if int(cfg.get("exposure", 0)) > 0:
+        lines.append(f"曝光度：{int(cfg.get('exposure', 0))}")
+    if bool(cfg.get("active_speak_enabled", False)):
+        lines.append(f"主动说话频率：每 {interval} 分钟")
+    if lottery_cfg["enabled"]:
+        lines.append(
+            f"积分抽奖：单次消耗 {lottery_cfg['cost']} 分 奖品数 {prize_count}"
+        )
+        display_text = str(lottery_cfg.get("display_text", "") or "").strip()
+        if display_text and display_text != "奖池丰厚，祝您好运。":
+            lines.append(f"抽奖显示文案：{html.escape(display_text)}")
+    if bool(cfg.get("talk_points_enabled", False)):
+        lines.append(
+            f"发言积分规则：每次 {talk_points['amount']} 分 每日上限 {talk_points['daily_limit']} 分 最小字数 {talk_points['min_length']}"
+        )
+    if bool(cfg.get("invite_points_enabled", False)):
+        lines.append(
+            f"邀请积分规则：每邀请 1 人 {invite_points['amount']} 分 每日上限 {invite_points['daily_limit']} 分"
+        )
+    if bot_is_admin and bool(cfg.get("ad_push_enabled", False)):
         lines.append(
             f"广告推送：模式={'定时' if ad_mode == 'fixed' else '间隔'} "
             f"间隔={ad_interval} 分钟 定时={ad_times} 文案={ad_has_text}"
         )
+    if bot_is_admin and bool(cfg.get("force_subscribe", False)):
         force_channel = _get_force_channel(chat_id)
         lines.append(f"强制关注频道：{force_channel if force_channel else '未设置'}")
-    lines.append(f"商业合作：{html.escape(business_coop)}")
+    if str(cfg.get("business_coop_link", "")).strip():
+        lines.append(f"商业合作：{html.escape(business_coop)}")
     lines.append("")
     if not bot_is_admin:
         lines.append("部分需要管理权限的功能已隐藏。")
-    lines.append("仅群管理员或超级管理员可修改。")
     return "\n".join(lines)
 
 
@@ -379,52 +601,67 @@ def _build_group_panel_keyboard(
     chat_id: str, cfg: dict, list_page: int = 1, *, bot_is_admin: bool = False
 ) -> InlineKeyboardMarkup:
     rows = []
-    toggle_buttons = []
+    toggle_button_map = {}
     for key, label in _visible_toggle_fields(bot_is_admin):
         is_on = bool(cfg.get(key, False))
-        toggle_buttons.append(
-            InlineKeyboardButton(
-                text=f"{'✅' if is_on else '🚫'} {label}",
-                callback_data=f"{CALLBACK_PREFIX}:toggle:{chat_id}:{key}",
-            )
+        toggle_button_map[key] = InlineKeyboardButton(
+            text=f"{'✅' if is_on else '🚫'} {label}",
+            callback_data=f"{CALLBACK_PREFIX}:toggle:{chat_id}:{key}",
         )
-    for i in range(0, len(toggle_buttons), 2):
-        rows.append(toggle_buttons[i : i + 2])
+
+    # action_group_keys = {"active_speak_enabled", "recommend"}
+    # action_group_row = []
+    # for key, _ in _visible_toggle_fields(bot_is_admin):
+    #     if key not in action_group_keys:
+    #         continue
+    #     button = toggle_button_map.pop(key, None)
+    #     if button:
+    #         action_group_row.append(button)
+
+    toggle_buttons = list(toggle_button_map.values())
+    for i in range(0, len(toggle_buttons), 3):
+        rows.append(toggle_buttons[i : i + 3])
+        
+    # if action_group_row:
+    #     rows.append(action_group_row)
+        
+    interval = int(cfg.get("active_speak_interval_min", ACTIVE_SPEAK_DEFAULT_INTERVAL))
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=f"⏱ 主动说话频率：{interval}m",
+                callback_data=f"{CALLBACK_PREFIX}:active_speak_interval:{chat_id}",
+            ),
+        ]
+    )
 
     if bot_is_admin:
+
         rows.append(
             [
-                InlineKeyboardButton(
-                    "📢 设置关注频道",
-                    callback_data=f"{CALLBACK_PREFIX}:force_channel:{chat_id}",
-                ),
                 InlineKeyboardButton(
                     "🤝 商业合作",
                     callback_data=f"{CALLBACK_PREFIX}:business_coop:{chat_id}",
                 ),
-            ]
-        )
-        rows.append(
-            [
                 InlineKeyboardButton(
-                    "📝 广告文案",
-                    callback_data=f"{CALLBACK_PREFIX}:ad_text:{chat_id}",
+                    "📣 消息广播",
+                    callback_data=f"{CALLBACK_PREFIX}:group_broadcast:{chat_id}",
                 ),
                 InlineKeyboardButton(
-                    "⏱ 广告间隔",
-                    callback_data=f"{CALLBACK_PREFIX}:ad_interval:{chat_id}",
+                    "📢 强制关注设置",
+                    callback_data=f"{CALLBACK_PREFIX}:force_subscribe_menu:{chat_id}",
                 ),
             ]
         )
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🕒 广告定时",
-                    callback_data=f"{CALLBACK_PREFIX}:ad_times:{chat_id}",
+                    "📢 广告推送设置",
+                    callback_data=f"{CALLBACK_PREFIX}:ad_push_menu:{chat_id}",
                 ),
                 InlineKeyboardButton(
-                    "🔀 推送模式",
-                    callback_data=f"{CALLBACK_PREFIX}:ad_mode:{chat_id}",
+                    "🎰 积分抽奖设置",
+                    callback_data=f"{CALLBACK_PREFIX}:lottery_menu:{chat_id}",
                 ),
             ]
         )
@@ -432,6 +669,10 @@ def _build_group_panel_keyboard(
         spam_limit = int(cfg.get("spam_limit_max_per_minute", 10))
         rows.append(
             [
+                InlineKeyboardButton(
+                    text=f"{'✅' if bool(cfg.get('spam_limit', False)) else '🚫'} 防刷屏限频",
+                    callback_data=f"{CALLBACK_PREFIX}:toggle:{chat_id}:spam_limit",
+                ),
                 InlineKeyboardButton(
                     text=f"➖ 限频 {max(1, spam_limit - 1)}",
                     callback_data=f"{CALLBACK_PREFIX}:spam:{chat_id}:-1",
@@ -443,61 +684,42 @@ def _build_group_panel_keyboard(
             ]
         )
     else:
+
         rows.append(
-            [
+            
+            [   
                 InlineKeyboardButton(
                     "🤝 商业合作",
                     callback_data=f"{CALLBACK_PREFIX}:business_coop:{chat_id}",
                 )
+                
+             
             ]
         )
 
-    interval = int(cfg.get("active_speak_interval_min", 120))
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="-10",
-                callback_data=f"{CALLBACK_PREFIX}:interval_delta:{chat_id}:-10",
-            ),
-            InlineKeyboardButton(
-                text="-1",
-                callback_data=f"{CALLBACK_PREFIX}:interval_delta:{chat_id}:-1",
-            ),
-            InlineKeyboardButton(
-                text=f"⏱ {interval}m",
-                callback_data=f"{CALLBACK_PREFIX}:noop",
-            ),
-            InlineKeyboardButton(
-                text="+1",
-                callback_data=f"{CALLBACK_PREFIX}:interval_delta:{chat_id}:+1",
-            ),
-            InlineKeyboardButton(
-                text="+10",
-                callback_data=f"{CALLBACK_PREFIX}:interval_delta:{chat_id}:+10",
-            ),
-        ]
-    )
+
 
     rows.append(
         [
-            InlineKeyboardButton("⬅️ 选择其他群", callback_data=f"{CALLBACK_PREFIX}:list:{max(1, list_page)}"),
-            InlineKeyboardButton("🔄 刷新", callback_data=f"{CALLBACK_PREFIX}:open:{chat_id}"),
-        ]
-    )
-    rows.insert(
-        len(rows) - 1,
-        [
             InlineKeyboardButton(
-                "🎰 积分抽奖设置",
-                callback_data=f"{CALLBACK_PREFIX}:lottery_menu:{chat_id}",
+                "⬅️ 选择其他群",
+                callback_data=f"{CALLBACK_PREFIX}:list:{max(1, list_page)}",
             ),
-        ],
+            InlineKeyboardButton(
+                "🔄 刷新", callback_data=f"{CALLBACK_PREFIX}:open:{chat_id}"
+            ),
+        ]
     )
     return InlineKeyboardMarkup(rows)
 
 
 def _build_group_panel_keyboard_for_user(
-    chat_id: str, cfg: dict, user_id: int, list_page: int = 1, *, bot_is_admin: bool = False
+    chat_id: str,
+    cfg: dict,
+    user_id: int,
+    list_page: int = 1,
+    *,
+    bot_is_admin: bool = False,
 ) -> InlineKeyboardMarkup:
     rows = list(
         _build_group_panel_keyboard(
@@ -540,9 +762,7 @@ async def _can_manage_group(
         return False
 
 
-async def _is_bot_group_admin(
-    context: ContextTypes.DEFAULT_TYPE, chat_id: int
-) -> bool:
+async def _is_bot_group_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
     cache = context.application.bot_data.setdefault("group_bot_admin_cache", {})
     bot_id = getattr(context.bot, "id", 0)
     cache_key = f"{bot_id}:{chat_id}"
@@ -694,14 +914,20 @@ async def group_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not data:
         add_group_url = _add_group_url(context)
         reply_markup = (
-            InlineKeyboardMarkup([[InlineKeyboardButton("+ 添加群组", url=add_group_url)]])
+            InlineKeyboardMarkup(
+                [[InlineKeyboardButton("+ 添加群组", url=add_group_url)]]
+            )
             if add_group_url
             else None
         )
-        return await safe_reply(update, context, "暂无可配置的群记录。", reply_markup=reply_markup)
+        return await safe_reply(
+            update, context, "暂无可配置的群记录。", reply_markup=reply_markup
+        )
     page = 1
     context.user_data["group_setting_list_page"] = page
-    keyboard = _build_group_list_keyboard(data, page, add_group_url=_add_group_url(context))
+    keyboard = _build_group_list_keyboard(
+        data, page, add_group_url=_add_group_url(context)
+    )
     if not keyboard.inline_keyboard:
         return await safe_reply(update, context, "暂无可配置的群记录。")
     await update.message.reply_text(_group_list_text(data, page), reply_markup=keyboard)
@@ -775,6 +1001,16 @@ def _parse_ad_times(raw: str) -> list[str]:
     return sorted(set(slots))
 
 
+def _parse_positive_int(text: str) -> Optional[int]:
+    raw = str(text or "").strip()
+    if not raw.isdigit():
+        return None
+    value = int(raw)
+    if value < 1:
+        return None
+    return value
+
+
 @register_command("群广告推送")
 async def ad_push_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_chat:
@@ -797,7 +1033,12 @@ async def ad_push_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mode = str(cfg.get("ad_push_mode", "interval"))
         interval = int(cfg.get("ad_push_interval_min", 120))
         times = str(cfg.get("ad_push_times", "")).strip() or "未设置"
-        text = "已设置" if str(cfg.get("ad_push_text", "")).strip() else "未设置"
+        text = (
+            "已设置"
+            if isinstance(cfg.get(AD_PUSH_MESSAGE_KEY), dict)
+            or str(cfg.get("ad_push_text", "")).strip()
+            else "未设置"
+        )
         enabled = "✅ 开启" if bool(cfg.get("ad_push_enabled", False)) else "🚫 关闭"
         return await safe_reply(
             update,
@@ -810,11 +1051,11 @@ async def ad_push_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"文案：{text}\n\n"
                 "用法：\n"
                 "群广告推送 开启/关闭\n"
-                "群广告推送 文案 你的广告内容\n"
+                "群广告推送 消息（回复一条消息）\n"
                 "群广告推送 间隔 60\n"
                 "群广告推送 定时 09:00,12:30,21:00\n"
                 "群广告推送 模式 间隔/定时\n"
-                "群广告推送 清空文案"
+                "群广告推送 清空消息"
             ),
         )
 
@@ -831,47 +1072,67 @@ async def ad_push_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_json(GROUP_LIST_FILE, data)
         return await safe_reply(update, context, "❌ 群广告推送已关闭")
 
-    if cmd in {"文案", "text"}:
-        ad_text = " ".join(args[1:]).strip() if len(args) > 1 else ""
-        if not ad_text:
-            return await safe_reply(update, context, "❗ 请输入广告文案。")
-        cfg["ad_push_text"] = ad_text
+    if cmd in {"消息", "message"}:
+        source_msg = update.message.reply_to_message if update.message else None
+        if not source_msg:
+            return await safe_reply(update, context, "❗ 请回复一条要推送的消息。")
+        try:
+            cfg[AD_PUSH_MESSAGE_KEY] = build_message_payload(source_msg)
+        except Exception as e:
+            return await safe_reply(update, context, f"❌ 暂不支持该消息类型：{e}")
         data[chat_id] = cfg
         save_json(GROUP_LIST_FILE, data)
-        return await safe_reply(update, context, "✅ 广告文案已保存。")
+        return await safe_reply(update, context, "✅ 推送消息已保存。")
 
-    if cmd in {"清空文案", "clear"}:
+    if cmd in {"清空消息", "clear"}:
+        cfg[AD_PUSH_MESSAGE_KEY] = None
         cfg["ad_push_text"] = ""
         data[chat_id] = cfg
         save_json(GROUP_LIST_FILE, data)
-        return await safe_reply(update, context, "✅ 广告文案已清空。")
+        return await safe_reply(update, context, "✅ 推送消息已清空。")
 
     if cmd in {"间隔", "interval"}:
         if len(args) < 2 or not args[1].isdigit():
-            return await safe_reply(update, context, f"❗ 请输入分钟数（{AD_PUSH_MIN_INTERVAL}-{AD_PUSH_MAX_INTERVAL}）")
+            return await safe_reply(
+                update,
+                context,
+                f"❗ 请输入分钟数（{AD_PUSH_MIN_INTERVAL}-{AD_PUSH_MAX_INTERVAL}）",
+            )
         interval = int(args[1])
         if interval < AD_PUSH_MIN_INTERVAL or interval > AD_PUSH_MAX_INTERVAL:
-            return await safe_reply(update, context, f"❗ 间隔范围：{AD_PUSH_MIN_INTERVAL}-{AD_PUSH_MAX_INTERVAL} 分钟")
+            return await safe_reply(
+                update,
+                context,
+                f"❗ 间隔范围：{AD_PUSH_MIN_INTERVAL}-{AD_PUSH_MAX_INTERVAL} 分钟",
+            )
         cfg["ad_push_mode"] = "interval"
         cfg["ad_push_interval_min"] = interval
         data[chat_id] = cfg
         save_json(GROUP_LIST_FILE, data)
-        return await safe_reply(update, context, f"✅ 已设置广告间隔推送：每 {interval} 分钟")
+        return await safe_reply(
+            update, context, f"✅ 已设置广告间隔推送：每 {interval} 分钟"
+        )
 
     if cmd in {"定时", "time"}:
         raw = " ".join(args[1:]).strip() if len(args) > 1 else ""
         slots = _parse_ad_times(raw)
         if not slots:
-            return await safe_reply(update, context, "❗ 时间格式示例：09:00,12:30,21:00")
+            return await safe_reply(
+                update, context, "❗ 时间格式示例：09:00,12:30,21:00"
+            )
         cfg["ad_push_mode"] = "fixed"
         cfg["ad_push_times"] = ",".join(slots)
         data[chat_id] = cfg
         save_json(GROUP_LIST_FILE, data)
-        return await safe_reply(update, context, f"✅ 已设置广告定时推送：{','.join(slots)}")
+        return await safe_reply(
+            update, context, f"✅ 已设置广告定时推送：{','.join(slots)}"
+        )
 
     if cmd in {"模式", "mode"}:
         if len(args) < 2:
-            return await safe_reply(update, context, "❗ 用法：群广告推送 模式 间隔/定时")
+            return await safe_reply(
+                update, context, "❗ 用法：群广告推送 模式 间隔/定时"
+            )
         mode_raw = args[1].strip().lower()
         if mode_raw in {"间隔", "interval"}:
             cfg["ad_push_mode"] = "interval"
@@ -938,7 +1199,9 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         if chat_id is None:
             return await query.answer("群ID无效", show_alert=True)
         if not _can_leave_group(user_id):
-            return await query.answer("仅高级管理员或机器人所有者可操作。", show_alert=True)
+            return await query.answer(
+                "仅高级管理员或机器人所有者可操作。", show_alert=True
+            )
 
         cfg = data.get(chat_id_str, {})
         if not isinstance(cfg, dict):
@@ -985,15 +1248,20 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             return
         if not await _can_manage_group(context, user_id, chat_id):
             return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
-        if (
-            feature_key in BOT_ADMIN_REQUIRED_FIELDS
-            and not await _is_bot_group_admin(context, chat_id)
+        if feature_key in BOT_ADMIN_REQUIRED_FIELDS and not await _is_bot_group_admin(
+            context, chat_id
         ):
-            return await query.answer("机器人不是该群管理员，无法配置此项。", show_alert=True)
+            return await query.answer(
+                "机器人不是该群管理员，无法配置此项。", show_alert=True
+            )
         cfg = data.get(chat_id_str, {})
         if not isinstance(cfg, dict):
             cfg = {}
-        if feature_key in ({item[0] for item in TOGGLE_FIELDS} | LOTTERY_TOGGLE_KEYS):
+        if feature_key in (
+            {item[0] for item in TOGGLE_FIELDS}
+            | LOTTERY_TOGGLE_KEYS
+            | {"ad_push_enabled", "spam_limit"}
+        ):
             new_value = not bool(cfg.get(feature_key, False))
             cfg[feature_key] = new_value
             if feature_key == "force_subscribe" and new_value:
@@ -1004,13 +1272,57 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                 await unmute_force_subscribe_chat(context, chat_id_str)
         if feature_key in LOTTERY_TOGGLE_KEYS:
             await query.answer("✅ 已更新", show_alert=False)
-            return await _open_lottery_settings_panel(query, context, chat_id_str, user_id)
+            return await _open_lottery_settings_panel(
+                query, context, chat_id_str, user_id
+            )
+        if feature_key == "ad_push_enabled":
+            await query.answer("✅ 已更新", show_alert=False)
+            return await _open_ad_push_settings_panel(
+                query, context, chat_id_str, user_id
+            )
+        if feature_key == "spam_limit":
+            await query.answer("✅ 已更新", show_alert=False)
+            return await _open_group_panel(query, context, chat_id_str, user_id)
+        if feature_key in {"force_subscribe", "force_subscribe_new_only"}:
+            await query.answer("✅ 已更新", show_alert=False)
+            return await _open_force_subscribe_settings_panel(
+                query, context, chat_id_str, user_id
+            )
         return await _open_group_panel(query, context, chat_id_str, user_id)
 
     if action == "lottery_menu" and len(parts) >= 3:
         chat_id_str = parts[2]
         await query.answer()
         return await _open_lottery_settings_panel(query, context, chat_id_str, user_id)
+
+    if action == "ad_push_menu" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        await query.answer()
+        return await _open_ad_push_settings_panel(query, context, chat_id_str, user_id)
+
+    if action == "force_subscribe_menu" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        await query.answer()
+        return await _open_force_subscribe_settings_panel(
+            query, context, chat_id_str, user_id
+        )
+
+    if action == "active_speak_interval" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        context.user_data["group_setting_stage"] = "active_speak_interval"
+        context.user_data["group_setting_chat_id"] = chat_id_str
+        await query.answer()
+        return await query.edit_message_text(
+            f"请输入主动说话频率（分钟，{ACTIVE_SPEAK_MIN_INTERVAL}-{ACTIVE_SPEAK_MAX_INTERVAL}）。",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:active_speak_interval_back")]]
+            ),
+        )
 
     if action == "force_channel" and len(parts) >= 3:
         chat_id_str = parts[2]
@@ -1020,7 +1332,9 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         if not await _can_manage_group(context, user_id, chat_id):
             return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
         if not await _is_bot_group_admin(context, chat_id):
-            return await query.answer("机器人不是该群管理员，无法配置此项。", show_alert=True)
+            return await query.answer(
+                "机器人不是该群管理员，无法配置此项。", show_alert=True
+            )
         context.user_data["group_setting_stage"] = "force_channel"
         context.user_data["group_setting_chat_id"] = chat_id_str
         await query.answer()
@@ -1035,7 +1349,8 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                             callback_data=f"{CALLBACK_PREFIX}:force_channel_clear:{chat_id_str}",
                         ),
                         InlineKeyboardButton(
-                            "⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:force_channel_back"
+                            "⬅️ 返回",
+                            callback_data=f"{CALLBACK_PREFIX}:force_subscribe_back",
                         ),
                     ]
                 ]
@@ -1054,7 +1369,61 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         return await query.edit_message_text(
             "请输入商业合作链接。\n支持 @username、t.me/xxx、https://xxx\n发送「清空」可移除当前设置。",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:business_coop_back")]]
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ 返回",
+                            callback_data=f"{CALLBACK_PREFIX}:business_coop_back",
+                        )
+                    ]
+                ]
+            ),
+        )
+    if action == "group_broadcast" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        if not await _is_bot_group_admin(context, chat_id):
+            return await query.answer(
+                "机器人不是该群管理员，无法使用此项。", show_alert=True
+            )
+        context.user_data["group_setting_stage"] = "group_broadcast"
+        context.user_data["group_setting_chat_id"] = chat_id_str
+        await query.answer()
+        return await query.edit_message_text(
+            "请输入要广播到群里的消息内容。\n发送“取消”可返回。",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ 返回",
+                            callback_data=f"{CALLBACK_PREFIX}:group_broadcast_back",
+                        )
+                    ]
+                ]
+            ),
+        )
+    if action == "ad_message" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        if not await _is_bot_group_admin(context, chat_id):
+            return await query.answer(
+                "机器人不是该群管理员，无法配置此项。", show_alert=True
+            )
+        context.user_data["group_setting_stage"] = "ad_message"
+        context.user_data["group_setting_chat_id"] = chat_id_str
+        await query.answer()
+        return await query.edit_message_text(
+            "请发送要用于广告推送的消息。\n支持文本、图片、视频、文件、语音等常见类型。\n发送“清空”可移除当前消息。",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:ad_back")]]
             ),
         )
     if action in {"ad_text", "ad_interval", "ad_times", "ad_mode"} and len(parts) >= 3:
@@ -1065,10 +1434,18 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         if not await _can_manage_group(context, user_id, chat_id):
             return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
         if not await _is_bot_group_admin(context, chat_id):
-            return await query.answer("机器人不是该群管理员，无法配置此项。", show_alert=True)
+            return await query.answer(
+                "机器人不是该群管理员，无法配置此项。", show_alert=True
+            )
         context.user_data["group_setting_chat_id"] = chat_id_str
         back_markup = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:ad_back")]]
+            [
+                [
+                    InlineKeyboardButton(
+                        "⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:ad_back"
+                    )
+                ]
+            ]
         )
         if action == "ad_text":
             context.user_data["group_setting_stage"] = "ad_text"
@@ -1107,7 +1484,14 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
         context.user_data["group_setting_chat_id"] = chat_id_str
         back_markup = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:lottery_menu:{chat_id_str}")]]
+            [
+                [
+                    InlineKeyboardButton(
+                        "⬅️ 返回",
+                        callback_data=f"{CALLBACK_PREFIX}:lottery_menu:{chat_id_str}",
+                    )
+                ]
+            ]
         )
         if action == "talk_points":
             cfg = data.get(chat_id_str, {})
@@ -1158,7 +1542,14 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                 f"范围：{LOTTERY_COST_MIN}-{LOTTERY_COST_MAX}"
             ),
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:lottery_menu:{chat_id_str}")]]
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ 返回",
+                            callback_data=f"{CALLBACK_PREFIX}:lottery_menu:{chat_id_str}",
+                        )
+                    ]
+                ]
             ),
         )
     if action == "lottery_display_text" and len(parts) >= 3:
@@ -1180,7 +1571,14 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                 "发送“默认”可恢复默认文案。"
             ),
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:lottery_prizes:{chat_id_str}")]]
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ 返回",
+                            callback_data=f"{CALLBACK_PREFIX}:lottery_prizes:{chat_id_str}",
+                        )
+                    ]
+                ]
             ),
         )
     if action == "lottery_prizes" and len(parts) >= 3:
@@ -1209,10 +1607,20 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         return await query.edit_message_text(
             "请输入奖品信息：奖品名称 | 中奖率 | 奖品数量\n示例：iPhone15 | 5 | 1",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:lottery_prizes:{chat_id_str}")]]
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ 返回",
+                            callback_data=f"{CALLBACK_PREFIX}:lottery_prizes:{chat_id_str}",
+                        )
+                    ]
+                ]
             ),
         )
-    if action in {"lottery_prize_edit_menu", "lottery_prize_delete_menu"} and len(parts) >= 3:
+    if (
+        action in {"lottery_prize_edit_menu", "lottery_prize_delete_menu"}
+        and len(parts) >= 3
+    ):
         chat_id_str = parts[2]
         chat_id = _parse_chat_id(chat_id_str)
         if chat_id is None:
@@ -1232,7 +1640,14 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             ]
             for prize in prizes
         ]
-        rows.append([InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:lottery_prizes:{chat_id_str}")])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "⬅️ 返回",
+                    callback_data=f"{CALLBACK_PREFIX}:lottery_prizes:{chat_id_str}",
+                )
+            ]
+        )
         await query.answer()
         return await query.edit_message_text(
             f"请选择要{'修改' if edit_mode == 'edit' else '删除'}的奖品：",
@@ -1259,7 +1674,14 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                 f"当前：{prize.get('name')} | {int(prize.get('rate', 0) or 0)} | {int(prize.get('stock', 0) or 0)}"
             ),
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:lottery_prize_edit_menu:{chat_id_str}")]]
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ 返回",
+                            callback_data=f"{CALLBACK_PREFIX}:lottery_prize_edit_menu:{chat_id_str}",
+                        )
+                    ]
+                ]
             ),
         )
     if action == "lottery_prize_delete_pick" and len(parts) >= 4:
@@ -1282,23 +1704,33 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         chat_id_str = context.user_data.pop("group_setting_chat_id", None)
         await query.answer()
         if chat_id_str:
-            return await _open_group_panel(query, context, chat_id_str, user_id)
+            return await _open_ad_push_settings_panel(
+                query, context, chat_id_str, user_id
+            )
         return
     if action == "points_back":
         context.user_data.pop("group_setting_stage", None)
         chat_id_str = context.user_data.pop("group_setting_chat_id", None)
         await query.answer()
         if chat_id_str:
-            return await _open_lottery_settings_panel(query, context, chat_id_str, user_id)
+            return await _open_lottery_settings_panel(
+                query, context, chat_id_str, user_id
+            )
         return
     if action == "lottery_back":
         context.user_data.pop("group_setting_stage", None)
         context.user_data.pop("group_setting_prize_id", None)
-        chat_id_str = parts[2] if len(parts) >= 3 else context.user_data.pop("group_setting_chat_id", None)
+        chat_id_str = (
+            parts[2]
+            if len(parts) >= 3
+            else context.user_data.pop("group_setting_chat_id", None)
+        )
         await query.answer()
         if chat_id_str:
             context.user_data["group_setting_chat_id"] = chat_id_str
-            return await _open_lottery_settings_panel(query, context, chat_id_str, user_id)
+            return await _open_lottery_settings_panel(
+                query, context, chat_id_str, user_id
+            )
         return
     if action == "force_channel_clear" and len(parts) >= 3:
         chat_id_str = parts[2]
@@ -1308,20 +1740,31 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         if not await _can_manage_group(context, user_id, chat_id):
             return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
         if not await _is_bot_group_admin(context, chat_id):
-            return await query.answer("机器人不是该群管理员，无法配置此项。", show_alert=True)
+            return await query.answer(
+                "机器人不是该群管理员，无法配置此项。", show_alert=True
+            )
         _set_force_channel(chat_id_str, "")
         context.user_data.pop("group_setting_stage", None)
         context.user_data.pop("group_setting_chat_id", None)
         await query.answer("✅ 已清空", show_alert=False)
         return await _open_group_panel(query, context, chat_id_str, user_id)
-    if action == "force_channel_back":
+    if action == "force_subscribe_back":
+        context.user_data.pop("group_setting_stage", None)
+        chat_id_str = context.user_data.pop("group_setting_chat_id", None)
+        await query.answer()
+        if chat_id_str:
+            return await _open_force_subscribe_settings_panel(
+                query, context, chat_id_str, user_id
+            )
+        return
+    if action == "business_coop_back":
         context.user_data.pop("group_setting_stage", None)
         chat_id_str = context.user_data.pop("group_setting_chat_id", None)
         await query.answer()
         if chat_id_str:
             return await _open_group_panel(query, context, chat_id_str, user_id)
         return
-    if action == "business_coop_back":
+    if action == "group_broadcast_back":
         context.user_data.pop("group_setting_stage", None)
         chat_id_str = context.user_data.pop("group_setting_chat_id", None)
         await query.answer()
@@ -1338,7 +1781,9 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         if not await _can_manage_group(context, user_id, chat_id):
             return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
         if not await _is_bot_group_admin(context, chat_id):
-            return await query.answer("机器人不是该群管理员，无法配置此项。", show_alert=True)
+            return await query.answer(
+                "机器人不是该群管理员，无法配置此项。", show_alert=True
+            )
         cfg = data.get(chat_id_str, {})
         if not isinstance(cfg, dict):
             cfg = {}
@@ -1349,51 +1794,13 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         save_json(GROUP_LIST_FILE, data)
         return await _open_group_panel(query, context, chat_id_str, user_id)
 
-    if action == "interval" and len(parts) >= 4:
-        chat_id_str = parts[2]
-        interval = int(parts[3])
-        chat_id = _parse_chat_id(chat_id_str)
-        if chat_id is None:
-            return
-        if not await _can_manage_group(context, user_id, chat_id):
-            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
-        cfg = data.get(chat_id_str, {})
-        if not isinstance(cfg, dict):
-            cfg = {}
-        cfg["active_speak_interval_min"] = max(
-            ACTIVE_SPEAK_MIN_INTERVAL, min(ACTIVE_SPEAK_MAX_INTERVAL, interval)
-        )
-        data[chat_id_str] = cfg
-        save_json(GROUP_LIST_FILE, data)
-        return await _open_group_panel(query, context, chat_id_str, user_id)
-
-    if action == "interval_delta" and len(parts) >= 4:
-        chat_id_str = parts[2]
-        chat_id = _parse_chat_id(chat_id_str)
-        if chat_id is None:
-            return
-        if not await _can_manage_group(context, user_id, chat_id):
-            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
-
-        try:
-            delta = int(parts[3])
-        except Exception:
-            return
-
-        cfg = data.get(chat_id_str, {})
-        if not isinstance(cfg, dict):
-            cfg = {}
-        current = int(cfg.get("active_speak_interval_min", 120))
-        cfg["active_speak_interval_min"] = max(
-            ACTIVE_SPEAK_MIN_INTERVAL,
-            min(ACTIVE_SPEAK_MAX_INTERVAL, current + delta),
-        )
-        data[chat_id_str] = cfg
-        save_json(GROUP_LIST_FILE, data)
-        return await _open_group_panel(query, context, chat_id_str, user_id)
-
-    if action == "noop":
-        return await query.answer("当前主动说话频率", show_alert=False)
+    if action == "active_speak_interval_back":
+        context.user_data.pop("group_setting_stage", None)
+        chat_id_str = context.user_data.pop("group_setting_chat_id", None)
+        await query.answer()
+        if chat_id_str:
+            return await _open_group_panel(query, context, chat_id_str, user_id)
+        return
     if action == "clean_point":
         chat_id_str = parts[2]
         chat_id = _parse_chat_id(chat_id_str)
@@ -1403,7 +1810,9 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
 
         # ✅ 权限检查
         if not await _can_manage_group(context, user_id, chat_id):
-            return await query.answer("你不是该群管理员，无法清空积分。", show_alert=True)
+            return await query.answer(
+                "你不是该群管理员，无法清空积分。", show_alert=True
+            )
 
         # ✅ 执行清空
         success, msg = clean_point(chat_id_str)
@@ -1422,7 +1831,23 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
     if update.effective_chat.type != "private":
         return
     stage = context.user_data.get("group_setting_stage")
-    if stage not in {"force_channel", "ad_text", "ad_interval", "ad_times", "ad_mode", "business_coop", "talk_points", "invite_points", "lottery_cost", "lottery_display_text", "lottery_prize_add", "lottery_prize_edit"}:
+    if stage not in {
+        "force_channel",
+        "active_speak_interval",
+        "ad_message",
+        "ad_text",
+        "ad_interval",
+        "ad_times",
+        "ad_mode",
+        "business_coop",
+        "group_broadcast",
+        "talk_points",
+        "invite_points",
+        "lottery_cost",
+        "lottery_display_text",
+        "lottery_prize_add",
+        "lottery_prize_edit",
+    }:
         return
 
     chat_id_str = context.user_data.get("group_setting_chat_id")
@@ -1431,10 +1856,13 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
         return
 
     text = (update.message.text or "").strip()
-    if not text:
+    message = update.message
+    if not message:
         return
 
     if stage == "force_channel":
+        if not text:
+            return await update.message.reply_text("❗ 请发送频道用户名文本。")
         if text in {"清空", "取消", "关闭"}:
             _set_force_channel(chat_id_str, "")
             context.user_data.pop("group_setting_stage", None)
@@ -1449,6 +1877,8 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
             context.user_data.pop("group_setting_chat_id", None)
             await update.message.reply_text(f"✅ 已设置强制关注频道为：{text}")
     elif stage == "business_coop":
+        if not text:
+            return await update.message.reply_text("❗ 请发送商业合作链接文本。")
         data = get_group_whitelist(context)
         cfg = data.get(chat_id_str, {})
         if not isinstance(cfg, dict):
@@ -1465,6 +1895,29 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
         context.user_data.pop("group_setting_chat_id", None)
         data[chat_id_str] = cfg
         save_json(GROUP_LIST_FILE, data)
+    elif stage == "group_broadcast":
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            context.user_data.pop("group_setting_stage", None)
+            context.user_data.pop("group_setting_chat_id", None)
+            return await update.message.reply_text("❗ 群ID无效。")
+        if text in {"取消", "返回"}:
+            context.user_data.pop("group_setting_stage", None)
+            context.user_data.pop("group_setting_chat_id", None)
+            await update.message.reply_text("✅ 已取消。")
+        else:
+            try:
+                payload = build_message_payload(message)
+                await send_message_payload(context.bot, chat_id=chat_id, payload=payload)
+                context.user_data.pop("group_setting_stage", None)
+                context.user_data.pop("group_setting_chat_id", None)
+                await update.message.reply_text("✅ 已发送到群里。")
+            except Exception as e:
+                return await update.message.reply_text(f"❌ 发送失败：{e}")
+        data = get_group_whitelist(context)
+        cfg = data.get(chat_id_str, {})
+        if not isinstance(cfg, dict):
+            cfg = {}
     else:
         data = get_group_whitelist(context)
         cfg = data.get(chat_id_str, {})
@@ -1475,7 +1928,21 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
             context.user_data.pop("group_setting_stage", None)
             context.user_data.pop("group_setting_chat_id", None)
             await update.message.reply_text("✅ 已取消。")
+        elif stage == "ad_message":
+            if text in {"清空", "关闭"}:
+                cfg[AD_PUSH_MESSAGE_KEY] = None
+                cfg["ad_push_text"] = ""
+                await update.message.reply_text("✅ 已清空推送消息。")
+            else:
+                try:
+                    cfg[AD_PUSH_MESSAGE_KEY] = build_message_payload(message)
+                    cfg["ad_push_text"] = ""
+                    await update.message.reply_text("✅ 推送消息已保存。")
+                except Exception as e:
+                    return await update.message.reply_text(f"❌ 暂不支持该消息类型：{e}")
         elif stage == "ad_text":
+            if not text:
+                return await update.message.reply_text("❗ 请输入广告文案。")
             if text in {"清空", "关闭"}:
                 cfg["ad_push_text"] = ""
                 await update.message.reply_text("✅ 已清空广告文案。")
@@ -1483,6 +1950,8 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
                 cfg["ad_push_text"] = text
                 await update.message.reply_text("✅ 广告文案已保存。")
         elif stage == "ad_interval":
+            if not text:
+                return await update.message.reply_text("❗ 请输入数字分钟。")
             if not text.isdigit():
                 return await update.message.reply_text("❗ 请输入数字分钟。")
             interval = int(text)
@@ -1494,31 +1963,63 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
             cfg["ad_push_interval_min"] = interval
             await update.message.reply_text(f"✅ 已设置广告间隔：每 {interval} 分钟")
         elif stage == "ad_times":
+            if not text:
+                return await update.message.reply_text(
+                    "❗ 时间格式示例：09:00,12:30,21:00"
+                )
             slots = _parse_ad_times(text)
             if not slots:
-                return await update.message.reply_text("❗ 时间格式示例：09:00,12:30,21:00")
+                return await update.message.reply_text(
+                    "❗ 时间格式示例：09:00,12:30,21:00"
+                )
             cfg["ad_push_mode"] = "fixed"
             cfg["ad_push_times"] = ",".join(slots)
             await update.message.reply_text(f"✅ 已设置广告定时：{','.join(slots)}")
         elif stage == "ad_mode":
+            if not text:
+                return await update.message.reply_text("❗ 模式仅支持：间隔 或 定时")
             if text not in {"间隔", "定时"}:
                 return await update.message.reply_text("❗ 模式仅支持：间隔 或 定时")
             cfg["ad_push_mode"] = "interval" if text == "间隔" else "fixed"
             await update.message.reply_text(f"✅ 已切换广告推送模式为：{text}")
+        elif stage == "active_speak_interval":
+            if not text:
+                return await update.message.reply_text("❗ 请输入数字分钟。")
+            interval = _parse_positive_int(text)
+            if interval is None:
+                return await update.message.reply_text("❗ 请输入数字分钟。")
+            if interval < ACTIVE_SPEAK_MIN_INTERVAL or interval > ACTIVE_SPEAK_MAX_INTERVAL:
+                return await update.message.reply_text(
+                    f"❗ 频率范围：{ACTIVE_SPEAK_MIN_INTERVAL}-{ACTIVE_SPEAK_MAX_INTERVAL} 分钟"
+                )
+            cfg["active_speak_interval_min"] = interval
+            await update.message.reply_text(
+                f"✅ 已设置主动说话频率：每 {interval} 分钟"
+            )
         elif stage == "talk_points":
+            if not text:
+                return await update.message.reply_text("❗ 请输入 3 个数字，例如：1 50 5")
             parts = text.replace("，", " ").split()
             if len(parts) != 3 or not all(p.isdigit() for p in parts):
-                return await update.message.reply_text("❗ 请输入 3 个数字，例如：1 50 5")
+                return await update.message.reply_text(
+                    "❗ 请输入 3 个数字，例如：1 50 5"
+                )
             amount, daily_limit, min_length = map(int, parts)
             if not (TALK_POINTS_AMOUNT_MIN <= amount <= TALK_POINTS_AMOUNT_MAX):
                 return await update.message.reply_text(
                     f"❗ 每次积分范围：{TALK_POINTS_AMOUNT_MIN}-{TALK_POINTS_AMOUNT_MAX}"
                 )
-            if not (TALK_POINTS_DAILY_LIMIT_MIN <= daily_limit <= TALK_POINTS_DAILY_LIMIT_MAX):
+            if not (
+                TALK_POINTS_DAILY_LIMIT_MIN
+                <= daily_limit
+                <= TALK_POINTS_DAILY_LIMIT_MAX
+            ):
                 return await update.message.reply_text(
                     f"❗ 每日上限范围：{TALK_POINTS_DAILY_LIMIT_MIN}-{TALK_POINTS_DAILY_LIMIT_MAX}"
                 )
-            if not (TALK_POINTS_MIN_LENGTH_MIN <= min_length <= TALK_POINTS_MIN_LENGTH_MAX):
+            if not (
+                TALK_POINTS_MIN_LENGTH_MIN <= min_length <= TALK_POINTS_MIN_LENGTH_MAX
+            ):
                 return await update.message.reply_text(
                     f"❗ 最小字数范围：{TALK_POINTS_MIN_LENGTH_MIN}-{TALK_POINTS_MIN_LENGTH_MAX}"
                 )
@@ -1529,6 +2030,8 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
                 f"✅ 已设置发言积分规则：每次 {amount} 分，每日上限 {daily_limit} 分，最小字数 {min_length}"
             )
         elif stage == "invite_points":
+            if not text:
+                return await update.message.reply_text("❗ 请输入 2 个数字，例如：5 50")
             parts = text.replace("，", " ").split()
             if len(parts) != 2 or not all(p.isdigit() for p in parts):
                 return await update.message.reply_text("❗ 请输入 2 个数字，例如：5 50")
@@ -1537,7 +2040,11 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
                 return await update.message.reply_text(
                     f"❗ 每邀请积分范围：{INVITE_POINTS_AMOUNT_MIN}-{INVITE_POINTS_AMOUNT_MAX}"
                 )
-            if not (INVITE_POINTS_DAILY_LIMIT_MIN <= daily_limit <= INVITE_POINTS_DAILY_LIMIT_MAX):
+            if not (
+                INVITE_POINTS_DAILY_LIMIT_MIN
+                <= daily_limit
+                <= INVITE_POINTS_DAILY_LIMIT_MAX
+            ):
                 return await update.message.reply_text(
                     f"❗ 每日上限范围：{INVITE_POINTS_DAILY_LIMIT_MIN}-{INVITE_POINTS_DAILY_LIMIT_MAX}"
                 )
@@ -1547,6 +2054,8 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
                 f"✅ 已设置邀请积分规则：每邀请 1 人 {amount} 分，每日上限 {daily_limit} 分"
             )
         elif stage == "lottery_cost":
+            if not text:
+                return await update.message.reply_text("❗ 请输入数字。")
             if not text.isdigit():
                 return await update.message.reply_text("❗ 请输入数字。")
             cost = int(text)
@@ -1557,6 +2066,8 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
             cfg["points_lottery_cost"] = cost
             await update.message.reply_text(f"✅ 已设置单次抽奖积分：{cost}")
         elif stage == "lottery_display_text":
+            if not text:
+                return await update.message.reply_text("❗ 请输入抽奖显示文案。")
             if text in {"默认", "恢复默认"}:
                 cfg["points_lottery_display_text"] = "奖池丰厚，祝您好运。"
                 await update.message.reply_text("✅ 已恢复默认抽奖显示文案。")
@@ -1566,12 +2077,16 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
         elif stage in {"lottery_prize_add", "lottery_prize_edit"}:
             parts = [p.strip() for p in text.replace("｜", "|").split("|")]
             if len(parts) != 3:
-                return await update.message.reply_text("❗ 格式应为：奖品名称 | 中奖率 | 奖品数量")
+                return await update.message.reply_text(
+                    "❗ 格式应为：奖品名称 | 中奖率 | 奖品数量"
+                )
             name, rate_raw, stock_raw = parts
             if not name:
                 return await update.message.reply_text("❗ 奖品名称不能为空。")
             if not rate_raw.isdigit() or not stock_raw.isdigit():
-                return await update.message.reply_text("❗ 中奖率和奖品数量必须是数字。")
+                return await update.message.reply_text(
+                    "❗ 中奖率和奖品数量必须是数字。"
+                )
             rate = int(rate_raw)
             stock = int(stock_raw)
             if stage == "lottery_prize_add":
@@ -1581,7 +2096,9 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
                 prize_id = context.user_data.get("group_setting_prize_id")
                 if not prize_id:
                     return await update.message.reply_text("❗ 未找到要修改的奖品。")
-                ok = update_points_lottery_prize(chat_id_str, prize_id, name, rate, stock)
+                ok = update_points_lottery_prize(
+                    chat_id_str, prize_id, name, rate, stock
+                )
                 if not ok:
                     return await update.message.reply_text("❗ 修改失败，奖品不存在。")
                 await update.message.reply_text(f"✅ 已修改奖品：{name}")
@@ -1620,6 +2137,7 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
     )
     raise ApplicationHandlerStop
 
+
 def register_group_setting_handlers(app):
     app.add_handler(CommandHandler("group_status", group_status))
     app.add_handler(CommandHandler("welcome", toggle_welcome))
@@ -1628,12 +2146,13 @@ def register_group_setting_handlers(app):
     app.add_handler(CommandHandler("_ad_filter", toggle_ad_filter))
     app.add_handler(CommandHandler("toggle_manor", toggle_manor))
     app.add_handler(CommandHandler("group", group_help))
-    app.add_handler(CallbackQueryHandler(group_setting_callback, pattern=rf"^{CALLBACK_PREFIX}:"))
+    app.add_handler(
+        CallbackQueryHandler(group_setting_callback, pattern=rf"^{CALLBACK_PREFIX}:")
+    )
     app.add_handler(
         MessageHandler(
-            filters.ChatType.PRIVATE & filters.TEXT & (~filters.COMMAND),
+            filters.ChatType.PRIVATE & (~filters.COMMAND),
             handle_group_setting_text,
-        )
-        ,
+        ),
         group=-5,
     )

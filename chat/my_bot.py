@@ -20,6 +20,7 @@ import requests
 from telegram.constants import ParseMode
 from command_router import register_command
 from game.voice_reply import group_tts_voice, tts_voice_reply
+from forward.message_forward import send_message_payload
 from utils import (
     AD_KEYWORDS_FILE,
     BOT_OWNER_ID,
@@ -94,8 +95,9 @@ GROUP_KEY_AD_PUSH_ENABLED = "ad_push_enabled"
 GROUP_KEY_AD_PUSH_MODE = "ad_push_mode"
 GROUP_KEY_AD_PUSH_INTERVAL = "ad_push_interval_min"
 GROUP_KEY_AD_PUSH_TEXT = "ad_push_text"
+GROUP_KEY_AD_PUSH_MESSAGE = "ad_push_message"
 GROUP_KEY_AD_PUSH_TIMES = "ad_push_times"
-ACTIVE_SPEAK_DEFAULT_INTERVAL_MIN = 120
+ACTIVE_SPEAK_DEFAULT_INTERVAL_MIN = 2
 ACTIVE_SPEAK_MIN_INTERVAL_MIN = 1
 ACTIVE_SPEAK_MAX_INTERVAL_MIN = 1440
 AD_PUSH_MODE_INTERVAL = "interval"
@@ -1477,8 +1479,14 @@ async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
         if not bool(cfg.get(GROUP_KEY_AD_PUSH_ENABLED, False)):
             continue
 
-        text = str(cfg.get(GROUP_KEY_AD_PUSH_TEXT, "")).strip()
-        if not text:
+        payload = cfg.get(GROUP_KEY_AD_PUSH_MESSAGE)
+        if not isinstance(payload, dict):
+            text = str(cfg.get(GROUP_KEY_AD_PUSH_TEXT, "")).strip()
+            if text:
+                payload = {"type": "text", "text": text}
+            else:
+                payload = None
+        if not payload:
             continue
 
         runtime_chat_key = get_runtime_chat_key(context, str(chat_id))
@@ -1494,7 +1502,7 @@ async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
             if last_ad_push_slot.get(runtime_chat_key) == slot_key:
                 continue
             try:
-                await context.bot.send_message(chat_id=int(chat_id), text=text)
+                await send_message_payload(context.bot, chat_id=int(chat_id), payload=payload)
                 last_ad_push_slot[runtime_chat_key] = slot_key
             except Exception as e:
                 print(f"⚠️ 广告定时发送失败: {chat_id}, {e}")
@@ -1515,7 +1523,7 @@ async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
             continue
 
         try:
-            await context.bot.send_message(chat_id=int(chat_id), text=text)
+            await send_message_payload(context.bot, chat_id=int(chat_id), payload=payload)
             last_ad_push_ts[runtime_chat_key] = now_ts
         except Exception as e:
             print(f"⚠️ 广告间隔发送失败: {chat_id}, {e}")
