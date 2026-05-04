@@ -323,8 +323,9 @@ def save_json(path: str, data):
     path = _resolve_json_path(path)
     with _cache_lock:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        use_pretty_indent = (
-            not str(path).replace("\\", "/").endswith("learned_pairs.json")
+        norm_path = str(path).replace("\\", "/")
+        use_pretty_indent = not (
+            norm_path.endswith("learned_pairs.json") or "/user_logs/" in norm_path
         )
         with open(path, "w", encoding="utf-8") as f:
             json.dump(
@@ -817,7 +818,6 @@ def save_chat_message(log_dir: str, chat_id: str, msg):
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
     data = load_json(file_path) or {}
-    print("SAVE PATH:", os.path.abspath(file_path))
     data.setdefault("messages", [])
 
     content = {

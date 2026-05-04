@@ -8,6 +8,7 @@ from info.economy import ensure_user_exists
 from utils import get_group_whitelist, is_admin, is_super_admin, load_json, save_json, safe_reply
 
 USER_DIR = "data/group_users"
+LAST_SEEN_SAVE_INTERVAL = 60
 os.makedirs(USER_DIR, exist_ok=True)
 
 
@@ -142,12 +143,23 @@ async def record_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(user.id)
 
     old = users.get(uid, {})
+    if not isinstance(old, dict):
+        old = {}
 
     new_username = user.username
     new_full_name = user.full_name
 
     username_changed = old.get("username") != new_username
     name_changed = old.get("full_name") != new_full_name
+    now_ts = int(time.time())
+    last_seen = int(old.get("last_seen", 0) or 0) if isinstance(old, dict) else 0
+    should_save = (
+        not isinstance(old, dict)
+        or not old
+        or username_changed
+        or name_changed
+        or now_ts - last_seen >= LAST_SEEN_SAVE_INTERVAL
+    )
 
     # username 变更历史（可选）
     history = old.get("username_history", [])
@@ -155,15 +167,16 @@ async def record_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if username_changed and old.get("username"):
         history.append(old.get("username"))
 
-    users[uid] = {
-        "full_name": new_full_name,
-        "username": new_username,
-        "username_history": history,
-        "join_time": int(old.get("join_time", 0) or 0),
-        "last_seen": int(time.time()),
-    }
+    if should_save:
+        users[uid] = {
+            "full_name": new_full_name,
+            "username": new_username,
+            "username_history": history,
+            "join_time": int(old.get("join_time", 0) or 0),
+            "last_seen": now_ts,
+        }
 
-    save_users(chat.id, users)
+        save_users(chat.id, users)
 
     # 你原本的逻辑
     ensure_user_exists(chat.id, user.id, new_full_name)

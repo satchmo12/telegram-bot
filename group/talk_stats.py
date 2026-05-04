@@ -20,6 +20,8 @@ FREQ_SHORT_WINDOW_SECONDS = 10
 FREQ_LONG_WINDOW_SECONDS = 60
 DEFAULT_MAX_MSG_PER_MINUTE = 10  # 默认每分钟最多 10 条
 AUTO_MUTE_SECONDS = 60    # 超阈值后自动禁言 60 秒
+TALK_SAVE_INTERVAL_SECONDS = 10
+TALK_SAVE_DIRTY_LIMIT = 30
 
 # 全局缓存，用于回调分页使用
 CHAT_TALK_COUNTS = {}  # 结构: { chat_id: { mode: [(name, user_id, count), ...] } }
@@ -27,6 +29,8 @@ USER_FREQ_CACHE = {}  # key: f"{chat_id}:{user_id}" -> deque[timestamp]
 SPAM_WARN_CACHE = {}  # key: f"{chat_id}:{user_id}" -> last_warn_ts
 SPAM_MUTE_UNTIL = {}  # key: f"{chat_id}:{user_id}" -> ts
 SEEN_MESSAGES = {}  # key: f"{chat_id}:{message_id}" -> ts
+TALK_SAVE_DIRTY_COUNT = 0
+TALK_LAST_SAVE_TS = 0.0
 
 
 def _is_chat_silent(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> bool:
@@ -78,6 +82,19 @@ def save_talk_data(data):
     save_json(DATA_FILE, data)
 
 
+def maybe_save_talk_data(data, now_ts: float):
+    global TALK_SAVE_DIRTY_COUNT, TALK_LAST_SAVE_TS
+    TALK_SAVE_DIRTY_COUNT += 1
+    if (
+        TALK_SAVE_DIRTY_COUNT < TALK_SAVE_DIRTY_LIMIT
+        and now_ts - TALK_LAST_SAVE_TS < TALK_SAVE_INTERVAL_SECONDS
+    ):
+        return
+    save_talk_data(data)
+    TALK_SAVE_DIRTY_COUNT = 0
+    TALK_LAST_SAVE_TS = now_ts
+
+
 # 消息计数
 async def count_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.effective_chat.type == "private":
@@ -124,7 +141,7 @@ async def count_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data["monthly"][month_key] = user_data["monthly"].get(month_key, 0) + 1
     
 
-    save_talk_data(data)
+    maybe_save_talk_data(data, now_ts)
 
     if update.message.text:
         try:

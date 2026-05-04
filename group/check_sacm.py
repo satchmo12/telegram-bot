@@ -72,9 +72,10 @@ def check_name_change(id: int, new_name: str, new_username: str = None, current_
     同时静默更新 username 和 username_history（不返回）
     仅适用于新数据结构
     """
-    check_chats = list(get_group_list().keys())
-    if current_chat_id and current_chat_id not in check_chats:
-        check_chats.append(current_chat_id)  # 确保当前群也检查
+    if current_chat_id:
+        check_chats = [current_chat_id]
+    else:
+        check_chats = list(get_group_list().keys())
 
     for chat_id in check_chats:
         try:

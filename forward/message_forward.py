@@ -32,6 +32,7 @@ PRIVATE_DIALOG_CALLBACK_PREFIX = "pfmode"
 PRIVATE_DIALOG_PAGE_SIZE = 6
 SEND_USER_STAGE_KEY = "send_user_stage"
 PRIVATE_FORWARD_DEBUG_FILE = os.path.join("data", "private_forward_debug.log")
+PRIVATE_FORWARD_DEBUG_ENABLED = os.getenv("PRIVATE_FORWARD_DEBUG", "").strip() == "1"
 
 GROUP_LOG_DIR = "data/user_logs"
 
@@ -60,6 +61,8 @@ PRIVATE_CONFIG_COMMANDS = {
 
 
 def _debug_private_forward(message: str) -> None:
+    if not PRIVATE_FORWARD_DEBUG_ENABLED:
+        return
     try:
         os.makedirs(os.path.dirname(PRIVATE_FORWARD_DEBUG_FILE), exist_ok=True)
         with open(PRIVATE_FORWARD_DEBUG_FILE, "a", encoding="utf-8") as f:

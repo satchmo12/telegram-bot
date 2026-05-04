@@ -74,14 +74,20 @@ def ensure_user_exists(chat_id, user_id, username=None):
     chat_id, user_id = str(chat_id), str(user_id)
     users = data.setdefault(chat_id, {}).setdefault("users", {})
 
+    changed = False
     if user_id not in users:
         users[user_id] = DEFAULT_USER_DATA.copy()
-    if username:
+        changed = True
+    if username and users[user_id].get("name") != username:
         users[user_id]["name"] = username
+        changed = True
 
-    users[user_id]["username"] = str(user_id)
+    if users[user_id].get("username") != str(user_id):
+        users[user_id]["username"] = str(user_id)
+        changed = True
 
-    save_json(INFO_FILE, data)
+    if changed:
+        save_json(INFO_FILE, data)
 
 
 def get_user_data(chat_id, user_id):
