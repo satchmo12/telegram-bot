@@ -322,19 +322,35 @@ def save_json(path: str, data):
 
     path = _resolve_json_path(path)
     with _cache_lock:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        dir_path = os.path.dirname(path) or "."
+        os.makedirs(dir_path, exist_ok=True)
         norm_path = str(path).replace("\\", "/")
         use_pretty_indent = not (
             norm_path.endswith("learned_pairs.json") or "/user_logs/" in norm_path
         )
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(
-                data,
-                f,
-                ensure_ascii=False,
-                indent=4 if use_pretty_indent else None,
-                separators=None if use_pretty_indent else (",", ":"),
-            )
+        tmp_path = os.path.join(
+            dir_path,
+            f".{os.path.basename(path)}.{os.getpid()}.{int(time.time() * 1000)}.tmp",
+        )
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    data,
+                    f,
+                    ensure_ascii=False,
+                    indent=4 if use_pretty_indent else None,
+                    separators=None if use_pretty_indent else (",", ":"),
+                )
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            raise
         _cache_data[path] = data
         _cache_timestamp[path] = time.time()
 

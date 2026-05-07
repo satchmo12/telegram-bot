@@ -13,6 +13,7 @@ MEDIA_GROUP_TASKS = {}
 MEDIA_GROUP_WAIT_SECONDS = 5
 RATE_LIMIT_MIN_INTERVAL_SEC = 1.0
 RATE_LIMIT_MAX_RETRY = 3
+MEDIA_CAPTION_LIMIT = 1024
 TARGET_LOCKS = {}
 TARGET_LAST_TS = {}
 
@@ -209,13 +210,16 @@ def _get_target_lock(target_id: int) -> asyncio.Lock:
 
 
 def _media_group_should_skip(group_msgs, rule: dict) -> bool:
+    texts = []
     for msg in group_msgs or []:
         text = getattr(msg, "text", None) or getattr(msg, "caption", None) or ""
         entities = getattr(msg, "entities", None) if getattr(msg, "text", None) else getattr(msg, "caption_entities", None)
-        if _should_skip_by_words(rule, text):
+        if text:
+            texts.append(text)
+        if text and _should_skip_by_links(rule, text, entities):
             return True
-        if _should_skip_by_links(rule, text, entities):
-            return True
+    if _should_skip_by_words(rule, "\n".join(texts)):
+        return True
     return False
 
 
@@ -243,6 +247,68 @@ async def _send_with_retry(
                 return None
 
 
+async def _send_single_media(
+    context: ContextTypes.DEFAULT_TYPE,
+    target_id: int,
+    msg,
+    *,
+    caption: Optional[str],
+    src: str,
+):
+    if msg.photo:
+        return await _send_with_retry(
+            target_id,
+            lambda: context.bot.send_photo(
+                chat_id=target_id,
+                photo=msg.photo[-1].file_id,
+                caption=caption,
+            ),
+            kind="图片",
+            src=str(src),
+        )
+    if msg.video:
+        return await _send_with_retry(
+            target_id,
+            lambda: context.bot.send_video(
+                chat_id=target_id,
+                video=msg.video.file_id,
+                caption=caption,
+            ),
+            kind="视频",
+            src=str(src),
+        )
+    if getattr(msg, "animation", None):
+        return await _send_with_retry(
+            target_id,
+            lambda: context.bot.send_animation(
+                chat_id=target_id,
+                animation=msg.animation.file_id,
+                caption=caption,
+            ),
+            kind="动图",
+            src=str(src),
+        )
+    if msg.document:
+        return await _send_with_retry(
+            target_id,
+            lambda: context.bot.send_document(
+                chat_id=target_id,
+                document=msg.document.file_id,
+                caption=caption,
+            ),
+            kind="文件",
+            src=str(src),
+        )
+    if caption:
+        return await _send_with_retry(
+            target_id,
+            lambda: context.bot.send_message(chat_id=target_id, text=caption),
+            kind="文字",
+            src=str(src),
+        )
+    return None
+
+
 async def process_media_group(
     group_msgs, targets, rule, context: ContextTypes.DEFAULT_TYPE
 ):
@@ -258,18 +324,38 @@ async def process_media_group(
             break
 
     media_list = []
+    media_msgs = []
     for idx, msg in enumerate(group_msgs):
-        caption = main_text if idx == 0 else None
+        caption = main_text if idx == 0 and main_text and len(main_text) <= MEDIA_CAPTION_LIMIT else None
         if msg.photo:
             media_list.append(InputMediaPhoto(media=msg.photo[-1].file_id, caption=caption))
+            media_msgs.append(msg)
         elif msg.video:
             media_list.append(InputMediaVideo(media=msg.video.file_id, caption=caption))
+            media_msgs.append(msg)
         elif msg.document and getattr(msg.document, "mime_type", "") == "image/gif":
             media_list.append(InputMediaDocument(media=msg.document.file_id, caption=caption))
+            media_msgs.append(msg)
 
     src = _get_source_id_from_msg(group_msgs[0]) if group_msgs else "unknown"
     for target_id in targets:
         if not media_list:
+            continue
+        if main_text and len(main_text) > MEDIA_CAPTION_LIMIT:
+            await _send_with_retry(
+                target_id,
+                lambda: context.bot.send_message(chat_id=target_id, text=main_text),
+                kind="MediaGroup 文字",
+                src=str(src),
+            )
+        if len(media_list) == 1:
+            await _send_single_media(
+                context,
+                target_id,
+                media_msgs[0],
+                caption=main_text if main_text and len(main_text) <= MEDIA_CAPTION_LIMIT else None,
+                src=str(src),
+            )
             continue
         await _send_with_retry(
             target_id,
@@ -418,20 +504,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # === 单条消息处理 ===
         src = _get_source_id_from_msg(msg)
-        if msg.photo:
+        if msg.photo or msg.video or getattr(msg, "animation", None) or msg.document:
             caption = _processed_text_or_original(msg.caption or "", rule) if msg.caption else None
             for target_id in targets:
-                await _send_with_retry(
+                if caption and len(caption) > MEDIA_CAPTION_LIMIT:
+                    await _send_with_retry(
+                        target_id,
+                        lambda: context.bot.send_message(chat_id=target_id, text=caption),
+                        kind="媒体文字",
+                        src=str(src),
+                    )
+                    media_caption = None
+                else:
+                    media_caption = caption
+                await _send_single_media(
+                    context,
                     target_id,
-                    lambda: context.bot.send_photo(
-                        chat_id=target_id,
-                        photo=msg.photo[-1].file_id,
-                        caption=caption,
-                    ),
-                    kind="单张图片",
+                    msg,
+                    caption=media_caption,
                     src=str(src),
                 )
             continue
+
+        if msg.text:
+            text = _processed_text_or_original(msg.text, rule)
+            if text:
+                for target_id in targets:
+                    await _send_with_retry(
+                        target_id,
+                        lambda: context.bot.send_message(chat_id=target_id, text=text),
+                        kind="文字",
+                        src=str(src),
+                    )
 
 
 async def handle_user_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):

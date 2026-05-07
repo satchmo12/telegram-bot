@@ -24,6 +24,7 @@ from multi_bot_registry import (
     update_managed_bot_features,
 )
 from runtime_bot_manager import (
+    get_running_app,
     is_bot_running,
     start_bot,
     stop_bot,
@@ -293,6 +294,8 @@ async def _finalize_clone_creation(
             "auto_start": False,
             "enabled_features": features,
             "clone_from": state.get("source_name", ""),
+            "username": state.get("bot_username", ""),
+            "first_name": state.get("bot_first_name", ""),
         }
     )
     context.user_data.pop(TEXT_STAGE_KEY, None)
@@ -441,16 +444,12 @@ async def _resolve_bot_username(cfg: dict) -> str:
     username = str(cfg.get("username", "") or "").strip().lstrip("@")
     if username:
         return f"@{username}"
-    token = str(cfg.get("token", "") or "").strip()
-    if token:
-        try:
-            me = await _fetch_bot_profile(token)
-            username = str(getattr(me, "username", "") or "").strip().lstrip("@")
-            if username:
-                return f"@{username}"
-        except Exception:
-            pass
     name = str(cfg.get("name", "") or "").strip()
+    app = get_running_app(name)
+    if app:
+        username = str(getattr(app.bot, "username", "") or "").strip().lstrip("@")
+        if username:
+            return f"@{username}"
     return f"@{name}" if name else "未设置"
 
 
@@ -901,6 +900,8 @@ async def handle_private_forward_self_service_text(
                 "auto_start": False,
                 "enabled_features": list(SELF_SERVICE_FEATURES),
                 "clone_from": MASTER_BOT_NAME,
+                "username": state.get("bot_username", ""),
+                "first_name": state.get("bot_first_name", ""),
             }
         )
         ok, msg = await start_bot(record)
@@ -965,12 +966,14 @@ async def handle_multi_bot_text(update: Update, context: ContextTypes.DEFAULT_TY
             raise ApplicationHandlerStop
 
         try:
-            await _fetch_bot_profile(text)
+            me = await _fetch_bot_profile(text)
         except Exception:
             await _panel_reply(update, context, "API Token 无效，或暂时无法连接 Telegram，请检查后重试。")
             raise ApplicationHandlerStop
 
         state["new_token"] = text
+        state["bot_username"] = (getattr(me, "username", "") or "").strip()
+        state["bot_first_name"] = (getattr(me, "first_name", "") or "").strip()
         state["stage"] = "clone_await_name"
         await _send_stage_prompt(
             update,

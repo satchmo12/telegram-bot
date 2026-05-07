@@ -70,8 +70,20 @@ from telegram import BotCommand
 load_dotenv(override=True)
 
 
+def _is_stale_callback_query_error(err: Exception) -> bool:
+    msg = str(err).lower()
+    return (
+        "query is too old" in msg
+        or "response timeout expired" in msg
+        or "query id is invalid" in msg
+    )
+
+
 async def error_handler(update, context):
     err = getattr(context, "error", None)
+    if err and _is_stale_callback_query_error(err):
+        logging.info("忽略过期的按钮回调: %s", err)
+        return
     if isinstance(err, NetworkError):
         msg = str(err).lower()
         if "message to delete not found" in msg:

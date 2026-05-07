@@ -20,8 +20,10 @@ FREQ_SHORT_WINDOW_SECONDS = 10
 FREQ_LONG_WINDOW_SECONDS = 60
 DEFAULT_MAX_MSG_PER_MINUTE = 10  # 默认每分钟最多 10 条
 AUTO_MUTE_SECONDS = 60    # 超阈值后自动禁言 60 秒
-TALK_SAVE_INTERVAL_SECONDS = 10
-TALK_SAVE_DIRTY_LIMIT = 30
+TALK_SAVE_INTERVAL_SECONDS = 60
+TALK_SAVE_DIRTY_LIMIT = 200
+SEEN_CLEANUP_INTERVAL_SECONDS = 10
+FREQ_CACHE_CLEANUP_INTERVAL_SECONDS = 600
 
 # 全局缓存，用于回调分页使用
 CHAT_TALK_COUNTS = {}  # 结构: { chat_id: { mode: [(name, user_id, count), ...] } }
@@ -31,6 +33,8 @@ SPAM_MUTE_UNTIL = {}  # key: f"{chat_id}:{user_id}" -> ts
 SEEN_MESSAGES = {}  # key: f"{chat_id}:{message_id}" -> ts
 TALK_SAVE_DIRTY_COUNT = 0
 TALK_LAST_SAVE_TS = 0.0
+SEEN_LAST_CLEANUP_TS = 0.0
+FREQ_CACHE_LAST_CLEANUP_TS = 0.0
 
 
 def _is_chat_silent(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> bool:
@@ -59,17 +63,38 @@ def _count_in_window(q: deque, now_ts: float, window_seconds: int) -> int:
 
 
 def _mark_message_seen(chat_id: str, message_id: int, now_ts: float) -> bool:
+    global SEEN_LAST_CLEANUP_TS
     key = f"{chat_id}:{message_id}"
     if key in SEEN_MESSAGES:
         return False
     SEEN_MESSAGES[key] = now_ts
 
-    # 控制内存：清理 120 秒前的消息
+    if now_ts - SEEN_LAST_CLEANUP_TS < SEEN_CLEANUP_INTERVAL_SECONDS:
+        return True
+
+    # 控制内存：定时清理 120 秒前的消息，避免每条消息都全表扫描
     expire = now_ts - 120
     stale_keys = [k for k, ts in SEEN_MESSAGES.items() if ts < expire]
     for k in stale_keys:
         SEEN_MESSAGES.pop(k, None)
+    SEEN_LAST_CLEANUP_TS = now_ts
     return True
+
+
+def _cleanup_freq_cache(now_ts: float):
+    global FREQ_CACHE_LAST_CLEANUP_TS
+    if now_ts - FREQ_CACHE_LAST_CLEANUP_TS < FREQ_CACHE_CLEANUP_INTERVAL_SECONDS:
+        return
+    stale_keys = []
+    for key, q in USER_FREQ_CACHE.items():
+        _cleanup_queue(q, now_ts)
+        if not q:
+            stale_keys.append(key)
+    for key in stale_keys:
+        USER_FREQ_CACHE.pop(key, None)
+        SPAM_WARN_CACHE.pop(key, None)
+        SPAM_MUTE_UNTIL.pop(key, None)
+    FREQ_CACHE_LAST_CLEANUP_TS = now_ts
 
 # 加载数据
 def load_talk_data():
@@ -104,6 +129,7 @@ async def count_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     now = datetime.now()
     now_ts = time.time()
+    _cleanup_freq_cache(now_ts)
     chat_id = str(update.effective_chat.id)
     user = update.effective_user
     user_id = str(user.id)

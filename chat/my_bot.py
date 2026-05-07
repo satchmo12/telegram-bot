@@ -81,6 +81,8 @@ MIN_SUPPORT = 1  # 最小学习次数，达到才会回复
 SIMILARITY_THRESHOLD = 0.88  # 查找相似问题的匹配阈值
 REPLY_PROB = 0.8  # 触发回复概率（1.0 = 总是回复）
 CHAT_COOLDOWN_SECONDS = 10  # 两次回复间隔（秒）
+MEMORY_SAVE_INTERVAL_SECONDS = 60
+MEMORY_SAVE_DIRTY_LIMIT = 20
 BLOCK_PATTERNS = [r"https?://", r"t\.me/", r"@\w+"]  # 不学习/回复的内容正则
 START_KEYWORDS = ["学说话"]  # 开启学习模式关键词
 STOP_KEYWORDS = ["停止学习", "别学了"]  # 关闭学习模式关键词
@@ -115,6 +117,8 @@ last_ad_push_slot = {}
 
 last_msg = {}  # 记录各群最后一条消息，用于学习前后消息关系
 last_reply_ts = {}  # 记录各群上次回复时间，用于控制冷却
+memory_dirty_count = {}
+memory_last_save_ts = {}
 GROUP_RECOMMEND_PAGE_SIZE = 20
 
 
@@ -400,12 +404,12 @@ def looks_ok_with_limit(text: str, *, max_len: int) -> bool:
     return True
 
 
-def find_similar_key(nq: str) -> Optional[str]:
+def find_similar_key(nq: str, memory: Optional[dict] = None) -> Optional[str]:
     """
     在 memory 中查找与 nq 最相似的已学习问题
     返回相似问题的 key 或 None
     """
-    memory = get_memory()
+    memory = memory if isinstance(memory, dict) else get_memory()
     if nq in memory:
         return nq
     best, best_ratio = None, 0.0
@@ -418,6 +422,19 @@ def find_similar_key(nq: str) -> Optional[str]:
     return best if best_ratio >= SIMILARITY_THRESHOLD else None
 
 
+def maybe_save_memory(memory: dict):
+    bot_name = get_runtime_bot_name() or "default"
+    now_ts = time.time()
+    dirty_count = memory_dirty_count.get(bot_name, 0) + 1
+    last_save_ts = memory_last_save_ts.get(bot_name, 0.0)
+    memory_dirty_count[bot_name] = dirty_count
+    if dirty_count < MEMORY_SAVE_DIRTY_LIMIT and now_ts - last_save_ts < MEMORY_SAVE_INTERVAL_SECONDS:
+        return
+    save_json(DATA_FILE, memory)
+    memory_dirty_count[bot_name] = 0
+    memory_last_save_ts[bot_name] = now_ts
+
+
 def add_pair(q_text: str, a_text: str):
     """将一对问答加入 memory，并保存到磁盘"""
     memory = get_memory()
@@ -427,7 +444,7 @@ def add_pair(q_text: str, a_text: str):
     answers = memory[nq]["answers"]
     answers[a_text] = answers.get(a_text, 0) + 1
     memory[nq]["total"] += 1
-    save_json(DATA_FILE, memory)
+    maybe_save_memory(memory)
 
 
 def weighted_choice(answers_dict: dict) -> str:
@@ -757,8 +774,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     learning_enabled = get_group_toggle_safe(chat_id, GROUP_KEY_LEARNING, True)
     reply_enabled = get_group_toggle_safe(chat_id, GROUP_KEY_REPLY, False)
 
-    memory = get_memory()
-
     # 忽略非文本消息
     if not msg.text:
         return
@@ -947,7 +962,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     #                 last_reply_ts[chat_id] = ts
 
     if reply_enabled and looks_ok(text):  # 默认关闭
-        key = find_similar_key(normalize(text))
+        memory = get_memory()
+        key = find_similar_key(normalize(text), memory)
         if key and memory[key]["total"] >= MIN_SUPPORT:
             if ts - last_reply_ts.get(runtime_chat_key, 0) >= CHAT_COOLDOWN_SECONDS:
                 if random.random() <= REPLY_PROB:

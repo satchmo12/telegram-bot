@@ -157,6 +157,8 @@ def load_managed_bot_configs() -> list[dict]:
                 "token": token,
                 "owner_id": int(item.get("owner_id") or DEFAULT_OWNER_ID),
                 "name": name,
+                "username": str(item.get("username", "") or "").strip().lstrip("@"),
+                "first_name": str(item.get("first_name", "") or "").strip(),
                 "enabled": bool(item.get("enabled", True)),
                 "auto_start": bool(item.get("auto_start", item.get("enabled", True))),
                 "enabled_features": enabled_features,
@@ -229,6 +231,8 @@ def save_managed_bot(record: dict) -> dict:
         "owner_id": int(record.get("owner_id") or DEFAULT_OWNER_ID),
         "enabled": bool(record.get("enabled", True)),
         "auto_start": bool(record.get("auto_start", record.get("enabled", True))),
+        "username": str(record.get("username", "") or "").strip().lstrip("@"),
+        "first_name": str(record.get("first_name", "") or "").strip(),
         "enabled_features": sorted(
             sanitize_features(
                 features,
