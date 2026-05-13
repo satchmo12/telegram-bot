@@ -114,6 +114,32 @@ def _gtts_fallback(text, path):
     except Exception as e:
         print("[gTTS也失败]:", e)
         return False
+
+
+async def _async_gtts_fallback(text, path):
+    return await asyncio.to_thread(_gtts_fallback, text, path)
+
+
+async def _convert_to_ogg(mp3_path, ogg_path):
+    process = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-i",
+        mp3_path,
+        "-c:a",
+        "libopus",
+        "-ar",
+        "24000",
+        "-ac",
+        "1",
+        ogg_path,
+        "-y",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await process.communicate()
+    if process.returncode != 0:
+        err = stderr.decode("utf-8", errors="ignore").strip()
+        raise RuntimeError(f"ffmpeg转码失败: {err}")
     
 # =========================
 # MENU
@@ -237,10 +263,11 @@ async def tts_voice_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         # fallback
         print("edge-tts失败，使用gTTS:", e)
-        tts = gTTS(text=text, lang="zh")
-        tts.save(mp3_path)
+        if not await _async_gtts_fallback(text, mp3_path):
+            await update.message.reply_text("❌ TTS失败，请稍后再试")
+            return
 
-    os.system(f'ffmpeg -i "{mp3_path}" -c:a libopus -ar 24000 -ac 1 "{ogg_path}" -y')
+    await _convert_to_ogg(mp3_path, ogg_path)
 
     try:
         with open(ogg_path, "rb") as f:
@@ -287,6 +314,10 @@ async def tts_voice_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def group_tts_voice(update, context):
 
     text = " ".join(context.args).strip()
+    await send_group_tts_voice(update, context, text)
+
+
+async def send_group_tts_voice(update, context, text):
     if not text:
         await update.message.reply_text("请输入内容")
         return
@@ -315,16 +346,14 @@ async def group_tts_voice(update, context):
     # ❗ edge失败 → gTTS兜底
     if not success:
         print("⚠️ edge失败，切换gTTS")
-        success = _gtts_fallback(text, mp3_path)
+        success = await _async_gtts_fallback(text, mp3_path)
 
     if not success:
         await update.message.reply_text("❌ TTS失败，请稍后再试")
         return
 
     # 🎧 转音频
-    os.system(
-        f'ffmpeg -i "{mp3_path}" -c:a libopus -ar 24000 -ac 1 "{ogg_path}" -y'
-    )
+    await _convert_to_ogg(mp3_path, ogg_path)
 
     try:
         with open(ogg_path, "rb") as f:

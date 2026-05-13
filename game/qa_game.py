@@ -2,6 +2,7 @@ import os
 import random
 import re
 import difflib
+import asyncio
 import telegram
 
 from telegram.ext import (
@@ -13,7 +14,7 @@ from telegram.ext import (
     CallbackQueryHandler,
 )
 from command_router import register_command
-from game.voice_reply import group_tts_voice
+from game.voice_reply import send_group_tts_voice
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 
 from utils import GROUP_LIST_FILE, QA_FILE, RE_FILE, load_json, safe_reply, save_json
@@ -21,6 +22,13 @@ from utils import GROUP_LIST_FILE, QA_FILE, RE_FILE, load_json, safe_reply, save
 # 确保 data 目录存在
 os.makedirs("data", exist_ok=True)
 FUZZY_MATCH_THRESHOLD = 0.82
+
+
+def _log_background_error(task: asyncio.Task):
+    try:
+        task.result()
+    except Exception as e:
+        print(f"[问答语音后台任务出错] {e}")
 
 
 # 加载问答数据
@@ -166,9 +174,10 @@ async def handle_qa_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_qa = data.get(chat_id, {})
     match_key = text if text in group_qa else _find_best_match(text, list(group_qa.keys()))
     if match_key:
-        context.args = group_qa[match_key]
         if  voice_reply_enabled:
-            await group_tts_voice(update, context)
+            text = str(group_qa[match_key])
+            task = asyncio.create_task(send_group_tts_voice(update, context, text))
+            task.add_done_callback(_log_background_error)
         else:
             await _send_qa_message(update, context, str(group_qa[match_key]), thread_id)
         return

@@ -99,6 +99,8 @@ GROUP_KEY_AD_PUSH_INTERVAL = "ad_push_interval_min"
 GROUP_KEY_AD_PUSH_TEXT = "ad_push_text"
 GROUP_KEY_AD_PUSH_MESSAGE = "ad_push_message"
 GROUP_KEY_AD_PUSH_TIMES = "ad_push_times"
+GLOBAL_AD_PUSH_FILE = "data/global_ad_push.json"
+GLOBAL_AD_PUSH_MESSAGE_KEY = "global_ad_push_message"
 ACTIVE_SPEAK_DEFAULT_INTERVAL_MIN = 2
 ACTIVE_SPEAK_MIN_INTERVAL_MIN = 1
 ACTIVE_SPEAK_MAX_INTERVAL_MIN = 1440
@@ -112,6 +114,8 @@ JOKE_CACHE = {}
 last_active_speak_ts = {}
 last_ad_push_ts = {}
 last_ad_push_slot = {}
+last_global_ad_push_ts = {}
+last_global_ad_push_slot = {}
 
 # ---------------- 数据存储 ----------------
 
@@ -1476,6 +1480,74 @@ def _parse_fixed_slots(raw: str) -> list[str]:
     return sorted(set(slots))
 
 
+async def _global_ad_push_to_groups(
+    context: ContextTypes.DEFAULT_TYPE, groups: dict, now_ts: float, current_hm: str
+):
+    cfg = load_json(GLOBAL_AD_PUSH_FILE)
+    if not isinstance(cfg, dict) or not bool(cfg.get("enabled", False)):
+        return
+
+    payload = cfg.get(GLOBAL_AD_PUSH_MESSAGE_KEY)
+    if not isinstance(payload, dict):
+        text = str(cfg.get("text", "")).strip()
+        payload = {"type": "text", "text": text} if text else None
+    if not payload:
+        return
+
+    runtime_bot = get_runtime_bot_name() or str(getattr(context.bot, "id", "bot"))
+    mode = str(cfg.get("mode", AD_PUSH_MODE_INTERVAL)).strip().lower()
+    excluded = {str(x) for x in cfg.get("exclude_group_ids", []) if str(x).strip()}
+
+    if mode == AD_PUSH_MODE_FIXED:
+        slots = _parse_fixed_slots(str(cfg.get("times", "")))
+        if not slots or current_hm not in slots:
+            return
+        slot_key = f"{runtime_bot}:{current_hm}"
+        if last_global_ad_push_slot.get(runtime_bot) == slot_key:
+            return
+        should_send = True
+    else:
+        interval_min = cfg.get("interval_min", AD_PUSH_DEFAULT_INTERVAL_MIN)
+        if not isinstance(interval_min, int):
+            interval_min = AD_PUSH_DEFAULT_INTERVAL_MIN
+        interval_min = max(
+            AD_PUSH_MIN_INTERVAL_MIN, min(AD_PUSH_MAX_INTERVAL_MIN, interval_min)
+        )
+        current_minute = int(now_ts // 60)
+        offset_min = abs(hash(f"{runtime_bot}:global_ad")) % interval_min
+        should_send = current_minute % interval_min == offset_min
+        if now_ts - last_global_ad_push_ts.get(runtime_bot, 0) < interval_min * 60:
+            should_send = False
+
+    if not should_send:
+        return
+
+    sent = 0
+    for chat_id, group_cfg in list((groups or {}).items()):
+        if str(chat_id) in excluded:
+            continue
+        if not isinstance(group_cfg, dict):
+            continue
+        if not group_cfg.get("enabled", True):
+            continue
+        if not group_cfg.get("bot_enabled", True):
+            continue
+        if not bool(group_cfg.get("bot_in_group", False)):
+            continue
+        try:
+            await send_message_payload(context.bot, chat_id=int(chat_id), payload=payload)
+            sent += 1
+        except Exception as e:
+            print(f"⚠️ 全群广告发送失败: {chat_id}, {e}")
+
+    if mode == AD_PUSH_MODE_FIXED:
+        last_global_ad_push_slot[runtime_bot] = slot_key
+    else:
+        last_global_ad_push_ts[runtime_bot] = now_ts
+    if sent:
+        print(f"✅ 全群广告已发送到 {sent} 个群")
+
+
 async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
     groups = load_json(GROUP_LIST_FILE)
     now_ts = time.time()
@@ -1483,6 +1555,8 @@ async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
 
     if not isinstance(groups, dict) or not groups:
         return
+
+    await _global_ad_push_to_groups(context, groups, now_ts, current_hm)
 
     # 复制快照，避免并发写 groups.json 时触发 "dictionary changed size during iteration"
     for chat_id, cfg in list(groups.items()):

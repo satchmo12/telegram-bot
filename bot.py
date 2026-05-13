@@ -258,7 +258,8 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "bot_name": bot_name,
         "feature_text": feature_text,
     }
-    keyboard_rows = _build_start_panel_rows(context)
+    user_id = update.effective_user.id if update.effective_user else None
+    keyboard_rows = _build_start_panel_rows(context, user_id)
     keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
     await update.message.reply_text(
         _build_start_welcome_text(bot_name),
@@ -282,7 +283,8 @@ async def start_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     action = query.data.split(":", 1)[1]
     if action != "back":
         return
-    keyboard_rows = _build_start_panel_rows(context)
+    user_id = update.effective_user.id if update.effective_user else None
+    keyboard_rows = _build_start_panel_rows(context, user_id)
     keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
     return await query.edit_message_text(
         _build_start_welcome_text(bot_name),
@@ -397,15 +399,22 @@ async def features_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await context.bot.send_message(chat_id=update.effective_chat.id, text=text)
 
 
-def _build_start_panel_rows(context: ContextTypes.DEFAULT_TYPE) -> list[list[InlineKeyboardButton]]:
+def _build_start_panel_rows(
+    context: ContextTypes.DEFAULT_TYPE, user_id: Optional[int] = None
+) -> list[list[InlineKeyboardButton]]:
     enabled = context.application.bot_data.get("enabled_features") or set(ALL_FEATURES)
     bot_name = str(context.application.bot_data.get("name", "")).strip()
+    owner_id = int(context.application.bot_data.get("owner_id", DEFAULT_OWNER_ID))
     rows: list[list[InlineKeyboardButton]] = []
     if bot_name == MASTER_BOT_NAME:
         rows.append([InlineKeyboardButton("🧬克隆机器人", callback_data=f"mbot:clone:{MASTER_BOT_NAME}")])
         rows.append([InlineKeyboardButton("🤖机器人面板", callback_data="mbot:list")])
     if "group" in enabled:
         rows.append([InlineKeyboardButton("👥群配置", callback_data="gcfg:list")])
+        if user_id and int(user_id) == owner_id:
+            rows.append(
+                [InlineKeyboardButton("📢全群广告推送", callback_data="gcfg:global_ad_menu")]
+            )
     if "channel" in enabled:
         rows.extend(
             [
