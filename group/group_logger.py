@@ -89,7 +89,7 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "manor": False,
             "chengyu_game": False,
             "welcome": False,
-            "learning_enabled": True,   # 默认启用学习
+            "learning_enabled": False,   # 默认启用学习
             "reply_enabled": False,     # 默认不自动回复
             "voice_reply_enabled": False,
             "active_speak_enabled": False,  # 默认不主动说话
@@ -126,7 +126,7 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             group["bot_muted"] = False
             changed = True
         if "learning_enabled" not in group:
-            group["learning_enabled"] = True
+            group["learning_enabled"] = False
             changed = True
         if "bot_enabled" not in group:
             group["bot_enabled"] = True
