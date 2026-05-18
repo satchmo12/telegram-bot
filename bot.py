@@ -10,7 +10,7 @@ from datetime import time
 from typing import Optional
 from dotenv import load_dotenv
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
@@ -18,6 +18,7 @@ from telegram.ext import (
     ApplicationHandlerStop,
     TypeHandler,
     CallbackQueryHandler,
+    InlineQueryHandler,
     filters,
     ContextTypes,
 )
@@ -66,8 +67,10 @@ from utils import (
 
 # ===== 注册 Telegram / 命令 =====
 from telegram import BotCommand
+import uuid
 
 load_dotenv(override=True)
+
 
 
 def _is_stale_callback_query_error(err: Exception) -> bool:
@@ -114,6 +117,39 @@ PRIVATE_FORWARD_SELF_SERVICE_STAGE_KEY = "private_forward_self_service_stage"
 MULTI_BOT_STAGE_KEY = "multi_bot_stage"
 STARTUP_DEBUG_FILE = os.path.join("data", "startup_debug.log")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 获取用户输入关键词
+    query = (update.inline_query.query or "").strip()
+
+    # 模板内容
+    text = f"""
+📢 全网稳定渠道，不要相信其他来源
+
+⚡ 当前查询：{query if query else "热门推荐"}
+
+"""
+
+    # 生成单条 Inline 结果
+    results = [
+        InlineQueryResultArticle(
+            id=str(uuid.uuid4()),
+            title="🔥 发送推广消息",
+            description="点击发送当前模板",
+            input_message_content=InputTextMessageContent(
+                message_text=text,
+                parse_mode="HTML"
+            ),
+        )
+    ]
+
+    # 返回给 Telegram
+    await update.inline_query.answer(
+        results,
+        cache_time=0,       # 保证每次查询都实时返回
+        is_personal=True,   # 针对触发用户
+    )
+
 
 def write_startup_debug(message: str) -> None:
     try:
@@ -546,6 +582,9 @@ def create_app(bot_cfg: dict):
         )
     app.add_handler(CallbackQueryHandler(clear_login_prompt_on_callback), group=-900)
     app.add_handler(CallbackQueryHandler(start_panel_callback, pattern=r"^start:"))
+    
+    # 内连
+    app.add_handler(InlineQueryHandler(inline_query_handler))
 
     # ===== 注册所有功能模块 =====
     register_all_handlers(app)
