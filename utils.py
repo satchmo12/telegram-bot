@@ -505,7 +505,7 @@ def get_group_whitelist(context: ContextTypes.DEFAULT_TYPE = None) -> dict:
             "business_coop_link": "",
             "manor": False,
             "welcome": False,
-            "learning_enabled": True,
+            "learning_enabled": False,
             "reply_enabled": False,
             "voice_reply_enabled": False,
             "active_speak_enabled": False,

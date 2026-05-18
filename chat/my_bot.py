@@ -1618,51 +1618,6 @@ async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"⚠️ 广告间隔发送失败: {chat_id}, {e}")
 
-
-@group_allowed
-@register_command("去马赛克")
-async def handle_remove_mosaic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-
-    photo = None
-
-    # 情况 1：命令消息本身带图片（caption）
-    if msg.photo:
-        photo = msg.photo[-1]
-
-    # 情况 2：回复了一张图片
-    elif msg.reply_to_message and msg.reply_to_message.photo:
-        photo = msg.reply_to_message.photo[-1]
-
-    if not photo:
-        return await safe_reply(
-            update, context, "请发送图片，或回复一张图片再使用 /去马赛克"
-        )
-
-    photo_file = await photo.get_file()
-
-    os.makedirs("downloads", exist_ok=True)
-    temp_input = f"downloads/{photo_file.file_id}.jpg"
-    temp_output = f"downloads/{photo_file.file_id}_enhanced.jpg"
-
-    await photo_file.download_to_drive(temp_input)
-
-    try:
-        remove_mosaic_command(temp_input)
-
-        with open(temp_output, "rb") as f:
-            await context.bot.send_photo(
-                chat_id=update.effective_chat.id,
-                photo=f,
-                reply_to_message_id=msg.message_id,
-            )
-    finally:
-        if os.path.exists(temp_input):
-            os.remove(temp_input)
-        if os.path.exists(temp_output):
-            os.remove(temp_output)
-
-
 @group_allowed
 @register_command("叫", "说", "讲")
 async def add_joke(update: Update, context: ContextTypes.DEFAULT_TYPE):

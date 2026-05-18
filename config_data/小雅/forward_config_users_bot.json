@@ -1,8 +1,5 @@
 {
     "users": {
-        "7357117687": {
-            "forward_rules": []
-        },
         "6085551760": {
             "forward_rules": [
                 {
@@ -37,68 +34,6 @@
                         "商务合作"
                     ],
                     "suffix": "测试机器人搬运 更多频道克隆功能联系群主",
-                    "media_replace": "",
-                    "speed": "",
-                    "session_name": ""
-                }
-            ]
-        },
-        "7851958636": {
-            "forward_rules": [
-                {
-                    "name": "未命名",
-                    "sources": [],
-                    "targets": [],
-                    "source_title": "",
-                    "target_title": "",
-                    "enabled": true,
-                    "mode": "listen",
-                    "filter": "all",
-                    "exclude_channels": [],
-                    "show_contact": true,
-                    "replace_channel_user": "",
-                    "replace_group_name": "",
-                    "replace_submit_user": "",
-                    "clear_links": false,
-                    "skip_links": false,
-                    "start_id": "",
-                    "end_id": "",
-                    "include_words": [],
-                    "replace_words": [],
-                    "block_words": [],
-                    "cut_words": "",
-                    "suffix": "",
-                    "media_replace": "",
-                    "speed": "",
-                    "session_name": ""
-                }
-            ]
-        },
-        "6682241767": {
-            "forward_rules": [
-                {
-                    "name": "未命名",
-                    "sources": [],
-                    "targets": [],
-                    "source_title": "",
-                    "target_title": "",
-                    "enabled": true,
-                    "mode": "listen",
-                    "filter": "all",
-                    "exclude_channels": [],
-                    "show_contact": true,
-                    "replace_channel_user": "",
-                    "replace_group_name": "",
-                    "replace_submit_user": "",
-                    "clear_links": false,
-                    "skip_links": false,
-                    "start_id": "",
-                    "end_id": "",
-                    "include_words": [],
-                    "replace_words": [],
-                    "block_words": [],
-                    "cut_words": "",
-                    "suffix": "",
                     "media_replace": "",
                     "speed": "",
                     "session_name": ""
