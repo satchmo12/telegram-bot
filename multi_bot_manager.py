@@ -596,8 +596,6 @@ async def handle_multi_bot_callback(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     if not query or not query.data or not query.data.startswith(f"{CALLBACK_PREFIX}:"):
         return
-
-    await query.answer()
     parts = query.data.split(":")
     action = parts[1] if len(parts) > 1 else ""
     name = parts[2] if len(parts) > 2 else ""
@@ -605,18 +603,22 @@ async def handle_multi_bot_callback(update: Update, context: ContextTypes.DEFAUL
 
     if action == "list":
         if not _is_master_panel(context):
+            await query.answer("请在主机器人面板使用该功能。", show_alert=True)
             return
         if not _can_view_any_bot(query.from_user.id):
             return await query.answer(_no_bot_hint(), show_alert=True)
+        await query.answer()
         return await _show_list(query)
 
     if action == "clone_cancel":
+        await query.answer()
         state = context.user_data.get(TEXT_STAGE_KEY)
         await _delete_stage_prompt(context, query.message.chat.id, state)
         context.user_data.pop(TEXT_STAGE_KEY, None)
         return await query.edit_message_text("已取消克隆机器人。")
 
     if action == "clone_back_to_token":
+        await query.answer()
         if not _can_manage(update, context):
             return
         if not name:
@@ -636,6 +638,7 @@ async def handle_multi_bot_callback(update: Update, context: ContextTypes.DEFAUL
         )
 
     if action == "owner_skip":
+        await query.answer()
         state = context.user_data.get(TEXT_STAGE_KEY)
         if not isinstance(state, dict) or state.get("stage") != "clone_await_owner_id":
             return await query.answer("当前不在设置归属人的步骤。", show_alert=True)
@@ -646,6 +649,7 @@ async def handle_multi_bot_callback(update: Update, context: ContextTypes.DEFAUL
     allow_self_service_clone = _can_self_service_clone(update, context, name)
 
     if action == "clone":
+        await query.answer()
         if not cfg:
             return await query.answer("源机器人不存在", show_alert=True)
         if not (allow_self_service_clone or _can_edit_bot(cfg, query.from_user.id)):
@@ -656,6 +660,7 @@ async def handle_multi_bot_callback(update: Update, context: ContextTypes.DEFAUL
         )
 
     if action == "clone_start":
+        await query.answer()
         if not cfg:
             return await query.answer("源机器人不存在", show_alert=True)
         if not (allow_self_service_clone or _can_edit_bot(cfg, query.from_user.id)):
@@ -673,9 +678,11 @@ async def handle_multi_bot_callback(update: Update, context: ContextTypes.DEFAUL
         )
 
     if not _can_manage(update, context):
+        await query.answer("无权限或不在主机器人面板。", show_alert=True)
         return
 
     if action == "open":
+        await query.answer()
         if not cfg:
             return await query.answer("机器人不存在", show_alert=True)
         if not _can_view_bot(cfg, query.from_user.id):
@@ -739,6 +746,7 @@ async def handle_multi_bot_callback(update: Update, context: ContextTypes.DEFAUL
         return await _show_detail(query, fresh)
 
     if action == "delete":
+        await query.answer()
         managed = get_managed_bot_by_name(name)
         if not managed:
             return await query.answer("只能删除面板托管机器人。", show_alert=True)

@@ -104,4 +104,9 @@ def register_menu_handlers(app):
     app.add_handler(CommandHandler("start_menu", start_menu))
     app.add_handler(CommandHandler("features", feature_intro))
     app.add_handler(CommandHandler("intro", feature_intro))
-    app.add_handler(CallbackQueryHandler(menu_button_handler))
+    app.add_handler(
+        CallbackQueryHandler(
+            menu_button_handler,
+            pattern=r"^(garden_help|farm_help|slave_help|animals_help)$",
+        )
+    )
