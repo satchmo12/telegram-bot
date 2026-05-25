@@ -15,7 +15,7 @@ from utils import CHECKIN_FILE, load_json, safe_reply, save_json
 
 
 @register_command("签到")
-async def checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def daycheckin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     user = update.effective_user
     today = datetime.utcnow().strftime("%Y-%m-%d")
@@ -61,5 +61,5 @@ async def checkin_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def register_checkin_handlers(app):
-    app.add_handler(CommandHandler("qiandao", checkin))
+    app.add_handler(CommandHandler("qiandao", daycheckin))
     app.add_handler(CommandHandler("sate", checkin_status))

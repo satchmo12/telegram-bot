@@ -358,6 +358,57 @@ async def top_charm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_html("\n".join(lines), disable_web_page_preview=True)
 
 
+@register_command("积分排行")
+async def top_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show_rank(
+        update=update,
+        context=context,
+        field="points",
+        title="🏆 积分排行榜",
+        prefix="points",
+        format_factory=get_points_formatter,
+        empty_text="目前还没有任何人的积分记录。",
+    )
+    
+    
+async def rank_pagination_rich_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    match = re.match(r"^(rich|points)_(\d+)$", query.data)
+    if not match:
+        return
+
+    prefix, page = match.group(1), int(match.group(2))
+
+    chat_id = str(query.message.chat.id)
+    group_cfg = get_group_whitelist(context).get(chat_id, {})
+    is_silent = bool(group_cfg.get("silent", False))
+
+    users = get_all_users(chat_id)
+    if not users:
+        return await query.message.edit_text("暂无数据")
+
+    field = "balance" if prefix == "rich" else "points"
+
+    sorted_users = sorted(
+        users.items(),
+        key=lambda x: x[1].get(field, 0),
+        reverse=True
+    )
+
+    await send_paginated_list(
+        update=update,
+        context=context,
+        items=sorted_users,
+        page=page,
+        prefix=prefix,
+        title="💰 财富排行榜" if prefix == "rich" else "🏆 积分排行榜",
+        format_item=(get_rich_formatter(is_silent)
+                     if prefix == "rich"
+                     else get_points_formatter(is_silent)),
+    )
+    
 # ---------------- 注册 ----------------
 # 个人信息
 @register_command("增加")
@@ -428,6 +479,74 @@ def clean_point(chat_id: str):
     return True, "✅ 所有用户积分已清零"
 
 
+
+async def show_rank(
+    update,
+    context,
+    field: str,
+    title: str,
+    prefix: str,
+    format_factory,
+    empty_text: str,
+):
+    chat_id = str(update.effective_chat.id)
+    group_cfg = get_group_whitelist(context).get(chat_id, {})
+    is_silent = bool(group_cfg.get("silent", False))
+
+    users = get_all_users(chat_id)
+
+    if not users:
+        return await safe_reply(update, context, empty_text)
+
+    sorted_users = sorted(
+        users.items(),
+        key=lambda x: x[1].get(field, 0),
+        reverse=True
+    )
+
+    await send_paginated_list(
+        update=update,
+        context=context,
+        items=sorted_users,
+        page=1,
+        prefix=prefix,
+        title=title,
+        format_item=format_factory(is_silent),
+    )
+
+def get_rich_formatter(is_silent: bool):
+    def fmt(i, item):
+        uid, info = item
+
+        name = info.get("name") or f"用户{uid}"
+        balance = info.get("balance", 0)
+
+        if is_silent:
+            name = escape(name)
+            return f"{i}. {name} - 💵 {balance} 金币"
+        else:
+            mention = mention_html(uid, name)
+            return f"{i}. {mention} - 💵 {balance} 金币"
+
+    return fmt
+
+
+def get_points_formatter(is_silent: bool):
+    def fmt(i, item):
+        uid, info = item
+
+        name = info.get("name") or f"用户{uid}"
+        points = info.get("points", 0)
+
+        if is_silent:
+            name = escape(name)
+            return f"{i}. {name} - 🏆 {points} 积分"
+        else:
+            mention = mention_html(uid, name)
+            return f"{i}. {mention} - 🏆 {points} 积分"
+
+    return fmt
+
 def register_economy_handlers(app):
 
     app.add_handler(CommandHandler("user_info", show_profile))
@@ -435,8 +554,14 @@ def register_economy_handlers(app):
     app.add_handler(CommandHandler("point", my_points))
     app.add_handler(CommandHandler("toprichest", top_richest))
     app.add_handler(CommandHandler("top_charm", top_charm))
+    app.add_handler(CommandHandler("top_points", top_points))
     app.add_handler(CommandHandler("add_info", add_info_profile))
     # 财富排行榜分页回调
     app.add_handler(
         CallbackQueryHandler(rich_pagination_callback, pattern=r"^rich_\d+$")
+    )
+    
+     # 财富排行榜分页回调
+    app.add_handler(
+        CallbackQueryHandler(rank_pagination_rich_callback, pattern=r"^points_\d+$")
     )

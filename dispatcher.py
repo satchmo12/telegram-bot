@@ -5,6 +5,8 @@ from channel.channel_forwarder import handle_message
 from command_router import dispatch_command
 from config import AUTO_TRANSLATE
 from forward.message_forward import handle_text_private_message
+from game.checkin import daycheckin
+from game.lottery_game import points_lottery_panel
 from group.check_for_ads import check_for_ads
 from group.check_sacm import check_and_restrict_scam_user
 from group.group_care import handle_text_message, watch_special_users
@@ -14,6 +16,7 @@ from game.qa_game import handle_qa_message
 from group.talk_stats import count_message
 from game.chengyu_game import handle_chengyu
 from chat.my_bot import on_text
+from info.economy import my_points, top_points, top_richest
 from translate.my_deep_translator import auto_translate
 from slave.action_handler import apply_action
 from utils import safe_reply
@@ -51,6 +54,9 @@ async def handle_text_dispatcher(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     text = update.message.text.strip()
+    
+    if await handle_text(update, context):
+        return
 
     try:
         # 优雅分发命令
@@ -90,3 +96,26 @@ async def handle_text_dispatcher(update: Update, context: ContextTypes.DEFAULT_T
     except Exception as e:
         print(f"[文本调度出错] {e}")
         traceback.print_exc()
+        
+async def handle_text(update, context):
+
+    text = update.message.text.strip()
+
+    if text == "🎲积分抽奖":
+        await points_lottery_panel(update, context)
+        return True
+
+    elif text == "📅每日签到":
+        await daycheckin(update, context)
+        return True
+
+    elif text == "💰我的积分":
+        await my_points(update, context)
+        return True
+    
+    elif text == "🏆排行榜":
+        await top_points(update, context)
+        return True
+
+
+    return False

@@ -10,7 +10,7 @@ from datetime import time
 from typing import Optional
 from dotenv import load_dotenv
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
+from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
@@ -71,7 +71,32 @@ import uuid
 
 load_dotenv(override=True)
 
+async def show_menu(update, context):
 
+    keyboard = [
+        ["🎲积分抽奖"],
+        ["📅每日签到", "💰我的积分"],
+        ["🏆排行榜"]
+    ]
+
+    reply_markup = ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True,   # 自动缩小
+        one_time_keyboard=False # 不自动关闭
+    )
+
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="请选择功能：",
+        reply_markup=reply_markup
+    )
+    
+async def hide_menu(update, context):
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="菜单已关闭",
+        reply_markup=ReplyKeyboardRemove()
+    )
 
 def _is_stale_callback_query_error(err: Exception) -> bool:
     msg = str(err).lower()
@@ -550,7 +575,10 @@ def create_app(bot_cfg: dict):
     app.add_handler(CommandHandler("features", features_command))
     app.add_handler(CommandHandler("intro", features_command))
     app.add_handler(CommandHandler("leave", leave_group_command))
-
+    
+    app.add_handler(CommandHandler("show", show_menu))
+    app.add_handler(CommandHandler("hide", hide_menu))
+    
     # ===== 私聊转发逻辑 =====
     if is_feature_enabled(app, "private_forward"):
         write_startup_debug(f"[create_app] register private_forward handlers bot={bot_name}")
@@ -622,6 +650,8 @@ def create_app(bot_cfg: dict):
         app.job_queue.run_repeating(start_telethon_forwarder_job, interval=30, first=30)
 
     app.add_error_handler(error_handler)
+    
+    
 
     return app
 
