@@ -74,9 +74,10 @@ load_dotenv(override=True)
 async def show_menu(update, context):
 
     keyboard = [
-        ["🎲积分抽奖"],
+        # ["🎲积分抽奖"],
         ["📅每日签到", "💰我的积分"],
-        ["🏆排行榜"]
+        ["🏆排行榜"],
+        # ["招商负责人","业务频道"]
     ]
 
     reply_markup = ReplyKeyboardMarkup(
@@ -89,6 +90,16 @@ async def show_menu(update, context):
         chat_id=update.effective_chat.id,
         text="请选择功能：",
         reply_markup=reply_markup
+    )
+
+    # 注意：ReplyKeyboard 的按钮无法“一键打开链接”，只能发送文本。
+    # 需要用 InlineKeyboard 的 url 按钮才能做到点一次直接跳转。
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="快捷入口：",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("招商负责人（点此跳转）", url="https://t.me/mr566")]]
+        ),
     )
     
 async def hide_menu(update, context):
@@ -144,36 +155,25 @@ STARTUP_DEBUG_FILE = os.path.join("data", "startup_debug.log")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 获取用户输入关键词
-    query = (update.inline_query.query or "").strip()
 
-    # 模板内容
-    text = f"""
-📢 全网稳定渠道，不要相信其他来源
 
-⚡ 当前查询：{query if query else "热门推荐"}
+    query = update.inline_query.query
 
-"""
+    results = []
 
-    # 生成单条 Inline 结果
-    results = [
-        InlineQueryResultArticle(
-            id=str(uuid.uuid4()),
-            title="🔥 发送推广消息",
-            description="点击发送当前模板",
-            input_message_content=InputTextMessageContent(
-                message_text=text,
-                parse_mode="HTML"
-            ),
+    if query == "1":
+
+        results.append(
+            InlineQueryResultArticle(
+                id=str(uuid.uuid4()),
+                title="TRX消息",
+                input_message_content=InputTextMessageContent(
+                    "🚨 全网都在涨价"
+                )
+            )
         )
-    ]
 
-    # 返回给 Telegram
-    await update.inline_query.answer(
-        results,
-        cache_time=0,       # 保证每次查询都实时返回
-        is_personal=True,   # 针对触发用户
-    )
+    await update.inline_query.answer(results)
 
 
 def write_startup_debug(message: str) -> None:

@@ -101,8 +101,15 @@ async def points_lottery_panel(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     if update.effective_chat.type not in {"group", "supergroup"}:
         return await safe_reply(update, context, "请在群里发送“积分抽奖”。")
+
+    
+    
     chat_id = str(update.effective_chat.id)
     cfg = get_group_whitelist(context).get(chat_id, {})
+    lottery_cfg = get_points_lottery_config(cfg)
+    if not lottery_cfg.get("enabled", False):
+        return await safe_reply(update, context, "本群积分抽奖未开启。")
+
     await update.message.reply_text(
         _format_panel(chat_id, cfg),
         reply_markup=_lottery_keyboard(chat_id),
@@ -143,6 +150,8 @@ async def points_lottery_callback(update: Update, context: ContextTypes.DEFAULT_
         return await query.answer("参数错误", show_alert=True)
 
     lottery_cfg = get_points_lottery_config(cfg)
+    if not lottery_cfg.get("enabled", False):
+        return await query.answer("本群积分抽奖未开启。", show_alert=True)
     ok, err, results = draw_points_lottery(
         chat_id,
         query.from_user.id,

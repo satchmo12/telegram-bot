@@ -1,6 +1,7 @@
 # command_router.py
 
 from telegram import Update
+import telegram
 from typing import Optional
 from functools import wraps
 from feature_flags import ALL_FEATURES
@@ -255,7 +256,16 @@ async def dispatch_command(update, context):
             # 3) 消息分发（执行命令处理器）
             args = _extract_args(text, cmd)
             context.args = args
-            await handler(update, context)
+            try:
+                await handler(update, context)
+            except telegram.error.Forbidden as e:
+                # 机器人在目标群无发言权限/被踢/被禁言等，不应影响后续 update 处理
+                print(f"[Warning] 命令执行发送失败(Forbidden): {e}")
+            except telegram.error.TimedOut as e:
+                # 网络抖动导致的超时，避免异常冒泡中断 dispatcher 后续逻辑
+                print(f"[Warning] 命令执行发送失败(TimedOut): {e}")
+            except telegram.error.NetworkError as e:
+                print(f"[Warning] 命令执行网络错误(NetworkError): {e}")
             return True
 
     return False

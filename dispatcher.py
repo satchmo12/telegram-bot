@@ -25,7 +25,7 @@ from channel.channel_config import handle_channel_config_text
 from channel.telethon_login import handle_telethon_login_text
 
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -115,6 +115,13 @@ async def handle_text(update, context):
     
     elif text == "🏆排行榜":
         await top_points(update, context)
+        return True
+
+    elif text == "招商负责人":
+        reply_markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("👉 点击联系", url="https://t.me/mr566")]]
+        )
+        await safe_reply(update, context, "点击按钮跳转：", reply_markup=reply_markup)
         return True
 
 

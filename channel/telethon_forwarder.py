@@ -25,6 +25,10 @@ from channel.telethon_login import _get_api_creds
 
 try:
     from telethon import TelegramClient, events
+    from telethon.tl.functions.messages import (
+        GetInlineBotResultsRequest,
+        SendInlineBotResultRequest,
+    )
     from telethon.tl.types import (
         MessageEntityBlockquote,
         MessageEntitySpoiler,
@@ -42,6 +46,8 @@ try:
 except Exception:  # pragma: no cover - 运行时缺依赖
     TelegramClient = None
     events = None
+    GetInlineBotResultsRequest = None
+    SendInlineBotResultRequest = None
     MessageEntityBlockquote = None
     MessageEntitySpoiler = None
     MessageEntityUrl = None
@@ -1076,6 +1082,81 @@ async def _ensure_client(bot_name: str, session_name: str, api_id: int, api_hash
                     print(f"⚠️ 协议号转发失败: {e} (来源: {chat_id} → 目标: {target_id})")
         if state_changed:
             _save_history_state(state)
+
+    @client.on(events.NewMessage)
+    async def _on_group_inline(event):
+        if getattr(event, "out", False):
+            return
+
+        # 只监听群
+        if not getattr(event, "is_group", False):
+            return
+
+        # 消息内容
+        text = (getattr(event, "raw_text", None) or "").strip()
+
+        # 必须包含空格
+        if " " not in text:
+            return
+
+        # 拆分：@bot query
+        parts = text.split(" ", 1)
+        if len(parts) < 2:
+            return
+
+        # 第一部分必须是 @ 开头
+        if not parts[0].startswith("@"):
+            return
+
+        # 机器人用户名
+        bot_username = parts[0][1:].strip()
+        if not bot_username:
+            return
+
+        # query 内容
+        query = parts[1].strip()
+        if not query:
+            return
+
+        chat_id = getattr(event, "chat_id", None)
+        if chat_id is None:
+            return
+
+        print(
+            f"🤖 群 inline 请求: session={session_name} chat_id={chat_id} bot=@{bot_username} query={query}",
+            flush=True,
+        )
+
+        try:
+            peer = await client.get_input_entity(chat_id)
+            bot = await client.get_input_entity(bot_username)
+
+            results = await client(
+                GetInlineBotResultsRequest(
+                    bot=bot,
+                    peer=peer,
+                    query=query,
+                    offset="",
+                )
+            )
+            if not getattr(results, "results", None):
+                if DEBUG_FORWARD:
+                    print(f"没有 inline 结果: bot=@{bot_username} query={query}")
+                return
+
+            await client(
+                SendInlineBotResultRequest(
+                    peer=peer,
+                    query_id=results.query_id,
+                    id=results.results[0].id,
+                )
+            )
+            print(
+                f"✅ 群 inline 发送成功: session={session_name} chat_id={chat_id} bot=@{bot_username}",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"⚠️ 群 inline 发送失败: {e} (session={session_name} chat_id={chat_id})")
 
     per_bot_clients[session_name] = client
     return client

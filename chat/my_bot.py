@@ -6,7 +6,7 @@ import difflib
 import telegram
 from datetime import date
 from typing import Optional
-from telegram import Update
+from telegram import InlineQueryResultArticle, InputTextMessageContent, Update
 from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
@@ -124,7 +124,6 @@ last_reply_ts = {}  # 记录各群上次回复时间，用于控制冷却
 memory_dirty_count = {}
 memory_last_save_ts = {}
 GROUP_RECOMMEND_PAGE_SIZE = 20
-
 
 def _build_group_recommendations(groups: dict) -> list[tuple[int, str, dict]]:
     recommended = []
@@ -477,126 +476,6 @@ def _contains_ad(text: str, keywords: list[str]) -> bool:
         return False
     t = text.lower()
     return any(kw in t for kw in keywords)
-
-
-def remove_mosaic_command1(image_path: str, output_dir: str = "downloads") -> str:
-    """
-    去马赛克/增强模糊区域：
-    输入图片路径，返回处理后的图片路径（临时文件夹）。
-
-    参数:
-        image_path: 原始图片路径
-        output_dir: 输出目录（默认 downloads/）
-
-    返回:
-        处理后的图片路径
-    """
-    if not os.path.exists(image_path):
-        raise FileNotFoundError(f"图片不存在: {image_path}")
-
-    # 确保输出目录存在
-    os.makedirs(output_dir, exist_ok=True)
-
-    # 打开图片
-    img = Image.open(image_path)
-
-    # 尝试增强模糊区域
-    enhanced_img = img.filter(
-        ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3)
-    )
-    enhancer = ImageEnhance.Contrast(enhanced_img)
-    enhanced_img = enhancer.enhance(2)
-
-    # 生成输出路径
-    base_name = os.path.basename(image_path)
-    name, ext = os.path.splitext(base_name)
-    output_path = os.path.join(output_dir, f"{name}_enhanced{ext}")
-
-    # 保存处理后的图片
-    enhanced_img.save(output_path)
-
-    return output_path
-
-
-def remove_mosaic_command2(image_path: str, output_dir: str = "downloads") -> str:
-    """
-    去马赛克 / 模糊增强（实验性）
-    ⚠️ 不能真实还原，只是增强可读性
-    """
-
-    if not os.path.exists(image_path):
-        raise FileNotFoundError(f"图片不存在: {image_path}")
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    # 打开图片（统一转 RGB，避免 PNG / RGBA 问题）
-    img = Image.open(image_path).convert("RGB")
-
-    # -------- 1️⃣ 轻度去噪（防止后面锐化炸点） --------
-    img = img.filter(ImageFilter.MedianFilter(size=3))
-
-    # -------- 2️⃣ 第一次轻锐化 --------
-    img = img.filter(ImageFilter.UnsharpMask(radius=1.5, percent=120, threshold=3))
-
-    # -------- 3️⃣ 提升对比度 --------
-    img = ImageEnhance.Contrast(img).enhance(1.4)
-
-    # -------- 4️⃣ 提升清晰度（对文字类马赛克有点用） --------
-    img = ImageEnhance.Sharpness(img).enhance(1.6)
-
-    # -------- 5️⃣ 第二次重锐化（核心） --------
-    img = img.filter(ImageFilter.UnsharpMask(radius=2.5, percent=180, threshold=5))
-
-    # -------- 6️⃣ 可选：小幅放大（对马赛克“块”有帮助） --------
-    w, h = img.size
-    if max(w, h) < 2000:  # 防止超大图炸内存
-        img = img.resize((int(w * 1.2), int(h * 1.2)), Image.BICUBIC)
-
-    # -------- 保存 --------
-    base_name = os.path.basename(image_path)
-    name, ext = os.path.splitext(base_name)
-    output_path = os.path.join(output_dir, f"{name}_enhanced{ext}")
-
-    img.save(output_path, quality=95, subsampling=0)
-
-    return output_path
-
-
-def remove_mosaic_command(image_path: str, output_dir: str = "downloads") -> str:
-    # 1️⃣ 创建输出目录
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    # 2️⃣ 读取原图
-    img = cv.imread(image_path)
-    if img is None:
-        raise FileNotFoundError(f"图像不存在或无法读取: {image_path}")
-
-    # 3️⃣ 自动生成 mask（检测亮色区域作为干扰）
-    gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
-    _, mask = cv.threshold(gray, 200, 255, cv.THRESH_BINARY)  # 阈值可调整
-    kernel = np.ones((3, 3), np.uint8)
-    mask = cv.dilate(mask, kernel, iterations=1)
-
-    # 4️⃣ 修复图像（去马赛克/水印）
-    repaired = cv.inpaint(img, mask, 3, cv.INPAINT_TELEA)
-
-    # 5️⃣ 去噪 & 对比度增强
-    denoised = cv.fastNlMeansDenoisingColored(repaired, None, 10, 10, 7, 21)
-    lab = cv.cvtColor(denoised, cv.COLOR_BGR2LAB)
-    l, a, b = cv.split(lab)
-    clahe = cv.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    l = clahe.apply(l)
-    enhanced = cv.merge((l, a, b))
-    enhanced = cv.cvtColor(enhanced, cv.COLOR_LAB2BGR)
-
-    # 6️⃣ 保存输出文件，统一命名为 <原图名>_enhanced.jpg
-    base_name = os.path.splitext(os.path.basename(image_path))[0]
-    output_path = os.path.join(output_dir, f"{base_name}_enhanced.jpg")
-    cv.imwrite(output_path, enhanced)
-
-    return output_path
-
 
 # ---------------- 命令与消息处理 ----------------
 @group_allowed
@@ -1251,19 +1130,6 @@ async def navigation_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=markup,
         )
 
-
-@register_command("check")
-async def check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-    if len(context.args) == 0:
-        await update.message.reply_text("用法: /check 用户名")
-        return
-    username = context.args[0].replace("@", "").replace(".ton", "")
-    result = await check_ton_username(username)
-    await update.message.reply_text(f"查询 @{username}:\n{result}")
-
-
 async def group_recommend_page_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
@@ -1620,7 +1486,7 @@ async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
 
 @group_allowed
 @register_command("叫", "说", "讲")
-async def add_joke(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def speak_to_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not update.message:
         return
@@ -1637,7 +1503,7 @@ async def add_joke(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @group_allowed
 @register_command("首拼音")
-async def add_joke(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def first_pinyin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not update.message:
         return
@@ -1651,7 +1517,7 @@ async def add_joke(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @group_allowed
 @register_command("尾拼音")
-async def add_joke(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def last_pinyin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not update.message:
         return
@@ -1661,23 +1527,6 @@ async def add_joke(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 段子内
     await safe_reply(update, context, current_pinyin)
-
-
-@group_allowed
-@register_command("水群")
-async def water_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    today = date.today()
-    year_start = date(today.year, 1, 1)
-    next_year = today.year + 1
-    next_year_start = date(next_year, 1, 1)
-    passed_days = (today - year_start).days + 1
-    remaining_days = (next_year_start - today).days
-    await safe_reply(
-        update,
-        context,
-        f"你已经水群{passed_days}天，距离下一年（{next_year}）还剩{remaining_days}天",
-    )
-
 
 # ---------------- 注册处理器 ----------------
 def register_my_bot_handlers(app):

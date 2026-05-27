@@ -578,6 +578,7 @@ def is_bot_owner(user_id):
 
 
 delete_queue = asyncio.Queue()
+_CHAT_SEND_BLOCKED_UNTIL: dict[int, float] = {}
 
 
 async def delete_worker(bot: Bot):
@@ -599,6 +600,12 @@ async def safe_reply(
     reply_markup=None,
 ):
     try:
+        chat_id = int(update.effective_chat.id) if update and update.effective_chat else None
+        if chat_id is not None:
+            blocked_until = _CHAT_SEND_BLOCKED_UNTIL.get(chat_id, 0.0)
+            if blocked_until and time.time() < blocked_until:
+                return None
+
         parse_mode = ParseMode.HTML if html else None
         if update.message and bot_reply:
             msg = await update.message.reply_text(
@@ -606,7 +613,7 @@ async def safe_reply(
             )
         else:
             msg = await context.bot.send_message(
-                chat_id=update.effective_chat.id,
+                chat_id=chat_id,
                 text=text,
                 parse_mode=parse_mode,
                 reply_markup=reply_markup,
@@ -627,6 +634,15 @@ async def safe_reply(
 
     except telegram.error.TimedOut:
         print("[Warning] 回复消息时超时：", text)
+    except telegram.error.Forbidden as e:
+        # 常见原因：机器人被禁言/无发送权限/被踢出群等。避免刷屏反复尝试导致“看起来很卡”。
+        try:
+            chat_id = int(update.effective_chat.id) if update and update.effective_chat else None
+        except Exception:
+            chat_id = None
+        if chat_id is not None:
+            _CHAT_SEND_BLOCKED_UNTIL[chat_id] = time.time() + 600  # 10 分钟内不再尝试发消息
+        print("[Error] 发送消息失败(Forbidden)：", e)
     except Exception as e:
         print("[Error] 发送消息失败：", e)
 
