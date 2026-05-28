@@ -42,6 +42,7 @@ from channel.telethon_login import _clear_login_state
 from command_router import get_matched_command
 
 from chat.my_bot import cleaned_word
+from chat.gemini_chat import handle_gemini_ai
 from run_daily import (
     daily_master_job,
     five_minute_master_job,
@@ -304,6 +305,10 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
                 text = f"✅ 频道ID：{channel_id}\n消息ID：{msg_id}\n频道名：{title}"
             await msg.reply_text(text, parse_mode="HTML")
             return
+
+    # 主机器人私聊 AI：开启后不再转发给主人（关闭后才会转发）
+    if await handle_gemini_ai(update, context):
+        raise ApplicationHandlerStop
     await forward_to_owner(update, context)
 
 
@@ -612,7 +617,7 @@ def create_app(bot_cfg: dict):
     app.add_handler(CallbackQueryHandler(start_panel_callback, pattern=r"^start:"))
     
     # 内连
-    app.add_handler(InlineQueryHandler(inline_query_handler))
+    # app.add_handler(InlineQueryHandler(inline_query_handler))
 
     # ===== 注册所有功能模块 =====
     register_all_handlers(app)

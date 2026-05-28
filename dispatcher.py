@@ -16,6 +16,7 @@ from game.qa_game import handle_qa_message
 from group.talk_stats import count_message
 from game.chengyu_game import handle_chengyu
 from chat.my_bot import on_text
+from chat.gemini_chat import handle_gemini_ai
 from info.economy import my_points, top_points, top_richest
 from translate.my_deep_translator import auto_translate
 from slave.action_handler import apply_action
@@ -55,6 +56,10 @@ async def handle_text_dispatcher(update: Update, context: ContextTypes.DEFAULT_T
 
     text = update.message.text.strip()
     
+    # 仅主机器人：用户级 AI 对话（开启后无需 @）
+    if await handle_gemini_ai(update, context):
+        return
+
     if await handle_text(update, context):
         return
 

@@ -598,6 +598,7 @@ async def safe_reply(
     text: str,
     html: bool = False,
     reply_markup=None,
+    auto_delete_seconds: int = 60,
 ):
     try:
         chat_id = int(update.effective_chat.id) if update and update.effective_chat else None
@@ -619,15 +620,16 @@ async def safe_reply(
                 reply_markup=reply_markup,
             )
         # 后台启动删除任务，不阻塞 safe_reply
-        if msg:
+        if msg and auto_delete_seconds and auto_delete_seconds > 0:
+            delay = int(auto_delete_seconds)
             context.job_queue.run_once(
                 delete_message_job,
-                60,
+                delay,
                 chat_id=update.effective_chat.id,
                 data=msg.message_id,
             )
 
-            asyncio.create_task(delete_later(msg, delay=60))
+            asyncio.create_task(delete_later(msg, delay=delay))
         #     # await delete_queue.put(msg)  # 放入删除队列，不直接创建任务
 
         return msg  # 方便外部需要消息对象时用
