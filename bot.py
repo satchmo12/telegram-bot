@@ -515,10 +515,10 @@ def _build_start_panel_rows(
     if "channel" in enabled:
         rows.extend(
             [
-                [InlineKeyboardButton("📣频道配置", callback_data="chcfg:back")],
+                [InlineKeyboardButton("📣克隆频道", callback_data="chcfg:back")],
                 [InlineKeyboardButton("📣机器人频道配置", callback_data="chcfg:bot")],
                 [InlineKeyboardButton("📱查看登录", callback_data="tlogin:list")],
-                [InlineKeyboardButton("📱登录小号", callback_data="tlogin:login")],
+                [InlineKeyboardButton("📱登录协议号", callback_data="tlogin:login")],
             ]
         )
     return rows

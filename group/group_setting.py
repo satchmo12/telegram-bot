@@ -1545,11 +1545,14 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         if feature_key in (
             {item[0] for item in TOGGLE_FIELDS}
             | LOTTERY_TOGGLE_KEYS
-            | {"ad_push_enabled", "spam_limit"}
+            | {"ad_push_enabled", "spam_limit", "force_subscribe", "force_subscribe_new_only"}
         ):
+            await query.answer("处理中...", show_alert=False)
             new_value = not bool(cfg.get(feature_key, False))
             cfg[feature_key] = new_value
             if feature_key == "force_subscribe" and new_value:
+                cfg["force_subscribe_set_ts"] = int(time.time())
+            if feature_key == "force_subscribe_new_only" and new_value:
                 cfg["force_subscribe_set_ts"] = int(time.time())
             data[chat_id_str] = cfg
             save_json(GROUP_LIST_FILE, data)
@@ -1570,8 +1573,11 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             return await _open_group_panel(query, context, chat_id_str, user_id)
         if feature_key in {"force_subscribe", "force_subscribe_new_only"}:
             await query.answer("✅ 已更新", show_alert=False)
-            return await _open_force_subscribe_settings_panel(
-                query, context, chat_id_str, user_id
+            return await query.edit_message_text(
+                _build_force_subscribe_settings_text(chat_id_str, cfg),
+                reply_markup=_build_force_subscribe_settings_keyboard(
+                    chat_id_str, cfg
+                ),
             )
         return await _open_group_panel(query, context, chat_id_str, user_id)
 
@@ -2038,9 +2044,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         chat_id_str = context.user_data.pop("group_setting_chat_id", None)
         await query.answer()
         if chat_id_str:
-            return await _open_force_subscribe_settings_panel(
-                query, context, chat_id_str, user_id
-            )
+            return await _open_force_subscribe_settings_panel(query, context, chat_id_str, user_id)
         return
     if action == "business_coop_back":
         context.user_data.pop("group_setting_stage", None)
@@ -2238,6 +2242,10 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
     if not chat_id_str:
         context.user_data.pop("group_setting_stage", None)
         return
+    data = get_group_whitelist(context)
+    cfg = data.get(chat_id_str, {})
+    if not isinstance(cfg, dict):
+        cfg = {}
 
     if stage == "force_channel":
         if not text:
@@ -2252,16 +2260,13 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
                 text = f"@{text}"
             _set_force_channel(chat_id_str, text)
             _mark_force_subscribe_set_ts(chat_id_str)
+            cfg["force_subscribe"] = True
             context.user_data.pop("group_setting_stage", None)
             context.user_data.pop("group_setting_chat_id", None)
             await update.message.reply_text(f"✅ 已设置强制关注频道为：{text}")
     elif stage == "business_coop":
         if not text:
             return await update.message.reply_text("❗ 请发送商业合作链接文本。")
-        data = get_group_whitelist(context)
-        cfg = data.get(chat_id_str, {})
-        if not isinstance(cfg, dict):
-            cfg = {}
         if text in {"清空", "取消", "关闭"}:
             cfg["business_coop_link"] = ""
             await update.message.reply_text("✅ 已清空商业合作链接。")

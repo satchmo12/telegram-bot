@@ -198,12 +198,19 @@ async def new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for member in update.message.new_chat_members:
         uid = str(member.id)
+        now_ts = int(time.time())
+        old = users.get(uid, {})
+        if not isinstance(old, dict):
+            old = {}
+        join_time = int(old.get("join_time", 0) or 0)
+        if join_time <= 0:
+            join_time = now_ts
         users[uid] = {
             "full_name": member.full_name,
             "username": member.username,
             "username_history": [],
-            "join_time": int(time.time()),
-            "last_seen": int(time.time()),
+            "join_time": join_time,
+            "last_seen": now_ts,
         }
 
     save_users(chat.id, users)
