@@ -3,13 +3,17 @@ from telegram.ext import CommandHandler, ContextTypes, CallbackQueryHandler
 from telegram.constants import ChatMemberStatus
 from telegram.error import BadRequest, Forbidden
 import re
-from command_router import register_command
+import time
+from pypinyin import lazy_pinyin
+from command_router import register_command, get_matched_command
 from utils import (
     WARNINGS_FILE,
     BOT_USER_FILE,
     FORWARD_MAP_FILE,
+    SHARED_SESSION_NAME,
     is_admin,
     is_super_admin,
+    get_session_path,
     load_json,
     safe_reply,
     save_json,
@@ -18,6 +22,9 @@ from utils import (
 )
 import datetime
 from group.mute_registry import add_mute, remove_mute, list_mutes
+
+
+_USERNAME_CHECK_COOLDOWN: dict[int, float] = {}
 
 
 def get_warnings_data() -> dict:
@@ -71,6 +78,172 @@ def _normalize_group_target(raw: str):
         except Exception:
             return None
     return f"@{s}"
+
+
+def _normalize_username(raw: str) -> str:
+    s = (raw or "").strip()
+    if s.startswith("@"):
+        s = s[1:]
+    return s.strip()
+
+
+def _is_valid_tg_username(username: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", username or ""))
+
+
+def _contains_chinese(text: str) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
+
+
+def _to_pinyin(text: str) -> str:
+    parts = lazy_pinyin(text or "")
+    return "".join(parts).lower()
+
+
+def _expand_alpha_wildcards(base: str, limit: int = 120) -> list[str]:
+    """
+    将字母位置按 a-z 做受控扩展。
+    只扩展前两位字母位置，避免组合爆炸。
+    """
+    if not base:
+        return []
+
+    base = base.lower()
+    alpha_positions = [idx for idx, ch in enumerate(base) if ch.isalpha()]
+    if not alpha_positions:
+        return [base]
+
+    target_positions = alpha_positions[:2]
+    results = []
+    seen = set()
+    letters = "abcdefghijklmnopqrstuvwxyz"
+
+    def build(candidate_letters: tuple[str, ...]) -> str:
+        chars = list(base)
+        for pos, letter in zip(target_positions, candidate_letters):
+            chars[pos] = letter
+        return "".join(chars)
+
+    if len(target_positions) == 1:
+        for a in letters:
+            value = build((a,))
+            if value not in seen:
+                seen.add(value)
+                results.append(value)
+            if len(results) >= limit:
+                break
+        return results
+
+    for a in letters:
+        for b in letters:
+            value = build((a, b))
+            if value not in seen:
+                seen.add(value)
+                results.append(value)
+            if len(results) >= limit:
+                return results
+
+    return results
+
+
+def _build_username_candidates(keyword: str) -> list[str]:
+    raw = _normalize_username(keyword)
+    if not raw:
+        return []
+
+    bases: list[str] = []
+    if _contains_chinese(raw):
+        pinyin_base = _to_pinyin(raw)
+        if pinyin_base:
+            bases.append(pinyin_base)
+    else:
+        cleaned = re.sub(r"[^A-Za-z0-9_]", "", raw).lower()
+        if cleaned:
+            bases.append(cleaned)
+
+    # 中文输入时，同时补一个“原样转小写后清洗”的备用基底，避免只命中拼音模式
+    fallback_base = re.sub(r"[^A-Za-z0-9_]", "", raw).lower()
+    if fallback_base and fallback_base not in bases:
+        bases.append(fallback_base)
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def push(value: str):
+        value = re.sub(r"_+", "_", value).strip("_")
+        if not value:
+            return
+        if not re.match(r"^[a-z][a-z0-9_]{4,31}$", value):
+            return
+        if value in seen:
+            return
+        seen.add(value)
+        candidates.append(value)
+
+    for base in bases:
+        is_five_char_third_repeat = (
+            len(base) == 5
+            and base[-1] == base[-2] == base[-3]
+            and base.isalnum()
+        )
+
+        push(base)
+        for variant in _expand_alpha_wildcards(base):
+            push(variant)
+
+        if is_five_char_third_repeat:
+            continue
+
+        if len(base) < 5:
+            pad_char = base[-1:] or "a"
+            push(base + pad_char * (5 - len(base)))
+        if len(base) >= 5 and base[-1] == base[-2] == base[-3]:
+            push(base[:2] + base[-1] * 3)
+
+        suffixes = ["", "000", "111", "123", "321", "520", "521", "1314", "518", "618"]
+        for suffix in suffixes:
+            push(base + suffix)
+            push(base + "_" + suffix if suffix else base)
+
+        if len(base) >= 2:
+            push(base[:2] + "_" + base[2:])
+            push(base[:3] + "_" + base[3:] if len(base) > 3 else base)
+
+        if len(base) >= 3:
+            tail = base[-1]
+            push(base[:2] + tail * 3)
+            push(base[:1] + tail * 4)
+
+    return candidates[:30]
+
+
+async def _check_username_available(context: ContextTypes.DEFAULT_TYPE, username: str) -> bool:
+    try:
+        from telethon import TelegramClient
+        from telethon.tl.functions.account import CheckUsernameRequest
+    except Exception:
+        return False
+
+    from channel.telethon_login import _get_api_creds
+
+    api_id, api_hash = _get_api_creds()
+    if not api_id or not api_hash:
+        return False
+
+    session_path = get_session_path(context, SHARED_SESSION_NAME)
+    client = TelegramClient(session_path, api_id, api_hash)
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            return False
+        return bool(await client(CheckUsernameRequest(username)))
+    except Exception:
+        return False
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
 
 
 def _resolve_reply_user_for_id(update: Update):
@@ -473,6 +646,271 @@ async def get_group_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         return await safe_reply(update, context,"🚫 你不是管理员，无法执行此命令。")
+
+
+@register_command("注册", "注册用户名", "创建用户名", "设置用户名")
+async def register_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.effective_user or not update.effective_chat:
+        return
+    if not is_super_admin(update.effective_user.id):
+        return await safe_reply(update, context, "🚫 你不是超级管理员，无法执行此命令。")
+    if update.effective_chat.type not in {"group", "supergroup", "channel"}:
+        return await safe_reply(update, context, "请在目标群或频道中使用：注册用户名 <用户名>")
+    if not context.args:
+        return await safe_reply(update, context, "用法：注册用户名 <用户名>")
+
+    username = _normalize_username(context.args[0])
+    if not _is_valid_tg_username(username):
+        return await safe_reply(
+            update,
+            context,
+            "用户名格式不正确，需以字母开头，长度 5-32 位，只能包含字母、数字和下划线。",
+        )
+
+    now = time.time()
+    last_call = _USERNAME_CHECK_COOLDOWN.get(int(update.effective_user.id), 0.0)
+    if now - last_call < 10:
+        wait_seconds = int(10 - (now - last_call))
+        return await safe_reply(
+            update, context, f"请稍后再试，剩余冷却 {wait_seconds} 秒。", auto_delete_seconds=0
+        )
+    _USERNAME_CHECK_COOLDOWN[int(update.effective_user.id)] = now
+
+    try:
+        from telethon import TelegramClient
+        from telethon.tl.functions.channels import UpdateUsernameRequest
+    except Exception:
+        return await safe_reply(update, context, "❗ Telethon 未安装，请先安装依赖。")
+
+    from channel.telethon_login import _get_api_creds
+
+    api_id, api_hash = _get_api_creds()
+    if not api_id or not api_hash:
+        return await safe_reply(update, context, "❗ 未配置 Telethon API 信息。")
+
+    session_path = get_session_path(context, SHARED_SESSION_NAME)
+    client = TelegramClient(session_path, api_id, api_hash)
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            return await safe_reply(update, context, "❗ 协议号未登录，请先登录可用的小号。")
+
+        entity = await client.get_entity(update.effective_chat.id)
+        if update.effective_chat.type == "group":
+            return await safe_reply(update, context, "❗ 普通群不能设置用户名，请先升级为超级群。")
+
+        await client(UpdateUsernameRequest(entity, username))
+        await safe_reply(
+            update,
+            context,
+            f"✅ 用户名设置成功：@{username}",
+            auto_delete_seconds=0,
+        )
+    except Exception as e:
+        await safe_reply(update, context, f"❌ 用户名设置失败：{e}", auto_delete_seconds=0)
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
+@register_command("创建频道", "创建群组", "创建超级群")
+async def create_channel_or_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.effective_user:
+        return
+    if not is_super_admin(update.effective_user.id):
+        return await safe_reply(update, context, "🚫 你不是超级管理员，无法执行此命令。")
+    if update.effective_chat.type != "private":
+        return await safe_reply(update, context, "请私聊机器人使用：创建频道 <标题> [用户名]")
+    if not context.args:
+        return await safe_reply(update, context, "用法：创建频道 <标题> [用户名]")
+
+    title = str(context.args[0]).strip()
+    username = _normalize_username(context.args[1]) if len(context.args) > 1 else ""
+    if not title:
+        return await safe_reply(update, context, "请输入有效的标题。")
+    if username and not _is_valid_tg_username(username):
+        return await safe_reply(
+            update,
+            context,
+            "用户名格式不正确，需以字母开头，长度 5-32 位，只能包含字母、数字和下划线。",
+        )
+
+    now = time.time()
+    last_call = _USERNAME_CHECK_COOLDOWN.get(int(update.effective_user.id), 0.0)
+    if now - last_call < 15:
+        wait_seconds = int(15 - (now - last_call))
+        return await safe_reply(
+            update, context, f"请稍后再试，剩余冷却 {wait_seconds} 秒。", auto_delete_seconds=0
+        )
+    _USERNAME_CHECK_COOLDOWN[int(update.effective_user.id)] = now
+
+    command_name = get_matched_command(update.message.text or "") or ""
+    is_channel = command_name == "创建频道"
+
+    try:
+        from telethon import TelegramClient
+        from telethon.tl.functions.channels import CreateChannelRequest, UpdateUsernameRequest
+    except Exception:
+        return await safe_reply(update, context, "❗ Telethon 未安装，请先安装依赖。")
+
+    from channel.telethon_login import _get_api_creds
+
+    api_id, api_hash = _get_api_creds()
+    if not api_id or not api_hash:
+        return await safe_reply(update, context, "❗ 未配置 Telethon API 信息。")
+
+    session_path = get_session_path(context, SHARED_SESSION_NAME)
+    client = TelegramClient(session_path, api_id, api_hash)
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            return await safe_reply(update, context, "❗ 协议号未登录，请先登录可用的小号。")
+
+        created = await client(
+            CreateChannelRequest(
+                title=title,
+                about=f"Created by bot: {title}",
+                megagroup=not is_channel,
+            )
+        )
+        entity = getattr(created, "chats", [None])[0]
+        if not entity:
+            return await safe_reply(update, context, "❌ 创建失败：未返回频道/群组实体。", auto_delete_seconds=0)
+
+        final_username = username
+        if final_username:
+            try:
+                await client(UpdateUsernameRequest(entity, final_username))
+            except Exception as e:
+                await safe_reply(
+                    update,
+                    context,
+                    f"⚠️ 已创建成功，但用户名设置失败：{e}",
+                    auto_delete_seconds=0,
+                )
+                final_username = ""
+
+        chat_id = getattr(entity, "id", "")
+        kind = "频道" if not getattr(entity, "megagroup", False) else "超级群"
+        msg = [
+            f"✅ 创建成功：{kind}",
+            f"标题：{title}",
+            f"ID：<code>{chat_id}</code>",
+        ]
+        if final_username:
+            msg.append(f"用户名：@{final_username}")
+        await safe_reply(update, context, "\n".join(msg), html=True, auto_delete_seconds=0)
+    except Exception as e:
+        await safe_reply(update, context, f"❌ 创建失败：{e}", auto_delete_seconds=0)
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
+@register_command("协议号查询", "查询协议号", "查协议号", "查询用户名", "用户名查询")
+async def query_protocol_id_by_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.effective_user or not update.effective_chat:
+        return
+    if not is_super_admin(update.effective_user.id):
+        return await safe_reply(update, context, "🚫 你不是超级管理员，无法执行此命令。")
+    if not context.args:
+        return await safe_reply(update, context, "用法：协议号查询 @用户名")
+
+    username = _normalize_username(context.args[0])
+    if not username:
+        return await safe_reply(update, context, "请输入有效的用户名。")
+
+    try:
+        from telethon import TelegramClient
+    except Exception:
+        return await safe_reply(update, context, "❗ Telethon 未安装，请先安装依赖。")
+
+    from channel.telethon_login import _get_api_creds
+
+    api_id, api_hash = _get_api_creds()
+    if not api_id or not api_hash:
+        return await safe_reply(update, context, "❗ 未配置 Telethon API 信息。")
+
+    session_path = get_session_path(context, SHARED_SESSION_NAME)
+    client = TelegramClient(session_path, api_id, api_hash)
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            return await safe_reply(update, context, "❗ 协议号未登录，请先登录可用的小号。")
+
+        entity = await client.get_entity(username)
+        user_id = getattr(entity, "id", None)
+        if not user_id:
+            return await safe_reply(update, context, "未查询到该用户名对应的协议号。")
+
+        display_name = getattr(entity, "first_name", "") or getattr(entity, "title", "") or "未知用户"
+        resolved_username = _normalize_username(getattr(entity, "username", "") or username)
+        await safe_reply(
+            update,
+            context,
+            f"👤 用户：{display_name}\n"
+            f"@{resolved_username}\n"
+            f"🆔 协议号：<code>{user_id}</code>",
+            html=True,
+        )
+    except Exception as e:
+        await safe_reply(update, context, f"查询失败：{e}")
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
+@register_command("检测", "检测用户名", "查用户名")
+async def detect_username_candidates(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.effective_user:
+        return
+    if not is_super_admin(update.effective_user.id):
+        return await safe_reply(update, context, "🚫 你不是超级管理员，无法执行此命令。")
+    if not context.args:
+        return await safe_reply(update, context, "用法：检测 美女")
+
+    now = time.time()
+    last_call = _USERNAME_CHECK_COOLDOWN.get(int(update.effective_user.id), 0.0)
+    if now - last_call < 20:
+        wait_seconds = int(20 - (now - last_call))
+        return await safe_reply(update, context, f"请稍后再试，剩余冷却 {wait_seconds} 秒。", auto_delete_seconds=0)
+    _USERNAME_CHECK_COOLDOWN[int(update.effective_user.id)] = now
+
+    keyword = " ".join(context.args).strip()
+    candidates = _build_username_candidates(keyword)
+    if not candidates:
+        return await safe_reply(update, context, "请输入有效的中文或字母关键词。", auto_delete_seconds=0)
+
+    lines = [f"🔎 关键词：{keyword}", "可尝试注册的用户名："]
+    available: list[str] = []
+    checked = 0
+
+    for username in candidates:
+        checked += 1
+        is_available = await _check_username_available(context, username)
+        if is_available:
+            available.append(username)
+            lines.append(f"✅ @{username}")
+        else:
+            lines.append(f"❌ @{username}")
+        if len(available) >= 15:
+            break
+
+    if not available:
+        lines.append("")
+        lines.append("没有找到可用的用户名候选。")
+    else:
+        lines.append("")
+        lines.append("结果仅列出可注册项，建议尽快尝试。")
+
+    lines.append(f"已检测：{checked} 个候选")
+    await safe_reply(update, context, "\n".join(lines), auto_delete_seconds=0)
 
 
 @group_enabled_only

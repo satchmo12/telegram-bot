@@ -231,6 +231,10 @@ def _build_private_dialog_keyboard(
                 callback_data=f"{PRIVATE_DIALOG_CALLBACK_PREFIX}:refresh:{page}",
             ),
             InlineKeyboardButton(
+                "↩️ 返回",
+                callback_data="start:back",
+            ),
+            InlineKeyboardButton(
                 "❌ 退出模式", callback_data=f"{PRIVATE_DIALOG_CALLBACK_PREFIX}:exit"
             ),
         ]

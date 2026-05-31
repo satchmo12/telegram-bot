@@ -10,7 +10,7 @@ from datetime import time
 from typing import Optional
 from dotenv import load_dotenv
 
-from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
+from telegram import InlineQueryResultCachedPhoto, InlineQueryResultPhoto, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
@@ -60,6 +60,7 @@ from utils import (
     get_group_whitelist,
     is_super_admin,
     load_json,
+    safe_reply,
     save_json,
     is_bot_owner,
     set_bot_owner,
@@ -69,6 +70,8 @@ from utils import (
 # ===== 注册 Telegram / 命令 =====
 from telegram import BotCommand
 import uuid
+
+PHOTO_URL = "http://g.hiphotos.baidu.com/image/pic/item/6d81800a19d8bc3e770bd00d868ba61ea9d345f2.jpg"  # 换成你的广告图
 
 load_dotenv(override=True)
 
@@ -155,27 +158,41 @@ MULTI_BOT_STAGE_KEY = "multi_bot_stage"
 STARTUP_DEBUG_FILE = os.path.join("data", "startup_debug.log")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+async def get_file_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    photo = update.message.photo[-1]
+
+    print("FILE_ID:")
+    print(photo.file_id)
+    await update.message.reply_text(photo.file_id)
+    
+
 async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = (update.inline_query.query or "").strip()
+    bot_username = str(getattr(context.bot, "username", "") or "").strip().lstrip("@")
+    bot_name = str(context.application.bot_data.get("name", "") or "").strip() or "机器人"
+    display_bot = f"@{bot_username}" if bot_username else bot_name
 
-
-    query = update.inline_query.query
-
-    results = []
-
-    if query == "1":
-
-        results.append(
-            InlineQueryResultArticle(
-                id=str(uuid.uuid4()),
-                title="TRX消息",
-                input_message_content=InputTextMessageContent(
-                    "🚨 全网都在涨价"
-                )
-            )
+    results = [
+        InlineQueryResultArticle(
+            id=str(uuid.uuid4()),
+            title=f"当前机器人：{display_bot}",
+            description=f"收到的 inline 请求来自 {display_bot}",
+            input_message_content=InputTextMessageContent(
+                f"🤖 当前监听到该 inline 请求的机器人：{display_bot}\n"
+                f"查询内容：{query or '（空）'}"
+            ),
         )
-
-    await update.inline_query.answer(results)
-
+    ]
+    
+    chat_id = int(update.effective_chat.id) if update and update.effective_chat else None
+    # await context.bot.send_message(
+    #             chat_id=chat_id,
+    #             text=results,
+    #         )
+    
+    await update.inline_query.answer(results=results, cache_time=0, is_personal=True)
+    
 
 def write_startup_debug(message: str) -> None:
     try:
@@ -267,6 +284,16 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
         return
     msg = update.message
     if msg:
+        if msg.text:
+            matched_command = get_matched_command(msg.text)
+            if matched_command:
+                _debug_private_forward(
+                    f"[private_forward_router] skip matched command={matched_command}"
+                )
+                print(
+                    f"[private_forward_router] 忽略：命中命令 {matched_command}"
+                )
+                return
         sender_chat = getattr(msg, "sender_chat", None)
         forward_origin = getattr(msg, "forward_origin", None)
         origin_chat = getattr(forward_origin, "chat", None) if forward_origin else None
@@ -475,6 +502,10 @@ def _build_start_panel_rows(
     if bot_name == MASTER_BOT_NAME:
         rows.append([InlineKeyboardButton("🧬克隆机器人", callback_data=f"mbot:clone:{MASTER_BOT_NAME}")])
         rows.append([InlineKeyboardButton("🤖机器人面板", callback_data="mbot:list")])
+    if user_id and int(user_id) == owner_id:
+        rows.append(
+            [InlineKeyboardButton("💬私聊面板", callback_data="pfmode:open:1")]
+        )
     if "group" in enabled:
         rows.append([InlineKeyboardButton("👥群配置", callback_data="gcfg:list")])
         if user_id and int(user_id) == owner_id:
@@ -617,7 +648,8 @@ def create_app(bot_cfg: dict):
     app.add_handler(CallbackQueryHandler(start_panel_callback, pattern=r"^start:"))
     
     # 内连
-    # app.add_handler(InlineQueryHandler(inline_query_handler))
+    app.add_handler(InlineQueryHandler(inline_query_handler))
+    # app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
 
     # ===== 注册所有功能模块 =====
     register_all_handlers(app)

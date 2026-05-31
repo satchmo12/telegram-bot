@@ -500,10 +500,10 @@ def _build_detail_keyboard(cfg: dict, *, can_edit: bool, can_control: bool) -> I
                 [InlineKeyboardButton("▶️ 启动机器人", callback_data=f"{CALLBACK_PREFIX}:start:{name}")]
             )
 
-    if can_edit:
-        rows.append(
-            [InlineKeyboardButton("🧬 克隆机器人", callback_data=f"{CALLBACK_PREFIX}:clone:{name}")]
-        )
+    # if can_edit:
+    #     rows.append(
+    #         [InlineKeyboardButton("🧬 克隆机器人", callback_data=f"{CALLBACK_PREFIX}:clone:{name}")]
+    #     )
 
     if can_edit and cfg.get("managed"):
         enabled_features = set(cfg.get("enabled_features", []))
