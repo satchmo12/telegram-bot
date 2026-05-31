@@ -2,7 +2,6 @@ from command_router import FEATURE_MANOR, feature_required, register_command
 from farm.animals_config import ANIMAL_PRODUCT_CONFIG
 from farm.crafting_config import CRAFT_RECIPES
 from farm.crop_config import CROP_CONFIG
-from farm.garden_config import GARDEN_CONFIG
 from utils import SYSTEM_SHOP_FILE, load_json, save_json, sort_shop
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
@@ -59,8 +58,6 @@ async def view_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 根据分类过滤库存
     if category == "农场":
         config_keys = CROP_CONFIG.keys()
-    elif category == "花园":
-        config_keys = GARDEN_CONFIG.keys()
     elif category == "牧场":
         config_keys = ANIMAL_PRODUCT_CONFIG.keys()
     elif category == "合成":

@@ -9,8 +9,6 @@ from farm.crafting_config import CRAFT_RECIPES
 from farm.crop_config import CROP_CONFIG
 from farm.crop_price import CROP_PEICE
 from farm.farm_game import farm_harvest
-from farm.garden_config import GARDEN_CONFIG
-from farm.garden_game import harvest_garden
 from farm.shop_game import add_to_system_shop
 from utils import apply_reward, format_reward_text, load_json, safe_reply, save_json
 
@@ -132,8 +130,6 @@ async def show_inventory(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 根据分类过滤库存
     if category == "农场":
         config_keys = CROP_CONFIG.keys()
-    elif category == "花园":
-        config_keys = GARDEN_CONFIG.keys()
     elif category == "牧场":
         config_keys = ANIMAL_PRODUCT_CONFIG.keys()
     elif category == "合成":

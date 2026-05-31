@@ -6,7 +6,6 @@ from utils import safe_reply
 
 from farm.animals_game import animals_help
 from farm.farm_game import farm_help
-from farm.garden_game import garden_help
 from slave.slave_game import slave_help  # 新增奴隶模块帮助
 
 
@@ -16,9 +15,7 @@ async def menu_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()  # 必须应答 callback_query，否则按钮会一直显示“加载中”
 
     data = query.data  # 按钮传来的标识
-    if data == "garden_help":
-        await garden_help(update, context)
-    elif data == "farm_help":
+    if data == "farm_help":
         await farm_help(update, context)
     elif data == "slave_help":
         await slave_help(update, context)
@@ -32,7 +29,6 @@ async def menu_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 # 菜单命令，显示按钮
 async def start_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("🌱 花园帮助", callback_data="garden_help")],
         [InlineKeyboardButton("🚜 农场帮助", callback_data="farm_help")],
         [InlineKeyboardButton("🚜 牧场帮助", callback_data="animals_help")],
         [InlineKeyboardButton("👑 奴隶系统帮助", callback_data="slave_help")],
@@ -107,6 +103,6 @@ def register_menu_handlers(app):
     app.add_handler(
         CallbackQueryHandler(
             menu_button_handler,
-            pattern=r"^(garden_help|farm_help|slave_help|animals_help)$",
+            pattern=r"^(farm_help|slave_help|animals_help)$",
         )
     )

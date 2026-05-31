@@ -23,7 +23,7 @@ import os
 
 
 BASE_EXPAND_COST = 500  # 基础扩建费用
-MAX_LAND_COUNT = 12  # 最大土地块数
+MAX_LAND_COUNT = 24  # 最大土地块数
 EXPAND_COOLDOWN = 600  # 扩建冷却时间，单位秒
 
 
@@ -75,7 +75,7 @@ async def start_farm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_reply(
         update,
         context,
-        "✅ 农场创建成功！你拥有了 2 块土地。\n使用 种植 【种子名称】 种下第一颗作物吧！",
+        "✅ 农场创建成功！你拥有了 2 块土地。\n使用 种植 【作物名称】 开始吧！",
     )
 
 
@@ -193,7 +193,7 @@ async def plant_crop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-@register_command("农场状态")
+@register_command("农场状态", "查看农场", "好友农场")
 @feature_required(FEATURE_MANOR)
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user

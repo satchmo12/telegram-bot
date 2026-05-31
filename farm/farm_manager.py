@@ -8,8 +8,6 @@ from info.economy import change_balance
 from farm.animals_config import ANIMAL_CONFIG
 from farm.animals_game import ANIMALS_DATA_FILE
 from command_router import FEATURE_MANOR, feature_required, register_command
-from farm.garden_config import GARDEN_CONFIG
-from farm.garden_game import GARDEN_DATA_FILE, create_empty_plot
 from utils import (
     GROUP_LIST_FILE,
     INFO_FILE,
@@ -149,28 +147,28 @@ async def set_auto_plant_flower(update: Update, context: ContextTypes.DEFAULT_TY
     if not flower_name:
         return await safe_reply(update, context, "❗花名称不能为空")
 
-    # ✅ 验证作物是否存在，并且属于花园可种作物
-    if flower_name not in GARDEN_CONFIG:
+    # ✅ 验证作物是否存在（花类已并入农场作物）
+    if flower_name not in CROP_CONFIG:
         return await safe_reply(
             update,
             context,
-            f"❌ 花『{flower_name}』不存在或不可种植，请输入正确的花名称",
+            f"❌ 作物『{flower_name}』不存在或不可种植，请输入正确的名称",
         )
 
     # 加载管家数据
     manager_data = load_json(MANAGER_FILE)
     if chat_id not in manager_data or user_id not in manager_data[chat_id]:
         return await safe_reply(
-            update, context, "❌ 你还没有农场管家，无法设置自动种花。"
+            update, context, "❌ 你还没有农场管家，无法设置自动种植。"
         )
 
     # 保存设置
     user_data = manager_data[chat_id][user_id]
-    user_data["auto_plant_flower"] = flower_name  # 仍用 auto_plant_crop 字段
+    user_data["auto_plant_crop"] = flower_name
 
     save_json(MANAGER_FILE, manager_data)
 
-    await safe_reply(update, context, f"✅ 已设置收获后自动种花为：{flower_name}")
+    await safe_reply(update, context, f"✅ 已设置收获后自动种植为：{flower_name}")
 
 
 @register_command("设置自动饲养", "auto_feed")
@@ -218,7 +216,6 @@ async def auto_farm_tasks(bot):
     info_all = load_json(INFO_FILE)
     farm_data = load_json(FARM_DATA_FILE)
     animals_data = load_json(ANIMALS_DATA_FILE)
-    garden_data = load_json(GARDEN_DATA_FILE)
 
     now = int(time.time())
     updated_count = 0
@@ -345,59 +342,6 @@ async def auto_farm_tasks(bot):
                 if animals:
                     animals_data.setdefault(chat_id, {})[user_id] = animals
 
-            # ---- 花园 ----
-            garden = garden_data.get(chat_id, {}).get(user_id)
-            if garden:
-                garden_harvested = {}
-                for i, plot in enumerate(garden.get("plots", [])):
-                    g_type = plot.get("type")
-                    a_cfg = GARDEN_CONFIG.get(g_type)
-
-                    # 自动收获
-                    if g_type and a_cfg:
-                        interval = a_cfg.get("grow_time")
-                        last_planted = plot.get("planted_time", 0)
-                        if interval and now - last_planted >= interval:
-                            product_name = a_cfg.get("product_name")
-                            amount = plot.get("yield_left", 0)
-
-                            # 清空地块
-                            garden["plots"][i] = create_empty_plot()
-                            action_log.append(
-                                f"📦 收集 {g_type} 产物 -> {product_name} x{amount}"
-                            )
-
-                            # 加入收获
-                            garden_harvested[product_name] = (
-                                garden_harvested.get(product_name, 0) + amount
-                            )
-
-                    # 空地自动种花
-                    if garden["plots"][i].get("type") is None:
-                        auto_flower = user.get("auto_plant_flower")
-                        if auto_flower in GARDEN_CONFIG:
-
-                            total_cost = GARDEN_CONFIG.get(auto_flower, {}).get(
-                                "cost", 10
-                            )
-                            change_balance(chat_id, user_id, -total_cost)
-
-                            garden["plots"][i] = {
-                                "type": auto_flower,
-                                "planted_time": now,
-                                "yield_left": GARDEN_CONFIG[auto_flower].get(
-                                    "max_yield", 10
-                                ),
-                            }
-                            action_log.append(f"🌱 自动种花 -> {auto_flower}")
-
-                    # 把收获加入背包
-                    for item, qty in garden_harvested.items():
-                        change_item(chat_id, user_id, item, qty)
-
-                    # 保存数据
-                    garden_data.setdefault(chat_id, {})[user_id] = garden
-
             # ---- 发送通知 ----
             if action_log:
                 try:
@@ -444,7 +388,6 @@ async def auto_farm_tasks(bot):
     # 保存所有数据
     save_json(ANIMALS_DATA_FILE, animals_data)
     save_json(FARM_DATA_FILE, farm_data)
-    save_json(GARDEN_DATA_FILE, garden_data)
     save_json(MANAGER_FILE, manager_data)
 
     # print(f"管家自动任务完成，共处理 {updated_count} 块土地。")
