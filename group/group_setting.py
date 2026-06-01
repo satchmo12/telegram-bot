@@ -627,15 +627,15 @@ def _build_group_list_keyboard(
     end = start + GROUP_LIST_PAGE_SIZE
 
     rows = []
-    if include_global_ad:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "📢 全群广告推送",
-                    callback_data=f"{CALLBACK_PREFIX}:global_ad_menu",
-                )
-            ]
-        )
+    # if include_global_ad:
+    #     rows.append(
+    #         [
+    #             InlineKeyboardButton(
+    #                 "📢 全群广告推送",
+    #                 callback_data=f"{CALLBACK_PREFIX}:global_ad_menu",
+    #             )
+    #         ]
+    #     )
     for chat_id, cfg in items[start:end]:
         if not isinstance(cfg, dict):
             continue
