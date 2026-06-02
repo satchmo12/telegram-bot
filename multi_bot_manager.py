@@ -374,7 +374,7 @@ async def private_forward_self_service_entry(update: Update, context: ContextTyp
     if not _is_master_panel(context):
         return
     if not update.effective_chat or update.effective_chat.type != "private":
-        return await safe_reply(update, context, "请私聊小雅创建双向机器人。")
+        return await safe_reply(update, context, "请私聊机器人创建双向机器人。")
     context.user_data.pop(SELF_SERVICE_STAGE_KEY, None)
     await _reply_self_service_guide(update, context)
 
@@ -576,7 +576,7 @@ async def current_bot_features(update: Update, context: ContextTypes.DEFAULT_TYP
 @register_command("机器人面板", "机器人管理")
 async def multi_bot_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_chat or update.effective_chat.type != "private":
-        return await safe_reply(update, context, "请私聊小雅打开机器人面板。")
+        return await safe_reply(update, context, "请私聊机器人打开机器人面板。")
     if not _is_master_panel(context):
         return
     user = update.effective_user

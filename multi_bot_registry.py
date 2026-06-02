@@ -8,7 +8,6 @@ from typing import Optional
 from feature_flags import ALL_FEATURES, parse_feature_list, sanitize_features
 
 MANAGED_BOTS_FILE = "data/managed_bots.json"
-LEGACY_MANAGED_BOTS_FILE = "data/小雅/managed_bots.json"
 DEFAULT_OWNER_ID = 6085551760
 
 
@@ -88,8 +87,6 @@ def load_env_bot_configs() -> list[dict]:
 def _load_managed_data() -> dict:
     data = {}
     source_file = MANAGED_BOTS_FILE
-    if not os.path.exists(source_file) and os.path.exists(LEGACY_MANAGED_BOTS_FILE):
-        source_file = LEGACY_MANAGED_BOTS_FILE
     if os.path.exists(source_file):
         try:
             with open(source_file, "r", encoding="utf-8") as f:

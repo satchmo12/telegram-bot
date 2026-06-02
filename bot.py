@@ -466,13 +466,13 @@ def _build_help_text(context: ContextTypes.DEFAULT_TYPE, user_id: Optional[int] 
         lines.extend(
             [
                 "",
-                "小雅专属：",
+                "主机器人专属：",
                 "克隆机器人 按模板克隆新机器人",
                 "机器人面板 查看名下机器人列表",
             ]
         )
         if user_id and is_super_admin(user_id):
-            lines.append("/restart 重启小雅")
+            lines.append("/restart 重启机器人")
 
     return "\n".join(lines)
 
