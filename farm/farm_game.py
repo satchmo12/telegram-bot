@@ -101,14 +101,11 @@ def build_farm_panel_keyboard(farm=None, view_mode="self", target_user_id=None, 
         action_buttons.append(
             InlineKeyboardButton("🐛 杀虫", callback_data=f"{action_prefix}:spray")
         )
-    if has_harvest:
-        action_buttons.append(
-            InlineKeyboardButton("🌾 收获", callback_data=f"farm_ui:harvest:{view_mode}:{target_user_id}:{actor_id}")
-        )
-
-    # if not action_buttons:
+        
+    # 收获有问题暂时注视掉
+    # if has_harvest:
     #     action_buttons.append(
-    #         InlineKeyboardButton("🌾 收获", callback_data="farm_ui:harvest")
+    #         InlineKeyboardButton("🌾 收获", callback_data=f"farm_ui:harvest:{view_mode}:{target_user_id}:{actor_id}")
     #     )
 
     rows = []
@@ -124,10 +121,11 @@ def build_farm_panel_keyboard(farm=None, view_mode="self", target_user_id=None, 
     rows.append(
         [
             InlineKeyboardButton("🔄 刷新", callback_data=status_callback),
-            InlineKeyboardButton("📖 命令", callback_data="farm_ui:help"),
+            # InlineKeyboardButton("📖 命令", callback_data="farm_ui:help"),
+            InlineKeyboardButton("❌ 关闭", callback_data=close_callback)   
         ]
     )
-    rows.append([InlineKeyboardButton("❌ 关闭", callback_data=close_callback)])
+    # rows.append([InlineKeyboardButton("❌ 关闭", callback_data=close_callback)])
     return InlineKeyboardMarkup(rows)
 
 
