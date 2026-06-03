@@ -15,9 +15,6 @@ from utils import (
 current_chengyu = {}
 used_chengyu = {}
 chengyu_scores = {}  # 新增：记录答题分数
-# CHENGYU_LIST = set(item["word"] for item in load_idioms())
-# CHENGYU_LIST = {item["word"] for item in load_idioms() if "word" in item}
-# save_words(CHENGYU_LIST)
 
 CHENGYU_LIST = load_chengyu_words()
 

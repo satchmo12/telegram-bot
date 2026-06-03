@@ -1719,7 +1719,19 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=_build_rule_panel_keyboard(context, idx, rule),
         )
 
-
+    if action == "publish":
+        context.user_data["waiting_post"] = True
+        
+        help_text = "📣 请发送您要投稿的内容。\n\n支持文字、图片、视频等消息。"
+        
+        rows = []
+        rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
+        keyboard = InlineKeyboardMarkup(rows)
+        
+        return await query.edit_message_text(
+            help_text, reply_markup= keyboard
+        ) 
+    
 async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not update.message or not update.message.text:
         return False
@@ -2094,6 +2106,31 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return False
 
 
+
+async def handle_wall_publish(update, context):
+    if not context.user_data.get("waiting_post"):
+        return
+
+    context.user_data["waiting_post"] = False
+
+    msg = update.message
+    channel_id = -1003585759564
+
+    try:
+        await context.bot.copy_message(
+            chat_id=channel_id,
+            from_chat_id=msg.chat_id,
+            message_id=msg.message_id
+        )
+
+        await msg.reply_text("✅ 投稿成功，感谢参与！")
+
+    except Exception as e:
+        print("投稿失败:", e)
+        await msg.reply_text(f"❌ 投稿失败：{e}")
+
+
+
 async def handle_channel_config_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     return await _handle_text_input(update, context)
 
@@ -2108,3 +2145,7 @@ def register_channel_config_handlers(app):
     app.add_handler(CommandHandler("channel_config", channel_config_entry))
     app.add_handler(CommandHandler("subscription", subscription_status))
     app.add_handler(CommandHandler("add_subscription", add_subscription))
+    
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_wall_publish), group=10)
+    
+    # app.add_handler(CallbackQueryHandler(handle_wall_publish,pattern=r"^wall:publish$"))

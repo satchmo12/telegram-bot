@@ -1,14 +1,9 @@
 from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder,
     CommandHandler,
-    MessageHandler,
     ContextTypes,
-    filters,
 )
 from datetime import datetime
-import os
-import json
 from command_router import register_command
 from info.economy import change_points, get_points
 from utils import CHECKIN_FILE, load_json, safe_reply, save_json

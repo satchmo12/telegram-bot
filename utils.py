@@ -24,14 +24,11 @@ bot_reply = BOT_REPLY
 DATA_DIR = "data"
 CON_DATA_DIR = "config_data"
 
-
-ZHENXINHUA_FILE = os.path.join(CON_DATA_DIR, "zhenxinhua.txt")
 GROUP_LIST_FILE = os.path.join(DATA_DIR, "groups.json")
 INVITE_BOT_USERS_FILE = os.path.join(DATA_DIR, "invite_bot_users.json")
 ADMIN_WHITELIST_FILE = os.path.join(CON_DATA_DIR, "admin_whitelist.txt")
 QA_FILE = os.path.join(DATA_DIR, "qa.json")
-IDIOM_FILE = os.path.join(CON_DATA_DIR, "idiom.json")
-IDIOM_EXTRA_FILE = os.path.join(CON_DATA_DIR, "chengyu_extra.json")
+
 
 INFO_FILE = os.path.join(DATA_DIR, "info.json")
 MARRY_FILE = os.path.join(DATA_DIR, "marriages.json")
@@ -380,34 +377,6 @@ def load_qa():
 def save_qa(data):
     save_json(QA_FILE, data)
 
-
-def load_idioms():
-    if not os.path.exists(IDIOM_FILE):
-        print("成语文件不存在")
-        return []
-
-    try:
-        with open(IDIOM_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            print(f"读取成语数量: {len(data)}")
-            return data
-
-            # return data
-    except Exception as e:
-        print(f"读取成语出错: {e}")
-        return []
-
-
-def save_idioms(data):
-    pass
-    try:
-        with open(IDIOM_EXTRA_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        print(f"已保存成语数量: {len(data)}")
-    except Exception as e:
-        print(f"保存成语出错: {e}")
-
-
 def sort_idioms_by_first_letter(words):
     return sorted(words, key=lambda w: lazy_pinyin(w)[0])
 
@@ -698,8 +667,7 @@ def apply_reward(user_data: dict, reward: dict):
     return user_data
 
 
-# ===== 加载词库（全局一次） =====
-ZHENXINHUA_LIST = safe_load_file(ZHENXINHUA_FILE)
+
 
 
 # 判断当前用户是否是管理员（含超级管理员）

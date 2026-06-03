@@ -3,15 +3,8 @@ from datetime import datetime
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
 from command_router import FEATURE_FRIENDS, feature_required, register_command
-from config import CHARM_LIMIT, SPONSORED_STAMINA_SPEED, WORK_LIMIT
 from info.economy import INFO_FILE, get_user_data, save_user_data
 from slave.cooldown import is_on_cooldown
-from company.economy_activity import (
-    get_salary,
-    get_work_count,
-    increment_salary_count,
-    increment_work_count,
-)
 from slave.luck_helper import calculate_success
 from slave.status_warnings import (
     CHARM_WARNINGS,
@@ -24,8 +17,10 @@ from slave.status_warnings import (
 )
 from utils import safe_reply
 
-sponsored_stamina_speed = SPONSORED_STAMINA_SPEED
-
+SPONSORED_STAMINA_SPEED = 5
+WORK_LIMIT = 10
+CHARM_LIMIT = 50
+ESCAPE_LIMIT = 0.25
 
 @register_command("打工")
 @feature_required(FEATURE_FRIENDS)
@@ -35,12 +30,7 @@ async def work_for_money(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
 
     date_str = datetime.now().strftime("%Y-%m-%d")
-    count = get_work_count(chat_id, user_id, date_str)
-
-    if count >= WORK_LIMIT:
-        return await safe_reply(
-            update, context, f"🚫 你今天已经打工 {count} 次啦，休息一下吧！"
-        )
+  
 
     name = "打工"
     on_cd, remain = is_on_cooldown(chat_id, user_id, name, cooldown_seconds=120)
@@ -59,10 +49,6 @@ async def work_for_money(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     job = random.choice(JOB_ACTIONS)
     amount = random.randint(100, 200)
-
-    increment_work_count(chat_id, user_id, date_str)
-
-    # log_coin_change(user_id, amount, "打工", f"在 {job} 赚取金币")
 
     # 消耗体力
     user_info["stamina"] = max(0, user_info.get("stamina", 100) - 1)
@@ -236,18 +222,17 @@ async def sex_for_money(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await safe_reply(update, context, random.choice(MARRIED_WARNINGS))
     if user_info["charm"] <= CHARM_LIMIT:
         return await safe_reply(update, context, random.choice(CHARM_WARNINGS))
-    if user_info["stamina"] < sponsored_stamina_speed:
+    if user_info["stamina"] < SPONSORED_STAMINA_SPEED:
         return await safe_reply(update, context, random.choice(STAMINA_WARNINGS))
 
     job = random.choice(SPONSORED_ACTIONS)
     amount = random.randint(1000, 2000)
     date_str = datetime.now().strftime("%Y-%m-%d")
-    increment_salary_count(chat_id, user_id, date_str, amount)
 
     # 消耗体力
     user_info["charm"] = max(0, user_info.get("charm", 60) - 10)
     user_info["stamina"] = max(
-        0, user_info.get("stamina", 100) - sponsored_stamina_speed
+        0, user_info.get("stamina", 100) - SPONSORED_STAMINA_SPEED
     )
     user_info["balance"] = max(0, user_info.get("balance", 100) + amount)
     user_info["relationship_status"] = "包养中"
@@ -257,7 +242,7 @@ async def sex_for_money(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_reply(
         update,
         context,
-        f"💋 {user.first_name} 今天去「{job}」，成功获得金主赏识，赚到了 {amount} 枚金币 💰，但也累得虚脱，消耗了 {sponsored_stamina_speed} 点体力！",
+        f"💋 {user.first_name} 今天去「{job}」，成功获得金主赏识，赚到了 {amount} 枚金币 💰，但也累得虚脱，消耗了 {SPONSORED_STAMINA_SPEED} 点体力！",
     )
 
 
@@ -276,7 +261,7 @@ async def salary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await safe_reply(update, context, "你还没有金主爸爸")
 
     date_str = datetime.now().strftime("%Y-%m-%d")
-    count = get_salary(chat_id, user_id, date_str)
+    count = 0
 
     if count != 0:
         return await safe_reply(update, context, "你的金主爸爸今天已经打赏你了")
@@ -285,17 +270,15 @@ async def salary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 消耗体力
     user_info["stamina"] = max(
-        0, user_info.get("stamina", 100) - sponsored_stamina_speed
+        0, user_info.get("stamina", 100) - SPONSORED_STAMINA_SPEED
     )
     user_info["balance"] = max(0, user_info.get("balance", 100) + amount)
     save_user_data(chat_id, user_id, user_info)
 
-    increment_salary_count(chat_id, user_id, date_str, amount)
-
     return await safe_reply(
         update,
         context,
-        f"💋 {user.first_name} 金主打赏了 {amount} 枚金币 💰，喊爸爸消耗了 {sponsored_stamina_speed} 点体力！",
+        f"💋 {user.first_name} 金主打赏了 {amount} 枚金币 💰，喊爸爸消耗了 {SPONSORED_STAMINA_SPEED} 点体力！",
     )
 
 
@@ -316,7 +299,7 @@ async def free_for_money(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 消耗体力
     user_info["relationship_status"] = "单身"
     user_info["stamina"] = max(
-        0, user_info.get("stamina", 100) - sponsored_stamina_speed
+        0, user_info.get("stamina", 100) - SPONSORED_STAMINA_SPEED
     )
     amount = 2000
     user_info["balance"] = user_info.get("balance", 100) - amount
@@ -325,7 +308,6 @@ async def free_for_money(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await safe_reply(
         update, context, f"💋 {user.first_name} 花了 {amount} 枚金币 💰。为自己赎身！"
     )
-
 
 def register_work_handlers(app):
     app.add_handler(CommandHandler("work", work_for_money))

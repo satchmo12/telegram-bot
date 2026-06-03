@@ -9,6 +9,7 @@ from datetime import datetime
 from datetime import time
 from typing import Optional
 from dotenv import load_dotenv
+load_dotenv(override=True)
 
 from telegram import InlineQueryResultCachedPhoto, InlineQueryResultPhoto, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import (
@@ -73,7 +74,7 @@ import uuid
 
 PHOTO_URL = "http://g.hiphotos.baidu.com/image/pic/item/6d81800a19d8bc3e770bd00d868ba61ea9d345f2.jpg"  # 换成你的广告图
 
-load_dotenv(override=True)
+
 
 async def show_menu(update, context):
 
@@ -98,13 +99,13 @@ async def show_menu(update, context):
 
     # 注意：ReplyKeyboard 的按钮无法“一键打开链接”，只能发送文本。
     # 需要用 InlineKeyboard 的 url 按钮才能做到点一次直接跳转。
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="快捷入口：",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("招商负责人（点此跳转）", url="https://t.me/mr566")]]
-        ),
-    )
+    # await context.bot.send_message(
+    #     chat_id=update.effective_chat.id,
+    #     text="快捷入口：",
+    #     reply_markup=InlineKeyboardMarkup(
+    #         [[InlineKeyboardButton("招商负责人（点此跳转）", url="https://t.me/mr566")]]
+    #     ),
+    # )
     
 async def hide_menu(update, context):
     await context.bot.send_message(
@@ -156,12 +157,13 @@ MASTER_BOT_USERNAME = str(os.getenv("MASTER_BOT_USERNAME", "")).strip().lstrip("
 PRIVATE_FORWARD_SELF_SERVICE_STAGE_KEY = "private_forward_self_service_stage"
 MULTI_BOT_STAGE_KEY = "multi_bot_stage"
 STARTUP_DEBUG_FILE = os.path.join("data", "startup_debug.log")
+
+WAITING_POST = "waiting_post" 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 async def get_file_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     photo = update.message.photo[-1]
-
     print("FILE_ID:")
     print(photo.file_id)
     await update.message.reply_text(photo.file_id)
@@ -185,7 +187,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     ]
     
-    chat_id = int(update.effective_chat.id) if update and update.effective_chat else None
+    # chat_id = int(update.effective_chat.id) if update and update.effective_chat else None
     # await context.bot.send_message(
     #             chat_id=chat_id,
     #             text=results,
@@ -276,12 +278,15 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
         str(context.application.bot_data.get("name", "")).strip() == MASTER_BOT_NAME
         and (
             isinstance(context.user_data.get(PRIVATE_FORWARD_SELF_SERVICE_STAGE_KEY), dict)
-            or isinstance(context.user_data.get(MULTI_BOT_STAGE_KEY), dict)
+            or isinstance(context.user_data.get(MULTI_BOT_STAGE_KEY), dict) or context.user_data.get(WAITING_POST)
         )
     ):
         _debug_private_forward("[private_forward_router] skip self-service stage")
         print("[private_forward_router] 忽略：主机器人当前处于自助/多机器人输入阶段")
         return
+
+  
+    # ()
     msg = update.message
     if msg:
         if msg.text:
@@ -517,12 +522,41 @@ def _build_start_panel_rows(
             [
                 [InlineKeyboardButton("📣克隆频道", callback_data="chcfg:back")],
                 [InlineKeyboardButton("📣机器人频道配置", callback_data="chcfg:bot")],
-                [InlineKeyboardButton("📱查看登录", callback_data="tlogin:list")],
+                [InlineKeyboardButton("📱管理协议号(可群发)", callback_data="tlogin:list")],
                 [InlineKeyboardButton("📱登录协议号", callback_data="tlogin:login")],
             ]
         )
+    
+    rows.append([InlineKeyboardButton("📣我要投稿", callback_data="chcfg:publish")])
+    
+    
     return rows
 
+
+async def handle_wall_publish(update, context):
+    query = update.callback_query
+    await query.answer()
+
+    # 原消息
+    msg = query.message
+
+    # 目标频道
+    channel_id = -1001234567890
+
+    try:
+        # 转发消息到频道
+        await msg.forward(chat_id=channel_id)
+
+        await query.edit_message_reply_markup(reply_markup=None)
+
+        await query.message.reply_text(
+            "✅ 已成功发布到频道"
+        )
+
+    except Exception as e:
+        await query.message.reply_text(
+            f"❌ 发布失败：{e}"
+        )
 
 def _build_start_welcome_text(bot_name: str) -> str:
     safe_name = html.escape(str(bot_name or "机器人"))

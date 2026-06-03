@@ -345,13 +345,7 @@ async def add_re_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # msg = f"✅ 成功添加问题【{question}】及 {len(answers)} 个答案。"
 
     save_json(RE_FILE, data)
-    # await safe_reply(update, context, msg)
-
-    # data[chat_id].append(new_word)
-    # save_json(INSULT_FILE, data)
-    # await safe_reply(update, context, f"已添加新骂词：{new_word}")
-
-
+  
 # 注册
 def register_qa_handlers(app):
     app.add_handler(CommandHandler("addQA", add_qa_command))

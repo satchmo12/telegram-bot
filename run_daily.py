@@ -5,7 +5,6 @@ from farm.farm_manager import auto_farm_tasks
 
 from chat.my_bot import ad_push_to, cleaned_word, speaking_to
 from slave.guard_system import charge_guard_fees
-from slave.pet_game import give_daily_stamina_to_all_pets
 from game.red_packet import send_system_packet
 
 
@@ -13,7 +12,6 @@ async def daily_master_job(context):
     charge_guard_fees()
     logging.info("💪 执行每日保镖费用")
     give_daily_stamina_to_all()
-    give_daily_stamina_to_all_pets()
     logging.info("💪 执行每日体力恢复任务角色/宠物")
 
 

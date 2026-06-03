@@ -2,7 +2,6 @@ import math
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, ContextTypes, CallbackQueryHandler
 from command_router import FEATURE_FRIENDS, feature_required, register_command
-from info.economy_bank import BANK_FILE
 from utils import load_json, save_json, safe_reply, group_allowed
 from info.economy import INFO_FILE
 from slave.cooldown import is_on_cooldown
@@ -13,9 +12,9 @@ KIDNAP_COOLDOWN = 300  # 秒
 # 绑架成功时，设置冷却时间
 cooldown_seconds = 86400  # 1天
 # 发起绑架
-@group_allowed
-@register_command("绑架")
-@feature_required(FEATURE_FRIENDS)
+# @group_allowed
+# @register_command("绑架")
+# @feature_required(FEATURE_FRIENDS)
 async def kidnap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.reply_to_message:
         return await safe_reply(update, context,  "你要绑谁？请回复一条消息来选择目标。")
@@ -63,14 +62,10 @@ async def kidnap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     attacker_data["stamina"] -= 2
     attacker_data["charm"] -= 20
 
-    # 加载银行数据
-    bankdata = load_json(BANK_FILE)
-    bank_user_data = bankdata.setdefault(chat_id, {}).setdefault(target_id, {})
-    bank_balance = bank_user_data.get("bank_balance", 0)
+
 
     # 计算赎金
-    balance = target_data.get("balance", 0)
-    total = balance + bank_balance
+    total = target_data.get("balance", 0)
     ransom = math.ceil(total * 0.2)
     
     if ransom < 0:
@@ -80,20 +75,13 @@ async def kidnap(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await safe_reply(update, context,  f"💰 {target.full_name} 的金币不足以支付赎金（需要 {ransom}，目前共 {total}），绑架失败。")
 
     # 先扣余额
-    if balance >= ransom:
+    if total >= ransom:
         target_data["balance"] -= ransom
-    else:
-        # 不足部分从银行扣
-        need_from_bank = ransom - balance
-        target_data["balance"] = 0
-        bank_balance -= need_from_bank
-        bank_user_data["bank_balance"] = max(bank_balance, 0)
-
+   
     # 赎金转给绑匪
     attacker_data["balance"] = attacker_data.get("balance", 0) + ransom
 
     save_json(INFO_FILE, data)
-    save_json(BANK_FILE, bankdata)
 
     return await safe_reply(update, context,  f"🔫 你成功绑架了 {target.full_name} 并勒索了 {ransom} 金币！\n🎉 金币已转入你账户。")
 
