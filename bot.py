@@ -72,10 +72,6 @@ from utils import (
 from telegram import BotCommand
 import uuid
 
-PHOTO_URL = "http://g.hiphotos.baidu.com/image/pic/item/6d81800a19d8bc3e770bd00d868ba61ea9d345f2.jpg"  # 换成你的广告图
-
-
-
 async def show_menu(update, context):
 
     keyboard = [
@@ -159,6 +155,8 @@ MULTI_BOT_STAGE_KEY = "multi_bot_stage"
 STARTUP_DEBUG_FILE = os.path.join("data", "startup_debug.log")
 
 WAITING_POST = "waiting_post" 
+REPLY_BOTTLE = "reply_bottle" 
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 async def get_file_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -278,7 +276,7 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
         str(context.application.bot_data.get("name", "")).strip() == MASTER_BOT_NAME
         and (
             isinstance(context.user_data.get(PRIVATE_FORWARD_SELF_SERVICE_STAGE_KEY), dict)
-            or isinstance(context.user_data.get(MULTI_BOT_STAGE_KEY), dict) or context.user_data.get(WAITING_POST)
+            or isinstance(context.user_data.get(MULTI_BOT_STAGE_KEY), dict) or context.user_data.get(WAITING_POST) or context.user_data.get(REPLY_BOTTLE)
         )
     ):
         _debug_private_forward("[private_forward_router] skip self-service stage")
@@ -378,6 +376,8 @@ async def start_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     panel = context.user_data.get("start_panel", {})
     bot_name = panel.get("bot_name", context.application.bot_data.get("name", "机器人"))
+    # 推出编辑模式
+    context.user_data["waiting_post"] = False
     action = query.data.split(":", 1)[1]
     if action != "back":
         return
@@ -505,58 +505,46 @@ def _build_start_panel_rows(
     owner_id = int(context.application.bot_data.get("owner_id", DEFAULT_OWNER_ID))
     rows: list[list[InlineKeyboardButton]] = []
     if bot_name == MASTER_BOT_NAME:
-        rows.append([InlineKeyboardButton("🧬克隆机器人", callback_data=f"mbot:clone:{MASTER_BOT_NAME}")])
-        rows.append([InlineKeyboardButton("🤖机器人面板", callback_data="mbot:list")])
-    if user_id and int(user_id) == owner_id:
         rows.append(
-            [InlineKeyboardButton("💬私聊面板", callback_data="pfmode:open:1")]
-        )
-    if "group" in enabled:
-        rows.append([InlineKeyboardButton("👥群配置", callback_data="gcfg:list")])
-        if user_id and int(user_id) == owner_id:
-            rows.append(
-                [InlineKeyboardButton("📢全群广告推送", callback_data="gcfg:global_ad_menu")]
-            )
-    if "channel" in enabled:
-        rows.extend(
             [
-                [InlineKeyboardButton("📣克隆频道", callback_data="chcfg:back")],
-                [InlineKeyboardButton("📣机器人频道配置", callback_data="chcfg:bot")],
-                [InlineKeyboardButton("📱管理协议号(可群发)", callback_data="tlogin:list")],
-                [InlineKeyboardButton("📱登录协议号", callback_data="tlogin:login")],
+                InlineKeyboardButton("🧬克隆机器人", callback_data=f"mbot:clone:{MASTER_BOT_NAME}"),
+                InlineKeyboardButton("🤖机器人面板", callback_data="mbot:list")
             ]
         )
+        
+    if user_id and int(user_id) == owner_id:
+        rows.append(
+            [
+                InlineKeyboardButton("💬私聊面板", callback_data="pfmode:open:1"),
+                InlineKeyboardButton("📢全群广告推送", callback_data="gcfg:global_ad_menu")
+            ]
+        )
+   
+    if "channel" in enabled:
+        rows.append(
+            [
+                InlineKeyboardButton("📣克隆频道", callback_data="chcfg:back"),
+                InlineKeyboardButton("📣机器人频道配置", callback_data="chcfg:bot")   
+            ]
+        )
+        
+        rows.append(
+            [
+                InlineKeyboardButton("📱管理协议号(可群发)", callback_data="tlogin:list"),
+                InlineKeyboardButton("📱登录协议号", callback_data="tlogin:login")
+            ]
+        )
+        
+    if "group" in enabled:
+        rows.append([InlineKeyboardButton("👥群配置", callback_data="gcfg:list")])
     
-    rows.append([InlineKeyboardButton("📣我要投稿", callback_data="chcfg:publish")])
-    
-    
+    rows.append(
+        [
+            InlineKeyboardButton("📣我要投稿", callback_data="chcfg:publish"),
+            InlineKeyboardButton("来点资源", callback_data="chcfg:channel_message")    
+        ]
+    )
     return rows
-
-
-async def handle_wall_publish(update, context):
-    query = update.callback_query
-    await query.answer()
-
-    # 原消息
-    msg = query.message
-
-    # 目标频道
-    channel_id = -1001234567890
-
-    try:
-        # 转发消息到频道
-        await msg.forward(chat_id=channel_id)
-
-        await query.edit_message_reply_markup(reply_markup=None)
-
-        await query.message.reply_text(
-            "✅ 已成功发布到频道"
-        )
-
-    except Exception as e:
-        await query.message.reply_text(
-            f"❌ 发布失败：{e}"
-        )
 
 def _build_start_welcome_text(bot_name: str) -> str:
     safe_name = html.escape(str(bot_name or "机器人"))
@@ -722,8 +710,6 @@ def create_app(bot_cfg: dict):
 
     app.add_error_handler(error_handler)
     
-    
-
     return app
 
 
@@ -732,7 +718,6 @@ SUPER_ADMIN_COMMANDS = {
     "restart": "重启机器人（仅超级管理员）",
     # "leave": "让机器人离开当前群（仅超级管理员）",
 }
-
 
 async def set_bot_commands(app):
     """
@@ -752,10 +737,10 @@ async def set_bot_commands(app):
     commands.append(BotCommand("help", "命令帮助"))
     if "group" in enabled:
         commands.append(BotCommand("group", "群设置"))
-    if "channel" in enabled:
-        commands.append(BotCommand("channel_config", "频道设置"))
-    if "game_hub" in enabled:
-        commands.append(BotCommand("start_menu", "游戏菜单"))
+    # if "channel" in enabled:
+    #     commands.append(BotCommand("channel_config", "频道设置"))
+    # if "game_hub" in enabled:
+    #     commands.append(BotCommand("start_menu", "游戏菜单"))
     await app.bot.set_my_commands(commands)
 
 

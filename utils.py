@@ -91,7 +91,6 @@ WORD_FILE = os.path.join(CON_DATA_DIR, "word.txt")
 # 私聊机器人用户
 BOT_USER_FILE = os.path.join(CON_DATA_DIR, "bot_user.json")
 
-
 IDIOM_TEXT = os.path.join(CON_DATA_DIR, "chengyu_words.txt")
 
 # 群特别关心
@@ -869,3 +868,4 @@ def save_chat_message(log_dir: str, chat_id: str, msg):
     })
 
     save_json(file_path, data)
+
