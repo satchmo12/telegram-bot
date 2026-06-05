@@ -22,10 +22,62 @@ from utils import (
 )
 import datetime
 from group.mute_registry import add_mute, remove_mute, list_mutes
+from pathlib import Path
 
+import asyncio
+from playwright.async_api import async_playwright
+import string
 
+OUTPUT_FILE = "found.txt"
 _USERNAME_CHECK_COOLDOWN: dict[int, float] = {}
 
+
+async def check_username(page, username: str):
+    url = f"https://fragment.com/?query={username}"
+
+    await page.goto(url, wait_until="domcontentloaded")
+
+    # 等结果加载
+    await page.wait_for_timeout(1000)
+
+    # 判断是否存在 Unavailable
+    # unavailable = await page.locator(
+    #     ".tm-status-unavail"
+    # ).count()
+
+    # is_taken = unavailable > 0
+    
+    is_taken = False
+    locator = page.locator(".tm-status-unavail")
+    if await locator.count() > 0:
+        text = (await locator.first.text_content() or "").strip()
+
+        if text == "Unavailable":
+            is_taken = True
+            print("状态为 Unavailable")
+
+    return username, not is_taken
+
+
+async def worker(browser, usernames):
+    page = await browser.new_page()
+
+    results = []
+
+    try:
+        for username in usernames:
+            result = await check_username(page, username)
+            results.append(result)
+
+            if result[1]:
+                print(f"[FOUND] {username}")
+            else:
+                print(f"[Unavailable] {username}")
+
+    finally:
+        await page.close()
+
+    return results
 
 def get_warnings_data() -> dict:
     data = load_json(WARNINGS_FILE)
@@ -157,12 +209,12 @@ def _build_username_candidates(keyword: str) -> list[str]:
         if pinyin_base:
             bases.append(pinyin_base)
     else:
-        cleaned = re.sub(r"[^A-Za-z0-9_]", "", raw).lower()
+        cleaned = re.sub(r"[^A-Za-z0-9]", "", raw).lower()
         if cleaned:
             bases.append(cleaned)
 
     # 中文输入时，同时补一个“原样转小写后清洗”的备用基底，避免只命中拼音模式
-    fallback_base = re.sub(r"[^A-Za-z0-9_]", "", raw).lower()
+    fallback_base = re.sub(r"[^A-Za-z0-9]", "", raw).lower()
     if fallback_base and fallback_base not in bases:
         bases.append(fallback_base)
 
@@ -173,7 +225,7 @@ def _build_username_candidates(keyword: str) -> list[str]:
         value = re.sub(r"_+", "_", value).strip("_")
         if not value:
             return
-        if not re.match(r"^[a-z][a-z0-9_]{4,31}$", value):
+        if not re.match(r"^[a-z][a-z0-9]{4,31}$", value):
             return
         if value in seen:
             return
@@ -200,7 +252,25 @@ def _build_username_candidates(keyword: str) -> list[str]:
         if len(base) >= 5 and base[-1] == base[-2] == base[-3]:
             push(base[:2] + base[-1] * 3)
 
-        suffixes = ["", "000", "111", "123", "321", "520", "521", "1314", "518", "618"]
+        # suffixes = ["", "000", "111", "123", "321", "520", "521", "1314", "518", "618"]
+        suffixes = [
+            "",
+            # 三连号（最优先）
+            "000","111", "222", "333", "444",
+            "555", "666", "777", "888", "999",
+
+            # 顺子
+            "012", "123", "234", "345", "456",
+            "567", "678", "789",
+
+            # 倒顺
+            "987", "876", "765", "654",
+            "543", "432", "321",
+
+            # 特殊
+            "520", "521", "1314", "168", "518","588","618","688"
+        ]
+        
         for suffix in suffixes:
             push(base + suffix)
             push(base + "_" + suffix if suffix else base)
@@ -214,8 +284,173 @@ def _build_username_candidates(keyword: str) -> list[str]:
             push(base[:2] + tail * 3)
             push(base[:1] + tail * 4)
 
-    return candidates[:30]
+    return candidates[:30] 
 
+
+import re
+import itertools
+
+def _build_username_new(keyword: str) -> list[str]:
+    raw = _normalize_username(keyword)
+    if not raw:
+        return []
+
+    bases: list[str] = []
+
+    # ========= 1. 中文 => 拼音 =========
+    if _contains_chinese(raw):
+        pinyin_base = _to_pinyin(raw)
+        if pinyin_base:
+            base = re.sub(r"[^a-z0-9]", "", pinyin_base.lower())
+            if base:
+                bases.append(base)
+    else:
+        cleaned = re.sub(r"[^A-Za-z0-9]", "", raw).lower()
+        if cleaned:
+            bases.append(cleaned)
+
+    # fallback
+    fallback_base = re.sub(r"[^A-Za-z0-9]", "", raw).lower()
+    if fallback_base and fallback_base not in bases:
+        bases.append(fallback_base)
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def push(value: str):
+        value = re.sub(r"_+", "_", value).strip("_")
+        if not value:
+            return
+
+        # 规范：不能以数字开头
+        if re.match(r"^[0-9]", value):
+            return
+
+        # 必须以字母开头
+        if not re.match(r"^[a-z][a-z0-9_]{4,31}$", value):
+            return
+
+        if value in seen:
+            return
+
+        seen.add(value)
+        candidates.append(value)
+
+    # ========= 2. 3位数字策略 =========
+    triple_same = [str(i) * 3 for i in range(10)]
+    double_same = [str(i) * 2 for i in range(10)]
+    sequences = [
+        "012","123","234","345","456","567","678","789",
+        "987","876","765","654","543","432","321"
+    ]
+    fixed = ["520", "521", "1314", "168", "518", "588", "618", "688"]
+
+    suffix_pool = triple_same + double_same + sequences + fixed
+
+    # ========= 3. 字母/数字 pattern 扩展 =========
+    def expand_pattern(base: str):
+        """
+        ababa -> 1-2-1-2-1
+        abcab -> 1-2-3-1-2
+        """
+        pattern = []
+        mapping = {}
+        next_id = 1
+
+        for ch in base:
+            if ch not in mapping:
+                mapping[ch] = str(next_id)
+                next_id += 1
+            pattern.append(mapping[ch])
+
+        return "-".join(pattern)
+
+    def apply_pattern_fill(pattern: str):
+        """
+        将 pattern 变成可替换结构，例如：
+        1-2-1-2-1 -> a b a b a
+        """
+        parts = pattern.split("-")
+        used = {}
+        letters = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+        pool = iter(letters)
+        for p in parts:
+            if p not in used:
+                used[p] = next(pool)
+        return "".join(used[p] for p in parts)
+
+    # ========= 4. 主逻辑 =========
+    for base in bases:
+        base = re.sub(r"[^a-z0-9]", "", base.lower())
+        if not base:
+            continue
+
+        # 原始
+        push(base)
+
+        # pattern 版本（ababa）
+        if len(base) >= 3:
+            pattern = expand_pattern(base)
+            pattern_variant = apply_pattern_fill(pattern)
+            push(pattern_variant)
+
+        # 中文 / 普通统一：suffix
+        for suf in suffix_pool:
+            push(base + suf)
+            push(f"{base}{suf}")
+
+        # 补长
+        if len(base) < 5:
+            pad = base[-1] if base else "a"
+            push(base + pad * (5 - len(base)))
+
+    return candidates
+
+def get_structure(s: str):
+    if not s:
+        return []
+
+    result = []
+    current = s[0]
+    count = 1
+
+    for ch in s[1:]:
+        if ch == current:
+            count += 1
+        else:
+            result.append(count)
+            current = ch
+            count = 1
+
+    result.append(count)
+    return result
+
+def generate_by_structure(s: str):
+    structure = get_structure(s)
+    letters = string.ascii_lowercase
+
+    results = []
+
+    def dfs(i, used, path):
+        if i == len(structure):
+            results.append("".join(path))
+            return
+
+        length = structure[i]  # ✔ 一定是 int
+
+        for ch in letters:
+            if ch in used:
+                continue
+
+            dfs(
+                i + 1,
+                used | {ch},
+                path + [ch * length]
+            )
+
+    dfs(0, set(), [])
+    return results
 
 async def _check_username_available(context: ContextTypes.DEFAULT_TYPE, username: str) -> bool:
     try:
@@ -912,7 +1147,74 @@ async def detect_username_candidates(update: Update, context: ContextTypes.DEFAU
     lines.append(f"已检测：{checked} 个候选")
     await safe_reply(update, context, "\n".join(lines), auto_delete_seconds=0)
 
+@register_command("用户名")
+async def dao_username_candidates(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.effective_user:
+        return
 
+    if not is_super_admin(update.effective_user.id):
+        return await safe_reply(update, context, "🚫 你不是超级管理员，无法执行此命令。")
+
+    if not context.args:
+        return await safe_reply(update, context, "用法：用户名 美女 用户名 aabbb", auto_delete_seconds=0)
+
+    keyword = " ".join(context.args).strip()
+
+    # candidates = _build_username_new(keyword)
+    
+    if _contains_chinese(keyword):
+        candidates = _build_username_new(keyword)
+    else:
+        candidates = generate_by_structure(keyword)
+        
+
+    if not candidates:
+        return await safe_reply(update, context, "请输入有效的中文或字母关键词。", auto_delete_seconds=0)
+
+
+    usernames = candidates
+
+    print(f"加载 {len(usernames)} 个用户名")
+
+    concurrency = 5
+
+    chunks = [
+        usernames[i::concurrency]
+        for i in range(concurrency)
+    ]
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True
+        )
+
+        tasks = [
+            worker(browser, chunk)
+            for chunk in chunks
+        ]
+
+        batches = await asyncio.gather(*tasks)
+
+        await browser.close()
+
+    found_usernames = []
+
+    for batch in batches:
+        for username, found in batch:
+            if not found:
+                found_usernames.append(username)
+
+    # 返回结果
+    msg = (
+        f"🔎 关键词：{keyword}\n"
+        f"生成数量：{len(found_usernames)}\n"
+        f"示例：\n" +
+        "\n".join(f"@{x}" for x in found_usernames)
+    )
+
+    await safe_reply(update, context, msg, auto_delete_seconds=0) 
+    
+    
 @group_enabled_only
 @register_command("查看禁言")
 async def list_mute_users(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -9,6 +9,7 @@ from datetime import datetime
 from datetime import time
 from typing import Optional
 from dotenv import load_dotenv
+load_dotenv(override=True)
 
 from telegram import InlineQueryResultCachedPhoto, InlineQueryResultPhoto, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import (
@@ -73,7 +74,7 @@ import uuid
 
 PHOTO_URL = "http://g.hiphotos.baidu.com/image/pic/item/6d81800a19d8bc3e770bd00d868ba61ea9d345f2.jpg"  # 换成你的广告图
 
-load_dotenv(override=True)
+
 
 async def show_menu(update, context):
 
