@@ -1,4 +1,5 @@
 from channel.channel_force import register_handle_force_handlers
+from channel.publish_setting import register_publish_setting_handlers
 from channel.reply_to_channel import register_reply_to_channel_handlers
 from channel.channel_config import register_channel_config_handlers
 from game.checkin import register_checkin_handlers
@@ -43,7 +44,9 @@ def register_group_handlers(app):
     if is_feature_enabled(app, "channel"):
         register_channel_config_handlers(app)
         register_telethon_login_handlers(app)
-
+        
+    
+    register_publish_setting_handlers(app)
     # 需要较后注册的群路由
     register_user_tracker_handlers(app)
     register_handle_force_handlers(app)

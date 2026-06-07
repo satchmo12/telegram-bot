@@ -537,11 +537,14 @@ def _build_start_panel_rows(
         
     if "group" in enabled:
         rows.append([InlineKeyboardButton("👥群配置", callback_data="gcfg:list")])
+        
+    if bot_name == MASTER_BOT_NAME:
+        rows.append([InlineKeyboardButton("👥投稿配置", callback_data="publish:publishset")])
     
     rows.append(
         [
-            InlineKeyboardButton("📣我要投稿", callback_data="chcfg:publish"),
-            InlineKeyboardButton("来点资源", callback_data="chcfg:channel_message")    
+            InlineKeyboardButton("📣我要投稿", callback_data="publish:publish"),
+            InlineKeyboardButton("来点资源", callback_data="publish:channel_message")    
         ]
     )
     return rows

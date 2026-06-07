@@ -29,8 +29,8 @@ HISTORY_REQUESTS_FILE = "data/history_forward_requests.json"
 SUBSCRIPTION_FILE = "config_data/subscriptions.json"
 SESSION_OWNERS_FILE = "data/telethon_session_owners.json"
 USER_MESSAGE_FILE = "data/user_message_file.json"
-BOTTLE_HISTORY_FILE = "data/bottle_history.json"
-ANON_CHAT_FILE = "data/anon_chat.json"
+
+
 
 CALLBACK_PREFIX = "chcfg"
 LOGIN_CALLBACK_PREFIX = "tlogin"
@@ -175,10 +175,6 @@ def _save_user_forward_config(context: ContextTypes.DEFAULT_TYPE, data: dict) ->
 def _load_bot_users() -> dict:
     data = load_json(BOT_USER_FILE)
     return data if isinstance(data, dict) else {}
-
-def _load_cannel_message() -> list:
-    data = load_json(USER_MESSAGE_FILE)
-    return data if isinstance(data, list) else []
 
 
 def _record_bot_user(user) -> str:
@@ -569,8 +565,7 @@ def _start_new_wizard(context: ContextTypes.DEFAULT_TYPE, user_id: str):
             "mode": "listen",
         },
     }
-
-
+    
 def _new_rule_default(user_id: str, *, source_id=None, source_name: str = "", session_name: str = "") -> dict:
     rule = {
         "name": source_name or "未命名",
@@ -1727,370 +1722,9 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=_build_rule_panel_keyboard(context, idx, rule),
         )
 
-    if action == "publish":
-        context.user_data["waiting_post"] = True
+    
         
-        help_text = "📣 请发送您要投稿的内容。\n\n支持文字、图片、视频等消息。"
-        
-        rows = []
-        rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
-        keyboard = InlineKeyboardMarkup(rows)
-        
-        return await query.edit_message_text(
-            help_text, reply_markup= keyboard
-        )
-    if action == "channel_message":
-        context.user_data["reply_bottle"] = True
-        channel_id = -1003585759564
 
-        user_id = query.from_user.id
-
-        posts = _load_cannel_message()
-
-        history_data = _load_bottle_history()
-
-        user_key = str(user_id)
-
-        if user_key not in history_data:
-            history_data[user_key] = {
-                "history": [],
-                "index": -1
-            }
-
-        user_info = history_data[user_key]
-
-        history = user_info["history"]
-
-        available_posts = [
-            p for p in posts
-            if p["user_id"] != user_id
-            and p["channel_message_id"] not in history
-        ]
-
-        if not available_posts:
-            await query.message.reply_text("没有更多资源了")
-            return
-
-        post = random.choice(available_posts)
-
-        history.append(post["channel_message_id"])
-
-        user_info["index"] = len(history) - 1
-
-        _save_bottle_history(history_data)
-
-        await send_bottle(
-            context,
-            user_id,
-            channel_id,
-            post
-        )
-
-async def bottle_callback(update, context):
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data
-
-    if data == "bottle_next":
-        user_id = query.from_user.id
-
-        posts = _load_cannel_message()
-
-        history_data = _load_bottle_history()
-
-        user_info = history_data.get(str(user_id))
-
-        if not user_info:
-            await query.answer("请先捞一个瓶子")
-            return
-
-        history = user_info["history"]
-        index = user_info["index"]
-
-        # 已浏览历史里还有下一条
-        if index < len(history) - 1:
-
-            index += 1
-
-            user_info["index"] = index
-
-            _save_bottle_history(history_data)
-
-            message_id = history[index]
-
-        else:
-
-            available_posts = [
-                p for p in posts
-                if p["user_id"] != user_id
-                and p["channel_message_id"] not in history
-            ]
-
-            if not available_posts:
-                await query.answer(
-                    "已经没有新的瓶子了",
-                    show_alert=True
-                )
-                return
-
-            post = random.choice(available_posts)
-
-            history.append(post["channel_message_id"])
-
-            user_info["index"] = len(history) - 1
-
-            _save_bottle_history(history_data)
-
-            message_id = post["channel_message_id"]
-
-        await query.message.delete()
-
-        await context.bot.copy_message(
-            chat_id=user_id,
-            from_chat_id=-1003585759564,
-            message_id=message_id,
-            reply_markup=query.message.reply_markup
-        )
-
-    elif data == "bottle_prev":
-
-        user_id = query.from_user.id
-
-        history_data = _load_bottle_history()
-
-        user_info = history_data.get(str(user_id))
-
-        if not user_info:
-            return
-
-        index = user_info["index"]
-
-        if index <= 0:
-            await query.answer(
-                "已经是第一条了",
-                show_alert=True
-            )
-            return
-
-        index -= 1
-
-        user_info["index"] = index
-
-        _save_bottle_history(history_data)
-
-        message_id = user_info["history"][index]
-
-        await query.message.delete()
-
-        await context.bot.copy_message(
-            chat_id=user_id,
-            from_chat_id=-1003585759564,
-            message_id=message_id,
-            reply_markup=query.message.reply_markup
-        )
-
-    elif data.startswith("add_friend:"):
-        target_user_id = int(data.split(":")[1])
-        target_user_id = int(target_user_id)
-        from_user_id = query.from_user.id
-        
-        history_data = _load_bottle_history()
-        user_key = str(from_user_id)
-        friend_applied = history_data[user_key].setdefault(
-            "friend_applied",
-            {}
-        )
-        
-        if str(target_user_id) in friend_applied:
-            await query.answer(
-                "你已经发送过好友申请了",
-                show_alert=True
-            )
-            return
-        
-        
-        await context.bot.send_message(
-            chat_id=target_user_id,
-            text="有人想认识你",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "✅ 同意",
-                        callback_data=f"accept_friend:{from_user_id}"
-                    ),
-                    InlineKeyboardButton(
-                        "❌ 拒绝",
-                        callback_data=f"reject_friend:{from_user_id}"
-                    )
-                ]
-            ])
-        )
-        
-        friend_applied[str(target_user_id)] = True
-        _save_bottle_history(history_data)
-
-    elif data.startswith("reply_bottle:"):
-        
-        channel_message_id = int(data.split(":")[1])
-        posts = _load_cannel_message()
-
-        post = next(
-            (
-                item
-                for item in posts
-                if item["channel_message_id"] == channel_message_id
-            ),
-            None
-        )
-
-        if not post:
-            await query.answer(
-                "帖子不存在",
-                show_alert=True
-            )
-            return
-
-        target_user_id = post["user_id"]
-        from_user_id = query.from_user.id
-
-        if target_user_id == from_user_id:
-            await query.answer(
-                "不能回复自己",
-                show_alert=True
-            )
-            return
-
-        chat_data = _load_anon_chat()
-
-        chat_data[str(from_user_id)] = target_user_id
-        chat_data[str(target_user_id)] = from_user_id
-
-        _save_anon_chat(chat_data)
-
-        await query.message.reply_text(
-            "💬 已建立匿名聊天，直接发送消息即可。"
-        )
-
-        await context.bot.send_message(
-            chat_id=target_user_id,
-            text="💬 有人通过你的投稿发起了匿名聊天，现在可以直接发送消息。"
-        )
-    # 同意好友申请
-    elif data.startswith("accept_friend:"):
-        requester_id = int(data.split(":")[1])
-
-        accepter_id = query.from_user.id
-
-        print("申请人:", requester_id)
-        print("同意人:", accepter_id)
-
-        # 从数据库读取双方信息
-        requester = get_user(requester_id)
-        accepter = get_user(accepter_id)
-
-        # 通知申请人
-        await context.bot.send_message(
-            chat_id=requester_id,
-            text=(
-                "🎉 对方已同意交换联系方式\n\n"
-                f"用户名：@{accepter['username']}"
-            )
-        )
-
-        # 通知同意人
-        await query.message.reply_text(
-            f"已向对方发送你的联系方式，对方联系方式：@{requester['username']}"
-            # f"已向对方发送你的联系方式：@{accepter['username']}"
-        )
-    elif data.startswith("reject_friend:"):
-        requester_id = int(data.split(":")[1])
-
-        await context.bot.send_message(
-            chat_id=requester_id,
-            text="❌ 对方拒绝了你的好友申请"
-        )
-
-        await query.message.reply_text("已拒绝")
-    elif data == "anon_chat_end":
-        context.user_data["reply_bottle"] = False
-        user_id = query.from_user.id
-        chat_data = _load_anon_chat()
-        partner_id = chat_data.get(str(user_id))
-
-        if partner_id:
-            chat_data.pop(str(user_id), None)
-            chat_data.pop(str(partner_id), None)
-            _save_anon_chat(chat_data)
-            await context.bot.send_message(
-                chat_id=partner_id,
-                text="❌ 对方已结束匿名聊天"
-            )
-        await query.edit_message_text(
-            "✅ 匿名聊天已结束"
-        )
-
-def get_user(user_id):
-    users = load_json(BOT_USER_FILE)
-    return users.get(str(user_id))       
-
-
-def _load_bottle_history():
-    data = load_json(BOTTLE_HISTORY_FILE)
-    return data if isinstance(data, dict) else {}
-
-def _save_bottle_history(data):
-    save_json(BOTTLE_HISTORY_FILE, data)
-
-def get_user_bottle_data(user_id):
-    data = _load_bottle_history()
-
-    user_key = str(user_id)
-
-    if user_key not in data:
-        data[user_key] = {
-            "history": [],
-            "index": -1
-        }
-
-    return data
-
-async def send_bottle(
-    context,
-    chat_id,
-    channel_id,
-    post
-):
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "⬅️ 上一条",
-                callback_data="bottle_prev"
-            ),
-            InlineKeyboardButton(
-                "➡️ 下一条",
-                callback_data="bottle_next"
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "👤 添加好友",
-                callback_data=f"add_friend:{post['user_id']}"
-            ),
-            InlineKeyboardButton(
-                "💬 回复",
-                callback_data=f"reply_bottle:{post['channel_message_id']}"
-            )
-        ]
-    ]
-
-    await context.bot.copy_message(
-        chat_id=chat_id,
-        from_chat_id=channel_id,
-        message_id=post["channel_message_id"],
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
       
 async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not update.message or not update.message.text:
@@ -2466,55 +2100,7 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return False
 
 
-async def handle_wall_publish(update, context):
-    if not context.user_data.get("waiting_post"):
-        return
 
-    context.user_data["waiting_post"] = False
-
-    msg = update.message
-    channel_id = -1003585759564
-    
-    try:
-        published = await context.bot.copy_message(
-            chat_id=channel_id,
-            from_chat_id=msg.chat_id,
-            message_id=msg.message_id
-        )
-  
-        data =  _load_cannel_message()
-        
-        data.append({
-            "user_id": msg.from_user.id,
-            "user_chat_id": msg.chat_id,
-            "username": msg.from_user.username,
-            "user_message_id": msg.message_id,       # 用户原消息ID
-            "channel_message_id": published.message_id,  # 频道消息ID
-            "publish_time": int(time.time())
-        })
-        
-        # _save_cannel_message(data)
-        save_json(USER_MESSAGE_FILE, data)
-
-        # video_posts.append({
-        #     "channel_msg_id": msg.message_id
-        # })
-
-        await msg.reply_text("✅ 投稿成功，感谢参与！")
-        
-    except Exception as e:
-        print("投稿失败:", e)
-        await msg.reply_text(f"❌ 投稿失败：{e}")
-    
-    
-    keyboard = InlineKeyboardMarkup(
-        [
-                [InlineKeyboardButton("⬅️ 返回", callback_data="start:back")],
-                [InlineKeyboardButton("✅ 继续", callback_data="chcfg:publish")],
-            ]
-        )
-
-    await update.message.reply_text("选择操作", reply_markup=keyboard)
 
 async def anonymous_chat_handler(update, context):
     if context.user_data.get("waiting_post"):
@@ -2545,12 +2131,9 @@ async def anonymous_chat_handler(update, context):
     except Exception as e:
         print("匿名聊天失败:", e)
 
-def _load_anon_chat():
-    data = load_json(ANON_CHAT_FILE)
-    return data if isinstance(data, dict) else {}
 
-def _save_anon_chat(data):
-    save_json(ANON_CHAT_FILE, data)
+
+
     
 async def handle_channel_config_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     return await _handle_text_input(update, context)
@@ -2567,8 +2150,7 @@ def register_channel_config_handlers(app):
     app.add_handler(CommandHandler("subscription", subscription_status))
     app.add_handler(CommandHandler("add_subscription", add_subscription))
     
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_wall_publish), group=10)
-    app.add_handler( MessageHandler(filters.ALL & ~filters.COMMAND,anonymous_chat_handler),group=100
-)
-    app.add_handler(CallbackQueryHandler(bottle_callback))
+
+    # app.add_handler( MessageHandler(filters.ALL & ~filters.COMMAND,anonymous_chat_handler),group=100)
+   
     # app.add_handler(CallbackQueryHandler(handle_wall_publish,pattern=r"^wall:publish$"))
