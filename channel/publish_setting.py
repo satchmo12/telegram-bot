@@ -375,7 +375,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
 
         if not available_posts:
-            await query.message.reply_text("没有更多资源了")
+            await query.message.reply_text("没有更多瓶子了")
             return
 
         post = random.choice(available_posts)
@@ -400,7 +400,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("✅ 已更新", show_alert=False)
         
         
-        help_text = "📣 请发送您要投稿的内容。\n\n支持文字、图片、视频等消息。"
+        help_text = "📣 请发送您要的内容。\n\n支持文字、图片、视频等消息。"
     
         context.user_data["post_no_name"] = enabled
         
@@ -445,7 +445,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
 
             if not available_posts:
-                await query.message.reply_text("没有更多资源了")
+                await query.message.reply_text("没有更多瓶子了")
                 return
 
             post = random.choice(available_posts)
@@ -481,9 +481,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         index = user_info["index"]
 
         if index <= 0:
-            await query.answer(
-                "已经是第一条了",
-                show_alert=True
+            await query.message.reply_text(
+                "已经是第一条了"
             )
             return
 
@@ -504,8 +503,9 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=query.message.reply_markup
         )
     
-    if action.startswith("add_friend:"):
-        target_user_id = int(action.split(":")[2])
+    if action == "add_friend":
+
+        target_user_id = int(query.data.split(":")[2])
         target_user_id = int(target_user_id)
         from_user_id = query.from_user.id
         
@@ -517,16 +517,18 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         if str(target_user_id) in friend_applied:
-            await query.answer(
-                "你已经发送过好友申请了",
-                show_alert=True
+            await query.message.reply_text(
+                "你已经发送过好友申请了"
             )
             return
         
+        accepter = get_user(from_user_id)
         
         await context.bot.send_message(
             chat_id=target_user_id,
-            text="有人想认识你",
+            text= (
+                f"@{accepter['username']}  想认识你" 
+            ),
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
@@ -541,10 +543,14 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
         
+        await query.message.reply_text(
+            "好友申请发送成功"
+        )
+        
         friend_applied[str(target_user_id)] = True
         _save_bottle_history(history_data)
-    if action.startswith("accept_friend:"):
-        requester_id = int(action.split(":")[2])
+    if action == "accept_friend":
+        requester_id = int(query.data.split(":")[2])
 
         accepter_id = query.from_user.id
 
@@ -564,19 +570,25 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         )
 
+        await query.message.delete()
+         
         # 通知同意人
         await query.message.reply_text(
             f"已向对方发送你的联系方式，对方联系方式：@{requester['username']}"
         )
+        
+       
     
-    if action.startswith("reject_friend:"):
-        requester_id = int(action.split(":")[1])
+    if action == "reject_friend":
+        requester_id = int(query.data.split(":")[2])
 
         await context.bot.send_message(
             chat_id=requester_id,
             text="❌ 对方拒绝了你的好友申请"
         )
 
+        await query.message.delete()
+        
         await query.message.reply_text("已拒绝")
         
 async def publish_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -590,10 +602,12 @@ async def publish_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["post_no_name"] = enabled
     
     if query:
+        
         await query.edit_message_text(
             help_text,
             reply_markup=create_post_keyboard(enabled)
         )
+        
     else:
         await update.message.reply_text(
             help_text,
@@ -603,9 +617,13 @@ async def publish_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def create_post_keyboard(enabled: bool):
     rows = [
         [
+            # InlineKeyboardButton(
+            #     f"{'✅' if enabled else '🚫'} 匿名模式",
+            #     callback_data=f"{CALLBACK_PREFIX}:global_ad_toggle",
+            # ),
             InlineKeyboardButton(
-                f"{'✅' if enabled else '🚫'} 匿名模式",
-                callback_data=f"{CALLBACK_PREFIX}:global_ad_toggle",
+                "✅ 继续扔",
+                callback_data="publish:publish",
             ),
             InlineKeyboardButton(
                 "⬅️ 返回",
@@ -625,7 +643,7 @@ async def handle_wall_publish(update, context):
     channel_id = config.get("channel_id")
     
     if not channel_id:
-        await msg.reply_text("✅ 暂未配置投稿地址，感谢参与！")
+        await msg.reply_text("✅ 暂未配置大海地址，感谢参与！")
         return
     
     try:
@@ -647,14 +665,15 @@ async def handle_wall_publish(update, context):
         })
         
         save_json(USER_MESSAGE_FILE, data)
-        await msg.reply_text("✅ 投稿成功，感谢参与！")
+        await msg.reply_text("✅ 发送成功")
         
     except Exception as e:
         print("投稿失败:", e)
-        await msg.reply_text(f"❌ 投稿失败：{e}")
+        await msg.reply_text(f"❌ 发送失败：{e}")
+    
+    context.user_data["waiting_post"] = False
         
-        
-    await publish_message(update, context)
+    # await publish_message(update, context)
    
 # =========================
 # 文本输入处理
@@ -664,6 +683,8 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     await handle_wall_publish(update, context)
 
+    if not update.message.text:
+        return
     
     config = load_json(PUBLISH_CONFIG_FILE)
     
@@ -816,4 +837,4 @@ def _load_cannel_message() -> list:
 
 def register_publish_setting_handlers(app):
     app.add_handler( CallbackQueryHandler( _handle_callback, pattern=r"^publish:.+"))
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & (~filters.COMMAND),_handle_text_input), group=10)
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (~filters.COMMAND),_handle_text_input), group=10)

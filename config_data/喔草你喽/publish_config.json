@@ -1,14 +1,14 @@
 {
     "channel_id": -1003585759564,
     "review_enabled": false,
-    "daily_limit": 0,
-    "ads_enabled": true,
+    "daily_limit": 10,
+    "ads_enabled": false,
     "ads": [
         {
             "id": 1,
             "title": "广告1",
-            "content": "21232",
-            "enabled": true
+            "content": "23",
+            "enabled": false
         }
     ]
 }

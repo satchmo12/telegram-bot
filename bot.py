@@ -516,7 +516,8 @@ def _build_start_panel_rows(
         rows.append(
             [
                 InlineKeyboardButton("💬私聊面板", callback_data="pfmode:open:1"),
-                InlineKeyboardButton("📢全群广告推送", callback_data="gcfg:global_ad_menu")
+                InlineKeyboardButton("📢全群广告推送", callback_data="gcfg:global_ad_menu"),
+                InlineKeyboardButton("⚙️投稿配置", callback_data="publish:publishset")
             ]
         )
    
@@ -538,13 +539,11 @@ def _build_start_panel_rows(
     if "group" in enabled:
         rows.append([InlineKeyboardButton("👥群配置", callback_data="gcfg:list")])
         
-    if bot_name == MASTER_BOT_NAME:
-        rows.append([InlineKeyboardButton("👥投稿配置", callback_data="publish:publishset")])
-    
+   
     rows.append(
         [
-            InlineKeyboardButton("📣我要投稿", callback_data="publish:publish"),
-            InlineKeyboardButton("来点资源", callback_data="publish:channel_message")    
+            InlineKeyboardButton("🫙扔瓶子", callback_data="publish:publish"),
+            InlineKeyboardButton("🔍捞瓶子", callback_data="publish:channel_message")    
         ]
     )
     return rows
