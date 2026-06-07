@@ -31,6 +31,28 @@ import string
 OUTPUT_FILE = "found.txt"
 _USERNAME_CHECK_COOLDOWN: dict[int, float] = {}
 
+INPUT_FILE = "data/found.txt"
+
+def load_usernames():
+    path = Path(INPUT_FILE)
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{INPUT_FILE} 不存在"
+        )
+
+    usernames = []
+
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            username = line.strip()
+
+            if not username:
+                continue
+
+            usernames.append(username)
+
+    return usernames
 
 async def check_username(page, username: str):
     url = f"https://fragment.com/?query={username}"
@@ -268,7 +290,7 @@ def _build_username_candidates(keyword: str) -> list[str]:
             "543", "432", "321",
 
             # 特殊
-            "520", "521", "1314", "168", "518","588","618","688"
+            "520", "521", "1314", "168", "518","588","618","688","788","988","899"
         ]
         
         for suffix in suffixes:
@@ -1121,31 +1143,117 @@ async def detect_username_candidates(update: Update, context: ContextTypes.DEFAU
     candidates = _build_username_candidates(keyword)
     if not candidates:
         return await safe_reply(update, context, "请输入有效的中文或字母关键词。", auto_delete_seconds=0)
+    
+    result_text = await build_username_check_result(
+        context=context,
+        keyword=keyword,
+        candidates=candidates
+    )
 
-    lines = [f"🔎 关键词：{keyword}", "可尝试注册的用户名："]
-    available: list[str] = []
+    await safe_reply(
+        update,
+        context,
+        result_text,
+        auto_delete_seconds=0
+    )
+
+    # lines = [f"🔎 关键词：{keyword}", "可尝试注册的用户名："]
+    # available: list[str] = []
+    # checked = 0
+
+    # for username in candidates:
+    #     checked += 1
+    #     is_available = await _check_username_available(context, username)
+    #     if is_available:
+    #         available.append(username)
+    #         lines.append(f"✅ @{username}")
+    #     else:
+    #         lines.append(f"❌ @{username}")
+    #     if len(available) >= 15:
+    #         break
+
+    # if not available:
+    #     lines.append("")
+    #     lines.append("没有找到可用的用户名候选。")
+    # else:
+    #     lines.append("")
+    #     lines.append("结果仅列出可注册项，建议尽快尝试。")
+
+    # lines.append(f"已检测：{checked} 个候选")
+    # await safe_reply(update, context, "\n".join(lines), auto_delete_seconds=0)
+    
+
+@register_command("扫描")
+async def scan_username_candidates(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.effective_user:
+        return
+    if not is_super_admin(update.effective_user.id):
+        return await safe_reply(update, context, "🚫 你不是超级管理员，无法执行此命令。")
+    
+    candidates = load_usernames()
+    
+    result_text = await build_username_check_result(
+        context=context,
+        keyword="扫描",
+        candidates=candidates
+    )
+
+    await safe_reply(
+        update,
+        context,
+        result_text,
+        auto_delete_seconds=0
+    )
+
+async def build_username_check_result(
+    context,
+    keyword: str,
+    candidates: list[str],
+    max_available: int = 15,
+) -> str:
+    """
+    检测用户名并返回结果文本
+    """
+
+    lines = [
+        f"🔎 关键词：{keyword}",
+        "可尝试注册的用户名："
+    ]
+
+    available = []
     checked = 0
 
     for username in candidates:
         checked += 1
-        is_available = await _check_username_available(context, username)
+
+        is_available = await _check_username_available(
+            context,
+            username
+        )
+
         if is_available:
             available.append(username)
             lines.append(f"✅ @{username}")
         else:
             lines.append(f"❌ @{username}")
-        if len(available) >= 15:
+
+        if len(available) >= max_available:
             break
 
     if not available:
-        lines.append("")
-        lines.append("没有找到可用的用户名候选。")
+        lines.extend([
+            "",
+            "没有找到可用的用户名候选。"
+        ])
     else:
-        lines.append("")
-        lines.append("结果仅列出可注册项，建议尽快尝试。")
+        lines.extend([
+            "",
+            "结果仅列出可注册项，建议尽快尝试。"
+        ])
 
     lines.append(f"已检测：{checked} 个候选")
-    await safe_reply(update, context, "\n".join(lines), auto_delete_seconds=0)
+
+    return "\n".join(lines)
 
 @register_command("用户名")
 async def dao_username_candidates(update: Update, context: ContextTypes.DEFAULT_TYPE):
