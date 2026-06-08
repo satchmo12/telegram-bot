@@ -1327,7 +1327,7 @@ async def dao_username_candidates(update: Update, context: ContextTypes.DEFAULT_
 
     await safe_reply(update, context, msg, auto_delete_seconds=0) 
 
-def generate_candidates(keyword, count=20):
+def generate_candidates(keyword, count=50):
     chars = string.ascii_lowercase + string.digits
     target_len = max(5, len(keyword))
 
