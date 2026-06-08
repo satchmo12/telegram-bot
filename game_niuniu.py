@@ -8,7 +8,7 @@ from telegram.ext import (
 )
 from command_router import register_command
 from database import *
-import config
+
 from utils import get_group_whitelist, safe_reply
 
 LUAFA_COOLDOWN_SECONDS = 6000
@@ -21,6 +21,12 @@ AV_COOLDOWN_SECONDS = 6000
 last_action_ts = {}
 NAQIE_COST = 30
 NAQIE_DAILY_PER_CONCUBINE = 1
+
+SIGN_GAIN = (1, 5)
+PK_GAIN = (1, 3)
+AV_GAIN = (1, 4)
+YP_GAIN = (5, 10)
+
 SIGN_FLAVOR_LINES = [
     "🌤️ 今日状态拉满，开工就有好手感！",
     "🍀 运势不错，今天适合狠狠干票大的。",
@@ -146,7 +152,7 @@ def apply_daily_concubine_income(user_id: int):
     if count <= 0 or last_income_date == td:
         return 0, count
 
-    per = int(getattr(config, "NAQIE_DAILY_PER_CONCUBINE", NAQIE_DAILY_PER_CONCUBINE))
+    per = int( NAQIE_DAILY_PER_CONCUBINE)
     gain = max(0, count * per)
     if gain > 0:
         update_length(user_id, gain)
@@ -209,8 +215,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔞 /av - 看AV
 🐔 /kj - 偷取
 ❤️ /yp - 约炮
-📌 /aim - 置顶10分钟
-📍 /unaim - 取消置顶
 🏆 /leaderboard - 排行榜
 ⚙️ /setting - 匿名模式
 """
@@ -227,14 +231,18 @@ async def sign(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     is_lufa = text.startswith("撸一发")
 
-    get_user(user.id, user.username)
+    get_user(
+    user.id,
+    user.username,
+    user.first_name
+)
     daily_gain, concubines = apply_daily_concubine_income(user.id)
     if daily_gain > 0:
         await update.message.reply_text(f"🏮 妾室供养到账：+{daily_gain}cm（{concubines}位）")
-    gain = safe_randint(getattr(config, "SIGN_GAIN", (1, 5)), (1, 5))
+    gain = safe_randint(SIGN_GAIN, (1, 5))
 
     if is_lufa:
-        cooldown = int(getattr(config, "LUAFA_COOLDOWN_SECONDS", LUAFA_COOLDOWN_SECONDS))
+        cooldown = int( LUAFA_COOLDOWN_SECONDS)
         cooldown = max(1, cooldown)
         key = f"{user.id}:lufa"
         now_ts = int(datetime.now().timestamp())
@@ -252,7 +260,11 @@ async def sign(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         return await update.message.reply_text("\n".join(lines))
 
-    db_user = get_user(user.id, user.username)
+    db_user = get_user(
+    user.id,
+    user.username,
+    user.first_name
+)
     if db_user[3] == today():
         await update.message.reply_text("❌ 今天已签到")
         return
@@ -274,7 +286,8 @@ async def dick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.reply_to_message and update.message.reply_to_message.from_user:
         target_user = update.message.reply_to_message.from_user
 
-    get_user(target_user.id, target_user.username)
+    get_user(target_user.id, target_user.username , target_user.first_name)
+    
     length = get_length(target_user.id)
     name = target_user.full_name or target_user.first_name or "该用户"
     await update.message.reply_text(f"📏 {name} 当前长度：{length} cm")
@@ -301,18 +314,18 @@ async def pk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remain = check_action_cooldown(
         attacker.id,
         "pk",
-        getattr(config, "PK_COOLDOWN_SECONDS", PK_COOLDOWN_SECONDS),
+        PK_COOLDOWN_SECONDS,
     )
     if remain > 0:
         await update.message.reply_text(f"⏳ PK冷却中，还需 {remain} 秒")
         return
 
-    get_user(attacker.id, attacker.username)
-    get_user(defender.id, defender.username)
+    get_user(attacker.id, attacker.username, attacker.first_name)
+    get_user(defender.id, defender.username,  defender.first_name )
 
     winner = random.choice([attacker, defender])
     loser = defender if winner == attacker else attacker
-    gain = safe_randint(getattr(config, "PK_GAIN", (1, 3)), (1, 3))
+    gain = safe_randint( PK_GAIN, (1, 3))
 
     update_length(winner.id, gain)
     update_length(loser.id, -gain)
@@ -343,8 +356,8 @@ async def jy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ 不能给自己赠送")
         return
 
-    get_user(sender.id, sender.username)
-    get_user(receiver.id, receiver.username)
+    get_user(sender.id, sender.username, sender.first_name)
+    get_user(receiver.id, receiver.username, receiver.first_name)
     if get_length(sender.id) < 5:
         await update.message.reply_text("❌ 你的长度不足 5cm")
         return
@@ -365,7 +378,7 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
     cursor.execute(
-        "SELECT user_id, username, length FROM users ORDER BY length DESC LIMIT 10"
+        "SELECT user_id, username, first_name, length FROM users ORDER BY length DESC LIMIT 10"
     )
     rows = cursor.fetchall()
     chat_id = str(update.effective_chat.id)
@@ -373,71 +386,23 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_silent = bool(group_cfg.get("silent", False))
 
     text = "🏆牛牛长度全球排行榜\n\n"
+    
     for i, row in enumerate(rows, 1):
         user_id = int(row[0])
-        db_username = row[1]
-        raw_name = None
-        try:
-            member = await context.bot.get_chat_member(
-                update.effective_chat.id, user_id
-            )
-            if member and member.user:
-                raw_name = member.user.full_name
-        except Exception:
-            raw_name = None
+        length = int(row[3])
 
-        if not raw_name:
-            raw_name = db_username if db_username else f"用户{user_id}"
+        name = row[2] or row[1] or f"用户{user_id}"
+        name = escape(str(name))
 
-        name = escape(str(raw_name))
-        length = int(row[2])
         if is_silent:
             text += f"{i}. {name} - {length}cm\n"
         else:
-            text += f'{i}. <a href="tg://user?id={user_id}">{name}</a> - {length}cm\n'
+            text += (
+                f'{i}. <a href="tg://user?id={user_id}">'
+                f'{name}</a> - {length}cm\n'
+            )
 
     await safe_reply(update, context, text, html=not is_silent)
-
-
-# ===== 置顶 =====
-@register_command("置顶")
-async def aim(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-    user = update.effective_user
-    get_user(user.id, user.username)
-    if get_length(user.id) < config.AIM_COST:
-        await update.message.reply_text("❌ 长度不足")
-        return
-
-    if not update.message.reply_to_message:
-        await update.message.reply_text("⚠️ 请回复一条消息后再置顶")
-        return
-
-    update_length(user.id, -config.AIM_COST)
-    await context.bot.pin_chat_message(
-        chat_id=update.effective_chat.id,
-        message_id=update.message.reply_to_message.message_id,
-        disable_notification=True,
-    )
-    await update.message.reply_text(f"📌 置顶成功，消耗 {config.AIM_COST}cm")
-
-
-# ===== 取消置顶 =====
-@register_command("取消置顶")
-async def unaim(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-    user = update.effective_user
-    get_user(user.id, user.username)
-    if get_length(user.id) < config.UNAIM_COST:
-        await update.message.reply_text("❌ 长度不足")
-        return
-
-    update_length(user.id, -config.UNAIM_COST)
-    await context.bot.unpin_chat_message(chat_id=update.effective_chat.id)
-    await update.message.reply_text(f"📍 取消置顶成功，消耗 {config.UNAIM_COST}cm")
-
 
 # ===== 强奸 =====
 @register_command("强奸")
@@ -457,13 +422,13 @@ async def qj(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remain = check_action_cooldown(
         attacker.id,
         "qj",
-        getattr(config, "QJ_COOLDOWN_SECONDS", QJ_COOLDOWN_SECONDS),
+        QJ_COOLDOWN_SECONDS,
     )
     if remain > 0:
         return await update.message.reply_text(f"⏳ 强奸冷却中，还需 {remain} 秒")
 
-    get_user(attacker.id, attacker.username)
-    get_user(target.id, target.username)
+    get_user(attacker.id, attacker.username, attacker.first_name)
+    get_user(target.id, target.username, target.first_name)
 
     steal = random.randint(2, 8)
     success_rate = 0.6
@@ -492,7 +457,11 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
     user = update.effective_user
-    get_user(user.id, user.username)
+    get_user(
+    user.id,
+    user.username,
+    user.first_name
+)
     daily_gain, concubines = apply_daily_concubine_income(user.id)
     row = get_profile_row(user.id)
     if not row:
@@ -528,14 +497,18 @@ async def av(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remain = check_action_cooldown(
         user.id,
         "av",
-        getattr(config, "AV_COOLDOWN_SECONDS", AV_COOLDOWN_SECONDS),
+        AV_COOLDOWN_SECONDS,
     )
     if remain > 0:
         return await update.message.reply_text(f"⏳ 看片冷却中，还需 {remain} 秒")
 
-    get_user(user.id, user.username)
+    get_user(
+    user.id,
+    user.username,
+    user.first_name
+)
 
-    gain = safe_randint(getattr(config, "AV_GAIN", (1, 4)), (1, 4))
+    gain = safe_randint( AV_GAIN, (1, 4))
     update_length(user.id, gain)
     lines = [
         f"🔞 你看了一会儿AV，状态提升 +{gain}cm",
@@ -562,13 +535,13 @@ async def kj(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remain = check_action_cooldown(
         thief.id,
         "kj",
-        getattr(config, "KJ_COOLDOWN_SECONDS", KJ_COOLDOWN_SECONDS),
+        KJ_COOLDOWN_SECONDS,
     )
     if remain > 0:
         return await update.message.reply_text(f"⏳ 偷取冷却中，还需 {remain} 秒")
 
-    get_user(thief.id, thief.username)
-    get_user(victim.id, victim.username)
+    get_user(thief.id, thief.username, thief.first_name)
+    get_user(victim.id, victim.username , victim.first_name )
 
     steal = random.randint(1, 5)
     if random.random() <= 0.5:
@@ -599,14 +572,14 @@ async def yp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remain = check_action_cooldown(
         user.id,
         "yp",
-        getattr(config, "YP_COOLDOWN_SECONDS", YP_COOLDOWN_SECONDS),
+        YP_COOLDOWN_SECONDS,
     )
     if remain > 0:
         return await update.message.reply_text(f"⏳ 约炮冷却中，还需 {remain} 秒")
 
-    get_user(user.id, user.username)
+    get_user(user.id, user.username, user.first_name)
 
-    gain = safe_randint(getattr(config, "YP_GAIN", (5, 10)), (5, 10))
+    gain = safe_randint( YP_GAIN, (5, 10))
     if random.random() <= 0.7:
         update_length(user.id, gain)
         lines = [
@@ -630,7 +603,7 @@ async def setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
     user = update.effective_user
-    get_user(user.id, user.username)
+    get_user(user.id, user.username, user.first_name)
     row = get_profile_row(user.id)
     if not row:
         return
@@ -650,19 +623,23 @@ async def naqie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user = update.effective_user
-    get_user(user.id, user.username)
+    get_user(
+    user.id,
+    user.username,
+    user.first_name
+)
     daily_gain, concubines = apply_daily_concubine_income(user.id)
     if daily_gain > 0:
         await update.message.reply_text(f"🏮 妾室供养到账：+{daily_gain}cm（{concubines}位）")
 
-    cost = int(getattr(config, "NAQIE_COST", NAQIE_COST))
+    cost = int( NAQIE_COST)
     if get_length(user.id) < cost:
         return await update.message.reply_text(f"❌ 长度不足，纳妾需要 {cost}cm")
 
     update_length(user.id, -cost)
     add_concubine(user.id, 1)
     total = get_concubine_count(user.id)
-    per = int(getattr(config, "NAQIE_DAILY_PER_CONCUBINE", NAQIE_DAILY_PER_CONCUBINE))
+    per = int( NAQIE_DAILY_PER_CONCUBINE)
     await update.message.reply_text(
         f"🏮 纳妾成功，消耗 {cost}cm。\n当前妾室：{total} 位（每日增长 {total * per}cm）"
     )
@@ -678,7 +655,7 @@ async def concubine_leaderboard(update: Update, context: ContextTypes.DEFAULT_TY
 
     cursor.execute(
         """
-        SELECT user_id, count
+        SELECT user_id, count, first_name
         FROM niuniu_concubines
         WHERE count > 0
         ORDER BY count DESC, user_id ASC
@@ -689,27 +666,22 @@ async def concubine_leaderboard(update: Update, context: ContextTypes.DEFAULT_TY
     if not rows:
         return await update.message.reply_text("🏮 当前还没有人纳妾。")
 
-    per = int(getattr(config, "NAQIE_DAILY_PER_CONCUBINE", NAQIE_DAILY_PER_CONCUBINE))
+    per = int( NAQIE_DAILY_PER_CONCUBINE)
     text = "🏮 妻妾排行榜\n\n"
     for i, row in enumerate(rows, 1):
         user_id = int(row[0])
         count = int(row[1] or 0)
 
-        raw_name = None
-        try:
-            member = await context.bot.get_chat_member(update.effective_chat.id, user_id)
-            if member and member.user:
-                raw_name = member.user.full_name
-        except Exception:
-            raw_name = None
+        cursor.execute(
+            "SELECT username FROM users WHERE user_id=?",
+            (user_id,)
+        )
+        r = cursor.fetchone()
 
-        if not raw_name:
-            cursor.execute("SELECT username FROM users WHERE user_id=?", (user_id,))
-            r = cursor.fetchone()
-            db_username = r[0] if r else None
-            raw_name = db_username if db_username else f"用户{user_id}"
-
-        name = escape(str(raw_name))
+        name = row[2] or row[0] or f"用户{user_id}"
+        name = escape(str(name))
+        
+        
         if is_silent:
             text += f"{i}. {name} - 妾室 {count} 位（每日 +{count * per}cm）\n"
         else:
@@ -737,5 +709,3 @@ def register_niuniu_handlers(app):
     app.add_handler(CommandHandler("naqie", naqie))
     app.add_handler(CommandHandler("naqie_top", concubine_leaderboard))
     app.add_handler(CommandHandler("leaderboard", leaderboard))
-    app.add_handler(CommandHandler("aim", aim))
-    app.add_handler(CommandHandler("unaim", unaim))

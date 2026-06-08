@@ -6,7 +6,6 @@ from html import escape
 from telegram import Update, User
 from telegram.ext import CommandHandler, ContextTypes
 from command_router import FEATURE_FRIENDS, feature_required, register_command
-from config import ESCAPE_LIMIT
 from info.economy import (
     get_balance,
     change_balance,
@@ -26,7 +25,7 @@ MIN_PRICE = 100  # 最低身价限制
 MAX_INCREASE = 1000  # 单次最高涨价幅度
 MAX_WORK_HOURS = 4
 WORK_REWARD_RATE = 0.10
-
+ESCAPE_LIMIT = 0.25
 
 # 计算奴隶身价
 def calculate_new_price(old_price):

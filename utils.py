@@ -11,14 +11,13 @@ from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from pypinyin import lazy_pinyin
 from threading import Lock
-from config import BOT_REPLY
 from telegram.ext import Application
 import shutil
 
 BOT_ID = None
 ADMIN_CACHE = {}  # {chat_id: {"admins": set(), "timestamp": float}}
 
-bot_reply = BOT_REPLY
+bot_reply = False
 
 # ===== 文件路径 =====
 DATA_DIR = "data"

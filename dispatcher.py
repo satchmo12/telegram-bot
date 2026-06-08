@@ -3,7 +3,6 @@ import traceback
 
 from channel.channel_forwarder import handle_message
 from command_router import dispatch_command
-from config import AUTO_TRANSLATE
 from forward.message_forward import handle_text_private_message
 from game.checkin import daycheckin
 from game.lottery_game import points_lottery_panel
@@ -78,13 +77,13 @@ async def handle_text_dispatcher(update: Update, context: ContextTypes.DEFAULT_T
         if await apply_action(update, context):
             return
 
-        if AUTO_TRANSLATE:
-            translated = await auto_translate(text)
-            if translated:
-                # 示例行为：直接翻译并回复
-                await safe_reply(
-                    update, context, f"🈶 原文: {text}\n🌐 翻译: {translated}"
-                )
+        # if AUTO_TRANSLATE:
+        #     translated = await auto_translate(text)
+        #     if translated:
+        #         # 示例行为：直接翻译并回复
+        #         await safe_reply(
+        #             update, context, f"🈶 原文: {text}\n🌐 翻译: {translated}"
+        #         )
 
         # ✅ 正常文本消息处理（非命令）
         await record_user(update, context)  # 记录用户（如入库）
