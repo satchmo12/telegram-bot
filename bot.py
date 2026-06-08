@@ -121,23 +121,72 @@ def _is_stale_callback_query_error(err: Exception) -> bool:
 
 async def error_handler(update, context):
     err = getattr(context, "error", None)
+
+    # 1️⃣ 基础信息
+    bot_name = context.bot.username if context.bot else "unknown_bot"
+
+    chat_id = None
+    chat_type = None
+    user_id = None
+    update_type = type(update).__name__
+
+    if update:
+        chat = getattr(update, "effective_chat", None)
+        user = getattr(update, "effective_user", None)
+
+        if chat:
+            chat_id = chat.id
+            chat_type = chat.type
+
+        if user:
+            user_id = user.id
+
+    base_info = (
+        f"[BOT: @{bot_name}] "
+        f"[CHAT: {chat_id} ({chat_type})] "
+        f"[USER: {user_id}] "
+        f"[UPDATE: {update_type}]"
+    )
+
+    # 2️⃣ 过滤已知错误
     if err and _is_stale_callback_query_error(err):
-        logging.info("忽略过期的按钮回调: %s", err)
+        logging.info("忽略过期按钮回调 | %s | %s", base_info, err)
         return
+
     if isinstance(err, NetworkError):
         msg = str(err).lower()
+
         if "message to delete not found" in msg:
             return
-        if "not enough rights to send text messages" in msg:
-            logging.warning("机器人在目标群没有发言权限: %s", err)
-            return
-        logging.warning("网络错误，可能是Telegram服务器临时不可用: %s", err)
-        return
-    if isinstance(err, TimedOut):
-        logging.warning("请求超时，重试中: %s", err)
-        return
-    logging.exception("未处理异常", exc_info=err)
 
+        if "not enough rights to send text messages" in msg:
+            logging.warning(
+                "无发言权限错误 | %s | ERROR: %s",
+                base_info,
+                err
+            )
+            return
+
+        logging.warning(
+            "网络错误 | %s | ERROR: %s",
+            base_info,
+            err
+        )
+        return
+
+    if isinstance(err, TimedOut):
+        logging.warning(
+            "请求超时 | %s | ERROR: %s",
+            base_info,
+            err
+        )
+        return
+
+    logging.exception(
+        "未处理异常 | %s",
+        base_info,
+        exc_info=err
+    )
 
 # ===== 日志设置 =====
 logging.basicConfig(

@@ -4,6 +4,13 @@ from datetime import datetime
 conn = sqlite3.connect("global_dick.db", check_same_thread=False)
 cursor = conn.cursor()
 
+
+def add_column(cursor, table, column, col_type):
+    try:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+    except sqlite3.OperationalError:
+        pass
+
 # 用户表
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
@@ -17,13 +24,10 @@ CREATE TABLE IF NOT EXISTS users (
 """)
 
 # 兼容旧数据库
-try:
-    cursor.execute("""
-        ALTER TABLE users
-        ADD COLUMN first_name TEXT
-    """)
-except sqlite3.OperationalError:
-    pass
+# add_column(cursor, "users", "age", "INTEGER")
+# add_column(cursor, "users", "vip_level", "INTEGER DEFAULT 0")
+add_column(cursor, "users", "first_name", "TEXT")
+
 
 # 排行榜索引
 cursor.execute("""
@@ -34,6 +38,7 @@ ON users(length DESC)
 conn.commit()
 
 
+    
 def get_user(user_id, username=None, first_name=None):
     cursor.execute(
         "SELECT * FROM users WHERE user_id=?",
