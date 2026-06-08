@@ -56,6 +56,48 @@ def load_usernames():
 
     return usernames
 
+@register_command("添加扫描库")
+async def add_scan_library(update, context):
+    msg = update.message
+
+    if not msg.reply_to_message:
+        await msg.reply_text("请回复包含用户名的消息。")
+        return
+
+    text = msg.reply_to_message.text or ""
+
+    usernames = re.findall(r'@([A-Za-z0-9_]{5,32})', text)
+
+    if not usernames:
+        await msg.reply_text("未找到用户名。")
+        return
+
+    try:
+        existing = {u.lower() for u in load_usernames()}
+    except FileNotFoundError:
+        existing = set()
+
+    added = []
+
+    for username in usernames:
+        username = username.lower()
+
+        if username not in existing:
+            existing.add(username)
+            added.append(username)
+
+    with open(INPUT_FILE, "w", encoding="utf-8") as f:
+        for username in sorted(existing):
+            f.write(username + "\n")
+
+    if added:
+        await msg.reply_text(
+            f"✅ 成功添加 {len(added)} 个用户名\n"
+            + "\n".join(f"@{u}" for u in added)
+        )
+    else:
+        await msg.reply_text("⚠️ 用户名已全部存在于扫描库中")
+        
 async def check_username(page, username: str):
     url = f"https://fragment.com/?query={username}"
 
@@ -94,7 +136,8 @@ async def worker(browser, usernames):
             results.append(result)
 
             if result[1]:
-                print(f"[FOUND] {username}")
+                # print(f"[FOUND] {username}")
+                pass
             else:
                 print(f"[Unavailable] {username}")
 
@@ -279,6 +322,7 @@ def _build_username_candidates(keyword: str) -> list[str]:
         # suffixes = ["", "000", "111", "123", "321", "520", "521", "1314", "518", "618"]
         suffixes = [
             "",
+            
             # 三连号（最优先）
             "000","111", "222", "333", "444",
             "555", "666", "777", "888", "999",
@@ -292,7 +336,10 @@ def _build_username_candidates(keyword: str) -> list[str]:
             "543", "432", "321",
 
             # 特殊
-            "520", "521", "1314", "168", "518","588","618","688","788","988","899"
+            "166", "168", "518", "520", "521", "588", "599", "618", "688","788", "899", "988", "998", "1314",
+            
+            "00","11", "22", "33", "44",
+            "55", "66", "77", "88", "99",
         ]
         
         for suffix in suffixes:
@@ -314,7 +361,7 @@ def _build_username_candidates(keyword: str) -> list[str]:
 import re
 import itertools
 
-def _build_username_new(keyword: str) -> list[str]:
+def _build_username_new(keyword: str, count=50) -> list[str]:
     raw = _normalize_username(keyword)
     if not raw:
         return []
@@ -429,7 +476,7 @@ def _build_username_new(keyword: str) -> list[str]:
             pad = base[-1] if base else "a"
             push(base + pad * (5 - len(base)))
 
-    return candidates
+    return candidates[:count]
 
 def get_structure(s: str):
     if not s:
@@ -450,7 +497,7 @@ def get_structure(s: str):
     result.append(count)
     return result
 
-def generate_by_structure(s: str):
+def generate_by_structure(s: str, count=50):
     structure = get_structure(s)
     letters = string.ascii_lowercase
 
@@ -474,7 +521,7 @@ def generate_by_structure(s: str):
             )
 
     dfs(0, set(), [])
-    return results
+    return results[:count]
 
 async def _check_username_available(context: ContextTypes.DEFAULT_TYPE, username: str) -> bool:
     try:
@@ -1131,8 +1178,24 @@ async def detect_username_candidates(update: Update, context: ContextTypes.DEFAU
         return
     if not is_super_admin(update.effective_user.id):
         return await safe_reply(update, context, "🚫 你不是超级管理员，无法执行此命令。")
-    if not context.args:
-        return await safe_reply(update, context, "用法：检测 美女")
+
+    msg = update.message
+
+    if not msg.reply_to_message:
+        if not context.args:
+            return await safe_reply(update, context, "用法：检测 美女")
+        else:
+            keyword = " ".join(context.args).strip()
+            candidates = _build_username_candidates(keyword)
+
+    else:
+        text = msg.reply_to_message.text or ""
+        usernames = re.findall(r'@([A-Za-z0-9_]{5,32})', text)
+        if not usernames:
+            await msg.reply_text("未找到用户名。")
+            return
+        candidates = usernames
+        keyword = "无"
 
     now = time.time()
     last_call = _USERNAME_CHECK_COOLDOWN.get(int(update.effective_user.id), 0.0)
@@ -1141,8 +1204,6 @@ async def detect_username_candidates(update: Update, context: ContextTypes.DEFAU
         return await safe_reply(update, context, f"请稍后再试，剩余冷却 {wait_seconds} 秒。", auto_delete_seconds=0)
     _USERNAME_CHECK_COOLDOWN[int(update.effective_user.id)] = now
 
-    keyword = " ".join(context.args).strip()
-    candidates = _build_username_candidates(keyword)
     if not candidates:
         return await safe_reply(update, context, "请输入有效的中文或字母关键词。", auto_delete_seconds=0)
     
@@ -1158,32 +1219,6 @@ async def detect_username_candidates(update: Update, context: ContextTypes.DEFAU
         result_text,
         auto_delete_seconds=0
     )
-
-    # lines = [f"🔎 关键词：{keyword}", "可尝试注册的用户名："]
-    # available: list[str] = []
-    # checked = 0
-
-    # for username in candidates:
-    #     checked += 1
-    #     is_available = await _check_username_available(context, username)
-    #     if is_available:
-    #         available.append(username)
-    #         lines.append(f"✅ @{username}")
-    #     else:
-    #         lines.append(f"❌ @{username}")
-    #     if len(available) >= 15:
-    #         break
-
-    # if not available:
-    #     lines.append("")
-    #     lines.append("没有找到可用的用户名候选。")
-    # else:
-    #     lines.append("")
-    #     lines.append("结果仅列出可注册项，建议尽快尝试。")
-
-    # lines.append(f"已检测：{checked} 个候选")
-    # await safe_reply(update, context, "\n".join(lines), auto_delete_seconds=0)
-    
 
 @register_command("扫描")
 async def scan_username_candidates(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1268,17 +1303,31 @@ async def dao_username_candidates(update: Update, context: ContextTypes.DEFAULT_
     if not context.args:
         return await safe_reply(update, context, "用法：用户名 美女 用户名 aabbb", auto_delete_seconds=0)
 
-    keyword = " ".join(context.args).strip()
+    keyword = context.args[0].strip()
+    # keyword = " ".join(context.args).strip()
+    
+    count = 500
+    
+    if len(context.args) >= 2:
+        try:
+            count = int(context.args[1])
+        except ValueError:
+            return await safe_reply(
+                update,
+                context,
+                "数量必须是数字"
+            )
+
 
     # candidates = _build_username_new(keyword)
     
     if _contains_chinese(keyword):
-        candidates = _build_username_new(keyword)
+        candidates = _build_username_new(keyword, count)
     else:
         if len(keyword) < 5:
-            candidates = generate_candidates(keyword)
+            candidates = generate_candidates(keyword, count)
         else:
-            candidates = generate_by_structure(keyword)
+            candidates = generate_by_structure(keyword, count)
         
 
     if not candidates:
@@ -1332,6 +1381,8 @@ def generate_candidates(keyword, count=50):
     target_len = max(5, len(keyword))
 
     result = set()
+    last_size = 0
+    stuck_count = 0
 
     while len(result) < count:
         remain = target_len - len(keyword)
@@ -1344,6 +1395,17 @@ def generate_candidates(keyword, count=50):
         suffix = ''.join(random.choices(chars, k=right))
 
         result.add(prefix + keyword + suffix)
+        
+        # 检查是否有增长
+        if len(result) == last_size:
+            stuck_count += 1
+        else:
+            last_size = len(result)
+            stuck_count = 0
+
+        # 连续1000次没有新增结果，认为已穷尽
+        if stuck_count >= 1000:
+            break
 
     return list(result)
     

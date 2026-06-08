@@ -117,7 +117,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
 
-    config = load_json(PUBLISH_CONFIG_FILE)
+    config = load_publish_config()
     channel_id = config.get("channel_id")
     
     action = query.data.split(":")[1]
@@ -639,7 +639,7 @@ async def handle_wall_publish(update, context):
         return
     
     msg = update.message
-    config = load_json(PUBLISH_CONFIG_FILE)
+    config = load_publish_config()
     channel_id = config.get("channel_id")
     
     if not channel_id:
@@ -686,7 +686,7 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not update.message.text:
         return
     
-    config = load_json(PUBLISH_CONFIG_FILE)
+    config = load_publish_config()
     
     if context.user_data.get("waiting_channel_id"):
         context.user_data["waiting_channel_id"] = False

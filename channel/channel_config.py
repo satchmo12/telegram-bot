@@ -2012,7 +2012,7 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if stage == "channel_user":
         draft["channel_user"] = _format_username(text)
         state["stage"] = "group_name"
-        await update.message.reply_text("请输入群名（群用户名，如 @dubai_mm）：", reply_markup=_build_cancel_keyboard())
+        await update.message.reply_text("请输入群名（群用户名，如 @iabc6）：", reply_markup=_build_cancel_keyboard())
         return True
 
     if stage == "group_name":
