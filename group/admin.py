@@ -1,3 +1,5 @@
+import random
+
 from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, ContextTypes, CallbackQueryHandler
 from telegram.constants import ChatMemberStatus
@@ -1273,7 +1275,10 @@ async def dao_username_candidates(update: Update, context: ContextTypes.DEFAULT_
     if _contains_chinese(keyword):
         candidates = _build_username_new(keyword)
     else:
-        candidates = generate_by_structure(keyword)
+        if len(keyword) < 5:
+            candidates = generate_candidates(keyword)
+        else:
+            candidates = generate_by_structure(keyword)
         
 
     if not candidates:
@@ -1321,7 +1326,26 @@ async def dao_username_candidates(update: Update, context: ContextTypes.DEFAULT_
     )
 
     await safe_reply(update, context, msg, auto_delete_seconds=0) 
-    
+
+def generate_candidates(keyword, count=20):
+    chars = string.ascii_lowercase + string.digits
+    target_len = max(5, len(keyword))
+
+    result = set()
+
+    while len(result) < count:
+        remain = target_len - len(keyword)
+
+        # 随机分配前后补位数量
+        left = random.randint(0, remain)
+        right = remain - left
+
+        prefix = ''.join(random.choices(chars, k=left))
+        suffix = ''.join(random.choices(chars, k=right))
+
+        result.add(prefix + keyword + suffix)
+
+    return list(result)
     
 @group_enabled_only
 @register_command("查看禁言")
