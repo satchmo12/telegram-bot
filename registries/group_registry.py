@@ -4,6 +4,7 @@ from channel.reply_to_channel import register_reply_to_channel_handlers
 from channel.channel_config import register_channel_config_handlers
 from game.checkin import register_checkin_handlers
 from group.admin import register_admin_handlers
+from group.auto_scan import register_auto_scan_handlers
 from group.group_care import register_group_care_handlers
 from group.group_logger import register_group_logger_handlers
 from group.group_media_tools import register_group_media_tools_handlers
@@ -28,6 +29,8 @@ def register_group_handlers(app):
 
     # 机器人在群内状态跟踪（被踢/退出/重新加入）
     register_group_logger_handlers(app)
+    
+    register_auto_scan_handlers(app)
 
     # 导航与群核心功能
     register_admin_handlers(app)

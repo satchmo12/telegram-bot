@@ -523,6 +523,12 @@ def _build_help_text(context: ContextTypes.DEFAULT_TYPE, user_id: Optional[int] 
                 "主机器人专属：",
                 "克隆机器人 按模板克隆新机器人",
                 "机器人面板 查看名下机器人列表",
+                "添加扫描库 回复用户名将用户名添加到文件里",
+                "扫描 扫描文件里可用的用户名",
+                "用户 拼音 aabbc sub 检测可用的用户名，网站上未占用检测",
+                "检测  aabbc  也可以回复用户名批量检测 检测可用的用户名，协议号检测，可用即可用",
+                "设置用户名 aabbc  协议号在目标群有修改权限，机器人在，超级管理员的命令",
+                "创建群组/频道 群中文名 用户名  协议号创建群租上限10个",
             ]
         )
         if user_id and is_super_admin(user_id):
