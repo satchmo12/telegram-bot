@@ -27,46 +27,6 @@ MAX_WORK_HOURS = 4
 WORK_REWARD_RATE = 0.10
 ESCAPE_LIMIT = 0.25
 
-# 计算奴隶身价
-def calculate_new_price(old_price):
-    chance_up = 0.6  # 60%涨价
-    chance_down = 0.2  # 20%跌价
-    chance_same = 0.2  # 20%不变
-
-    rand_val = random.random()
-
-    if rand_val < chance_up:
-        # 涨价，涨幅递减
-        if old_price < 1000:
-            growth_rate = 1.5
-        elif old_price < 5000:
-            growth_rate = 1.3
-        elif old_price < 20000:
-            growth_rate = 1.15
-        else:
-            growth_rate = 1.05
-        new_price = int(old_price * growth_rate)
-    elif rand_val < chance_up + chance_down:
-        # 跌价，跌幅随机
-        decline_rate = random.uniform(0.85, 0.95)
-        new_price = int(old_price * decline_rate)
-    else:
-        # 价格不变
-        new_price = old_price
-
-    # 限制最大涨幅
-    if new_price > old_price + MAX_INCREASE:
-        new_price = old_price + MAX_INCREASE
-
-    # 价格上下限控制
-    if new_price > MAX_PRICE:
-        new_price = MAX_PRICE
-    if new_price < MIN_PRICE:
-        new_price = MIN_PRICE
-
-    return new_price
-
-
 def _get_slave_work_info(info: dict) -> dict:
     work = info.get("work")
     return work if isinstance(work, dict) else {}
@@ -169,8 +129,6 @@ async def buy_slave(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user_data(chat_id, user_id, user_info)
 
     new_price = int(price * 1.25)
-    # 计算新身价
-    # new_price = calculate_new_price(price)
 
     # 初始化或追加交易历史
     history = old.get("history", []) if old else []
@@ -267,7 +225,6 @@ async def escape_slave(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @register_command("查看主人", "我的主人")
 @feature_required(FEATURE_FRIENDS)
-# @register_cmd("owner")  # 或者你在主处理逻辑中添加关键词匹配
 async def view_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat_id = str(update.effective_chat.id)

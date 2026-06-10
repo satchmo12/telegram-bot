@@ -21,7 +21,6 @@ from utils import (
     MARRY_FILE,
     get_bot_path,
     get_group_whitelist,
-    group_allowed,
     is_super_admin,
     load_json,
     safe_reply,
@@ -77,8 +76,8 @@ INTIMACY_ACTION_POINTS = {
     "摸头": 2,
     "撒娇": 2,
 }
-INTIMACY_ACTION_COOLDOWN = 300  # 5 分钟
-BABY_FEED_COOLDOWN = 4 * 3600  # 24 小时
+INTIMACY_ACTION_COOLDOWN = 3000  # 50 分钟
+BABY_FEED_COOLDOWN = 4 * 3600  #  4 小时
 BABY_STARVE_SECONDS = 86400 * 2  # 24 小时
 DONGFANG_INTIMACY_POINTS = 5
 BABY_BIRTH_INTIMACY_POINTS = 6
@@ -91,6 +90,12 @@ BABY_SHOP_ITEMS = {
     "饼干": {"price": 30},
     "辣条": {"price": 40},
     "果泥": {"price": 35},
+
+    # 🔥 新增
+    "果冻": {"price": 25},
+    "螺蛳粉": {"price": 60},
+    "小笼包": {"price": 45},
+    "煎饺": {"price": 55},
 }
 
 # 宝宝用品效果（可调整）
@@ -99,8 +104,17 @@ BABY_ITEM_EFFECTS = {
     "饼干": {"health": 1, "mood": 2, "growth": 1},
     "辣条": {"health": -1, "mood": 3, "growth": 0},
     "果泥": {"health": 2, "mood": 2, "growth": 1},
-}
 
+    # 🔥 新增食物
+    "果冻": {"health": 1, "mood": 3, "growth": 0},
+
+    # 🧨 重口味（高快乐但风险）
+    "螺蛳粉": {"health": -2, "mood": 5, "growth": 1},
+
+    # 🥟 正常营养类
+    "小笼包": {"health": 3, "mood": 2, "growth": 2},
+    "煎饺": {"health": 2, "mood": 3, "growth": 2},
+}
 
 def _is_chat_silent(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> bool:
     group_cfg = get_group_whitelist(context).get(str(chat_id), {})
@@ -176,15 +190,17 @@ def _format_since(ts: int) -> str:
 
 
 def _baby_growth_stage(feed_count: int) -> str:
-    if feed_count >= 10:
+    if feed_count >= 200:
+        return "成年"
+    if feed_count >= 100:
         return "少年"
-    if feed_count >= 6:
+    if feed_count >= 60:
         return "幼童"
-    if feed_count >= 3:
+    if feed_count >= 30:
         return "学步"
-    if feed_count >= 1:
+    if feed_count >= 10:
         return "新生"
-    return "初生"
+    return "新生"
 
 
 def _parse_birthday_ts(birthday: str) -> int:
@@ -1032,13 +1048,24 @@ async def feed_all_children(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dead = 0
 
     for child in my_children:
-        if _maybe_handle_starve(group, uid, lover_id, child, now_ts):
-            dead += 1
-            continue
-        if child.get("dead"):
-            dead += 1
-            continue
+        
+        feed_count = int(child.get("feed_count", 0) or 0)
+        
+        is_adult = feed_count >= 200
+        
+        if not is_adult:
+            if _maybe_handle_starve(group, uid, lover_id, child, now_ts):
+                dead += 1
+                continue
+            if child.get("dead"):
+                dead += 1
+                continue
+        
 
+        if is_adult:
+            # skipped.append(f"{child.get('name', '未命名')}(已达上限200次)")
+            continue
+    
         last_fed = int(child.get("last_fed", 0) or 0)
         if last_fed and now_ts - last_fed < BABY_FEED_COOLDOWN:
             remain = BABY_FEED_COOLDOWN - (now_ts - last_fed)

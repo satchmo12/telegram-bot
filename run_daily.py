@@ -14,10 +14,8 @@ async def daily_master_job(context):
     give_daily_stamina_to_all()
     logging.info("💪 执行每日体力恢复任务角色/宠物")
 
-
 async def hour_master_job(context: ContextTypes.DEFAULT_TYPE):
-    logging.info("💪 执行每小时存款/贷款利息任务")
-
+    pass
 
 async def ten_minute_master_job(context: ContextTypes.DEFAULT_TYPE):
     await speaking_to(context)
@@ -26,7 +24,6 @@ async def ten_minute_master_job(context: ContextTypes.DEFAULT_TYPE):
 async def five_minute_master_job(bot):
     # 管家
     await auto_farm_tasks(bot)
-
 
 #  系统发送红包   #
 async def system_packet_job(context: ContextTypes.DEFAULT_TYPE):

@@ -143,69 +143,6 @@ async def rob_for_money(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-@register_command("劫色")
-@feature_required(FEATURE_FRIENDS)
-async def rob_for_charm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.reply_to_message:
-        return await safe_reply(
-            update, context, "你劫色空气啊，要回复一个人才能开始行动！"
-        )
-
-    attacker = update.effective_user
-    target = update.message.reply_to_message.from_user
-    chat_id = str(update.effective_chat.id)
-    attacker_id = str(attacker.id)
-    target_id = str(target.id)
-
-    name = "劫色"
-    on_cd, remain = is_on_cooldown(chat_id, attacker_id, name, cooldown_seconds=120)
-    if on_cd:
-        return await safe_reply(
-            update, context, f"⌛ {name }冷却中，请 {remain} 秒后再试。"
-        )
-
-    if attacker_id == target_id:
-        return await safe_reply(update, context, "你连自己都不放过？禁止自劫色！")
-
-    attacker_data = get_user_data(chat_id, attacker_id)
-    target_data = get_user_data(chat_id, target_id)
-
-    if attacker_data.get("stamina", 100) <= 0:
-        return await safe_reply(update, context, "💤 你已经精疲力尽，无法劫色！")
-
-    if attacker_data.get("charm", 60) < 5:
-        return await safe_reply(update, context, "💔 你的魅力太低了，劫色还没开始就结束了。")
-
-    if target_data.get("charm", 60) <= 0:
-        return await safe_reply(update, context, f"🙃 {target.full_name} 魅力见底，劫了个寂寞。")
-
-    # 先扣除行动消耗
-    attacker_data["stamina"] = max(0, attacker_data.get("stamina", 100) - 1)
-    attacker_data["charm"] = max(0, attacker_data.get("charm", 60) - 5)
-
-    # 劫色成功后会转移目标魅力
-    if calculate_success(attacker_data.get("luck", 100), 0.25):
-        target_charm = target_data.get("charm", 60)
-        stolen_charm = random.randint(5, 15)
-        stolen_charm = min(stolen_charm, target_charm)
-
-        attacker_data["charm"] = attacker_data.get("charm", 60) + stolen_charm
-        target_data["charm"] = max(0, target_charm - stolen_charm)
-        target_data["luck"] = max(0, target_data.get("luck", 100) - 3)
-
-        save_user_data(chat_id, attacker_id, attacker_data)
-        save_user_data(chat_id, target_id, target_data)
-
-        return await safe_reply(
-            update,
-            context,
-            f"😈 你对 {target.full_name} 劫色成功，掠走 {stolen_charm} 点魅力，体力 -1，魅力净变化 {stolen_charm - 5:+d}。",
-        )
-
-    save_user_data(chat_id, attacker_id, attacker_data)
-    return await safe_reply(update, context, "❌ 劫色失败！你灰溜溜地跑了，体力 -1，魅力 -5。")
-
-
 @register_command("求包养")
 @feature_required(FEATURE_FRIENDS)
 async def sex_for_money(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -312,6 +249,5 @@ async def free_for_money(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def register_work_handlers(app):
     app.add_handler(CommandHandler("work", work_for_money))
     app.add_handler(CommandHandler("rob", rob_for_money))
-    app.add_handler(CommandHandler("robsex", rob_for_charm))
     app.add_handler(CommandHandler("sex", sex_for_money))
     app.add_handler(CommandHandler("getfree", free_for_money))
