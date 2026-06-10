@@ -478,50 +478,47 @@ def _build_username_new(keyword: str, count=50) -> list[str]:
 
     return candidates[:count]
 
-def get_structure(s: str):
-    if not s:
-        return []
+def get_pattern(s: str):
+    mapping = {}
+    pattern = []
 
-    result = []
-    current = s[0]
-    count = 1
+    for ch in s:
+        if ch not in mapping:
+            mapping[ch] = len(mapping)
+        pattern.append(mapping[ch])
 
-    for ch in s[1:]:
-        if ch == current:
-            count += 1
-        else:
-            result.append(count)
-            current = ch
-            count = 1
-
-    result.append(count)
-    return result
+    return pattern
 
 def generate_by_structure(s: str, count=50):
-    structure = get_structure(s)
-    letters = string.ascii_lowercase
+    pattern = get_pattern(s)
+    letters = string.ascii_lowercase + string.digits
 
+    group_count = max(pattern) + 1
     results = []
 
-    def dfs(i, used, path):
-        if i == len(structure):
-            results.append("".join(path))
+    def dfs(group_idx, used, group_chars):
+        if group_idx == group_count:
+            # 根据模式还原字符串
+            result = "".join(group_chars[idx] for idx in pattern)
+            results.append(result)
             return
-
-        length = structure[i]  # ✔ 一定是 int
 
         for ch in letters:
             if ch in used:
                 continue
 
             dfs(
-                i + 1,
+                group_idx + 1,
                 used | {ch},
-                path + [ch * length]
+                group_chars + [ch]
             )
+
+            if len(results) >= count:
+                return
 
     dfs(0, set(), [])
     return results[:count]
+
 
 async def _check_username_available(context: ContextTypes.DEFAULT_TYPE, username: str) -> bool:
     try:
