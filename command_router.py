@@ -80,7 +80,6 @@ def _feature_for_handler(handler) -> Optional[str]:
         ("menu", "group"),
         ("slave.work_game", "game_hub"),
         ("slave.action_handler", "game_hub"),
-        ("slave.kidnap", "game_hub"),
         ("slave.guard_system", "game_hub"),
     ]
     for prefix, feature in module_feature_map:

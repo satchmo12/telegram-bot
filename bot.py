@@ -606,7 +606,8 @@ def _build_start_panel_rows(
 def _build_start_welcome_text(bot_name: str) -> str:
     safe_name = html.escape(str(bot_name or "机器人"))
     if str(bot_name or "").strip() == MASTER_BOT_NAME:
-        return f"👋 欢迎使用 {safe_name}\n""用户名出售 @woaini555  @e6web @fj618 @iabc6 @iabc7 @chihe2 @bcifa @bcifb @bciff\n"
+        return f"👋 欢迎使用 {safe_name}\n"
+    # "用户名出售 @woaini555  @e6web @fj618 @iabc6 @iabc7 @chihe2 @bcifa @bcifb @bciff\n"
 
     if MASTER_BOT_USERNAME:
         master_label = (
