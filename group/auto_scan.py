@@ -1067,10 +1067,7 @@ async def dao_username_candidates(update: Update, context: ContextTypes.DEFAULT_
                 context,
                 "数量必须是数字"
             )
-
-
-    # candidates = _build_username_new(keyword)
-    
+            
     if _contains_chinese(keyword):
         candidates = _build_username_new(keyword, count)
     else:
@@ -1127,7 +1124,8 @@ async def dao_username_candidates(update: Update, context: ContextTypes.DEFAULT_
     await safe_reply(update, context, msg, auto_delete_seconds=0) 
 
 def generate_candidates(keyword, count=50):
-    chars = string.ascii_lowercase + string.digits
+    chars = string.ascii_lowercase 
+    # + string.digits 数字并不受欢迎
     target_len = max(5, len(keyword))
 
     result = set()
