@@ -594,19 +594,20 @@ def _build_start_panel_rows(
     if "group" in enabled:
         rows.append([InlineKeyboardButton("👥群配置", callback_data="gcfg:list")])
         
-   
-    rows.append(
-        [
-            InlineKeyboardButton("🫙扔瓶子", callback_data="publish:publish"),
-            InlineKeyboardButton("🔍捞瓶子", callback_data="publish:channel_message")    
-        ]
-    )
+    if bot_name == MASTER_BOT_NAME:
+        rows.append(
+            [
+                InlineKeyboardButton("上传资源", callback_data="publish:publish"),
+                InlineKeyboardButton("我要看片", callback_data="publish:channel_message")    
+            ]
+        )
+        
     return rows
 
 def _build_start_welcome_text(bot_name: str) -> str:
     safe_name = html.escape(str(bot_name or "机器人"))
     if str(bot_name or "").strip() == MASTER_BOT_NAME:
-        return f"👋 欢迎使用 {safe_name}\n"
+        return f"👋 欢迎使用 {safe_name}\n 漂流瓶正在测试中 @qplpbot"
     # "用户名出售 @woaini555  @e6web @fj618 @iabc6 @iabc7 @chihe2 @bcifa @bcifb @bciff\n"
 
     if MASTER_BOT_USERNAME:
@@ -615,7 +616,7 @@ def _build_start_welcome_text(bot_name: str) -> str:
         )
     else:
         master_label = html.escape(MASTER_BOT_NAME)
-    return f"👋 欢迎使用 {safe_name} 克隆自 {master_label}\n"
+    return f"👋 欢迎使用 {safe_name} 克隆自 {master_label}\n 漂流瓶正在测试中 @qplpbot \n 克隆机器人，看片请点击 {master_label}"
 
 
 async def clear_login_prompt_on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):

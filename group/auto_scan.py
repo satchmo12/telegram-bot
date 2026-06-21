@@ -24,13 +24,15 @@ from utils import (
 
 import datetime
 from pathlib import Path
+import aiohttp
+
 
 import asyncio
 from playwright.async_api import async_playwright
 import string
 from telethon.errors import FloodWaitError
 from telethon.tl.functions.account import CheckUsernameRequest
-
+import itertools
 
 OUTPUT_FILE = "found.txt"
 _USERNAME_CHECK_COOLDOWN: dict[int, float] = {}
@@ -39,6 +41,7 @@ INPUT_FILE = "data/found.txt"
 SCAN_STATE_FILE = "data/scan_state.json"
 AUTO_SCAN_CHAT_ID = 6085551760
 MASTER_BOT_NAME = str(os.getenv("MASTER_BOT_NAME", "")).strip()
+CONCURRENCY = 300   # 可以根据机器调 100~500
 
 def load_usernames():
     path = Path(INPUT_FILE)
@@ -258,6 +261,30 @@ async def check_username(page, username: str):
             print("状态为 Unavailable")
 
     return username, not is_taken
+
+async def check(session, sem, username):
+    url = f"https://fragment.com/?query={username}"
+
+    async with sem:
+        try:
+            async with session.get(url, timeout=10) as resp:
+
+                if resp.status != 200:
+                    return username, False
+
+                html = await resp.text()
+
+                # 只匹配真正的状态标签
+                is_taken = 'tm-status-unavail">Unavailable<' in html
+
+                return username,  is_taken
+
+        except Exception as e:
+            print(f"{username}: {e}")
+            return username, False
+        
+        
+
 
 async def worker(browser, usernames):
     page = await browser.new_page()
@@ -1072,7 +1099,7 @@ async def dao_username_candidates(update: Update, context: ContextTypes.DEFAULT_
         candidates = _build_username_new(keyword, count)
     else:
         if len(keyword) < 5:
-            candidates = generate_candidates(keyword, count)
+            candidates = generate_all_candidates(keyword)
         else:
             candidates = generate_by_structure(keyword, count)
         
@@ -1085,34 +1112,42 @@ async def dao_username_candidates(update: Update, context: ContextTypes.DEFAULT_
 
     print(f"加载 {len(usernames)} 个用户名")
 
-    concurrency = 5
+    sem = asyncio.Semaphore(CONCURRENCY)
 
-    chunks = [
-        usernames[i::concurrency]
-        for i in range(concurrency)
-    ]
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True
-        )
-
-        tasks = [
-            worker(browser, chunk)
-            for chunk in chunks
-        ]
-
-        batches = await asyncio.gather(*tasks)
-
-        await browser.close()
+    connector = aiohttp.TCPConnector(limit=CONCURRENCY)
 
     found_usernames = []
+     
+    async with aiohttp.ClientSession(connector=connector) as session:
 
-    for batch in batches:
-        for username, found in batch:
-            if not found:
-                found_usernames.append(username)
+        found_count = 0
+        tasks = []
 
+        for u in usernames:
+            tasks.append(check(session, sem, u))
+
+            # 分批执行，避免 80万 task 占内存
+            if len(tasks) >= 2000:
+                results = await asyncio.gather(*tasks)
+                tasks = []
+
+                for username, ok in results:
+                    if ok:
+                
+                        found_usernames.append(username)
+                        found_count += 1
+
+                print("批次完成，当前命中:", found_count)
+
+        # 处理剩余
+        if tasks:
+            results = await asyncio.gather(*tasks)
+
+            for username, ok in results:
+                if ok:
+                    found_usernames.append(username)
+                    found_count += 1
+        
     # 返回结果
     msg = (
         f"🔎 关键词：{keyword}\n"
@@ -1123,39 +1158,27 @@ async def dao_username_candidates(update: Update, context: ContextTypes.DEFAULT_
 
     await safe_reply(update, context, msg, auto_delete_seconds=0) 
 
-def generate_candidates(keyword, count=50):
-    chars = string.ascii_lowercase 
-    # + string.digits 数字并不受欢迎
+def generate_all_candidates(keyword):
+    chars = string.ascii_lowercase
+
     target_len = max(5, len(keyword))
+    remain = target_len - len(keyword)
 
-    result = set()
-    last_size = 0
-    stuck_count = 0
+    results = set()
 
-    while len(result) < count:
-        remain = target_len - len(keyword)
+    # 所有前后分配方式
+    for left_len in range(remain + 1):
+        right_len = remain - left_len
 
-        # 随机分配前后补位数量
-        left = random.randint(0, remain)
-        right = remain - left
+        left_space = itertools.product(chars, repeat=left_len)
+        right_space = itertools.product(chars, repeat=right_len)
 
-        prefix = ''.join(random.choices(chars, k=left))
-        suffix = ''.join(random.choices(chars, k=right))
+        for left in left_space:
+            for right in right_space:
+                s = ''.join(left) + keyword + ''.join(right)
+                results.add(s)
 
-        result.add(prefix + keyword + suffix)
-        
-        # 检查是否有增长
-        if len(result) == last_size:
-            stuck_count += 1
-        else:
-            last_size = len(result)
-            stuck_count = 0
-
-        # 连续1000次没有新增结果，认为已穷尽
-        if stuck_count >= 1000:
-            break
-
-    return list(result)
+    return list(results)
     
 
 def parse_duration(arg: str) -> datetime.timedelta:

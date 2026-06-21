@@ -375,7 +375,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
 
         if not available_posts:
-            await query.message.reply_text("没有更多瓶子了")
+            await query.message.reply_text("没有更多资源了")
             return
 
         post = random.choice(available_posts)
@@ -400,7 +400,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("✅ 已更新", show_alert=False)
         
         
-        help_text = "📣 请发送您要的内容。\n\n支持文字、图片、视频等消息。"
+        help_text = "📣 请发送您要的内容。\n\n支持文字、图片、视频等消息。 点击返回停止发送"
     
         context.user_data["post_no_name"] = enabled
         
@@ -419,7 +419,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_info = history_data.get(str(user_id))
 
         if not user_info:
-            await query.message.reply_text("请先捞一个瓶子")
+            await query.message.reply_text("请先请求一个资源")
             return
 
         history = user_info["history"]
@@ -445,7 +445,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
 
             if not available_posts:
-                await query.message.reply_text("没有更多瓶子了")
+                await query.message.reply_text("没有更多资源了")
                 return
 
             post = random.choice(available_posts)
@@ -622,7 +622,7 @@ def create_post_keyboard(enabled: bool):
             #     callback_data=f"{CALLBACK_PREFIX}:global_ad_toggle",
             # ),
             InlineKeyboardButton(
-                "✅ 继续扔",
+                "✅ 继续发",
                 callback_data="publish:publish",
             ),
             InlineKeyboardButton(
@@ -671,7 +671,7 @@ async def handle_wall_publish(update, context):
         print("投稿失败:", e)
         await msg.reply_text(f"❌ 发送失败：{e}")
     
-    context.user_data["waiting_post"] = False
+    # context.user_data["waiting_post"] = False
         
     # await publish_message(update, context)
    
@@ -808,10 +808,10 @@ async def send_bottle(
                 "⬅️ 上一条",
                 callback_data="publish:bottle_prev"
             ),
-            InlineKeyboardButton(
-                "👤 添加好友",
-                callback_data=f"publish:add_friend:{post['user_id']}"
-            ),
+            # InlineKeyboardButton(
+            #     "👤 添加好友",
+            #     callback_data=f"publish:add_friend:{post['user_id']}"
+            # ),
             InlineKeyboardButton(
                 "➡️ 下一条",
                 callback_data="publish:bottle_next"
