@@ -19,6 +19,7 @@ from utils import (
     GROUP_LIST_FILE,
     _resolve_json_path,
     get_runtime_bot_name,
+    is_super_admin,
     load_json,
     safe_reply,
     save_chat_message,
@@ -913,7 +914,7 @@ async def handle_private_dialog_callback(
 
 @register_command("广播")
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != get_owner_id(context):
+    if update.effective_user.id != get_owner_id(context) and not is_super_admin(update.effective_user.id):
         return await safe_reply(update, context, "⚠️ 仅管理员可用")
 
     if not update.message.reply_to_message:

@@ -9,7 +9,7 @@ os.makedirs(PHOTO_SAVE_DIR, exist_ok=True)
 
 async def save_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 为防止磁盘爆满，关闭此功能
-    return
+    # return
     
     if not update.message or not update.message.photo:
         return
