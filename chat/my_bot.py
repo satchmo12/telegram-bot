@@ -1298,7 +1298,8 @@ async def speaking_to(context: ContextTypes.DEFAULT_TYPE):
         runtime_chat_key = get_runtime_chat_key(context, str(chat_id))
         current_minute = int(now_ts // 60)
         offset_min = _active_speak_offset_min(runtime_chat_key, interval_min)
-
+        title = cfg.get("title", "Unknown")
+        
         # 确定性错峰：按分钟槽位分散不同机器人/群的触发时机
         if current_minute % interval_min != offset_min:
             continue
@@ -1326,7 +1327,8 @@ async def speaking_to(context: ContextTypes.DEFAULT_TYPE):
             ):
                 _set_group_bot_muted_flag(str(chat_id), True)
             bot_name = get_runtime_bot_name() or getattr(context.bot, "username", "")
-            print(f"⚠️ 主动说话发送失败: bot={bot_name} chat={chat_id}, {e}")
+            
+            print(f"⚠️ 主动说话发送失败: bot={bot_name} chat={chat_id}, title={title} {e}")
 
 
 def _parse_fixed_slots(raw: str) -> list[str]:

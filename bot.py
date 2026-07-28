@@ -692,6 +692,7 @@ def create_app(bot_cfg: dict):
     app.add_handler(CommandHandler("features", features_command))
     app.add_handler(CommandHandler("intro", features_command))
     app.add_handler(CommandHandler("leave", leave_group_command))
+    app.add_handler(CommandHandler("restoregroups", restore_group_configs_command))
     
     app.add_handler(CommandHandler("show", show_menu))
     app.add_handler(CommandHandler("hide", hide_menu))
@@ -796,10 +797,10 @@ async def set_bot_commands(app):
     commands.append(BotCommand("help", "命令帮助"))
     if "group" in enabled:
         commands.append(BotCommand("group", "群设置"))
-    # if "channel" in enabled:
-    #     commands.append(BotCommand("channel_config", "频道设置"))
-    # if "game_hub" in enabled:
-    #     commands.append(BotCommand("start_menu", "游戏菜单"))
+    if "channel" in enabled:
+        commands.append(BotCommand("channel_config", "频道设置"))
+    if "game_hub" in enabled:
+        commands.append(BotCommand("start_menu", "游戏菜单"))
     await app.bot.set_my_commands(commands)
 
 
@@ -903,6 +904,45 @@ async def leave_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"退出群失败: {e}")
 
 
+async def restore_group_configs_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    """将当前机器人 groups_old.json 中已有群的配置合并回 groups.json。"""
+    user = update.effective_user
+    if not user or not is_super_admin(user.id):
+        return
+
+    old_groups = load_json("data/groups_old.json")
+    groups = load_json(GROUPS_FILE)
+    if not isinstance(old_groups, dict):
+        await update.message.reply_text("未找到有效的 groups_old.json 配置。")
+        return
+    if not isinstance(groups, dict):
+        await update.message.reply_text("未找到有效的 groups.json 配置。")
+        return
+
+    updated_count = 0
+    for chat_id, old_cfg in old_groups.items():
+        # 只迁移 groups.json 已存在的群，绝不从旧文件新增群记录。
+        current_cfg = groups.get(str(chat_id))
+        if not isinstance(current_cfg, dict) or not isinstance(old_cfg, dict):
+            continue
+
+        # 仅覆盖当前配置中已有的字段，旧文件独有的字段也不新增；同时保留
+        # 当前机器人实际在群状态，避免旧备份让已离群的群重新显示在面板。
+        merged_cfg = current_cfg.copy()
+        for key, value in old_cfg.items():
+            if key in current_cfg and key not in {"bot_in_group", "bot_muted"}:
+                merged_cfg[key] = value
+        if merged_cfg != current_cfg:
+            groups[str(chat_id)] = merged_cfg
+            updated_count += 1
+
+    if updated_count:
+        save_json(GROUPS_FILE, groups)
+    await update.message.reply_text(f"✅ 已迁移 {updated_count} 个现有群的旧配置。")
+
+
 async def post_init_setup(app):
     set_runtime_bot_name(app.bot_data.get("name", ""))
     write_startup_debug(f"[post_init_setup] bot={app.bot_data.get('name')} post-init start")
@@ -932,7 +972,9 @@ async def main():
                 await app.bot.get_me()
                 await post_init_setup(app)
                 await app.start()
-                await app.updater.start_polling()
+                # Telegram 默认不会推送 chat_member 更新；显式订阅全部类型，确保
+                # my_chat_member（机器人被踢出/重新加入群）能更新 groups.json。
+                await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
                 register_running_app(app)
                 write_startup_debug(
                     f"[main] started bot={app.bot_data.get('name')} username=@{app.bot.username}"

@@ -1,8 +1,10 @@
 import os
 import time
 import json
+from typing import Optional
 from telegram import Update
 from telegram.ext import CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.helpers import mention_html
 from command_router import register_command
 from info.economy import ensure_user_exists
 from utils import get_group_whitelist, is_admin, is_super_admin, load_json, save_json, safe_reply
@@ -298,6 +300,187 @@ async def merge_group_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"更新文件数：{merged_files}\n"
         f"新建文件数：{created_files}\n"
         f"新增用户数：{merged_users}",
+    )
+
+
+def _inactive_days_from_args(args) -> Optional[int]:
+    if len(args or []) != 1:
+        return None
+    try:
+        days = int(args[0])
+    except (TypeError, ValueError):
+        return None
+    return days if 1 <= days <= 3650 else None
+
+
+async def _can_manage_inactive_members(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """仅允许群主或超级管理员执行僵尸号操作。"""
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or not user or chat.type not in {"group", "supergroup"}:
+        return False
+    if is_super_admin(user.id):
+        return True
+    try:
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        return member.status in {"creator", "owner"}
+    except Exception:
+        return False
+
+
+def _last_active_at(info: dict) -> int:
+    """兼容早期记录；未发言成员以入群时间作为可追踪起点。"""
+    try:
+        return int(info.get("last_seen", 0) or info.get("join_time", 0) or 0)
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+
+async def _find_inactive_members(
+    chat_id: int,
+    days: int,
+    context: ContextTypes.DEFAULT_TYPE,
+    on_inactive_batch=None,
+) -> list[tuple[int, dict]]:
+    """只返回仍在群内且非管理员/机器人的已记录成员。"""
+    cutoff = int(time.time()) - days * 24 * 60 * 60
+    users = load_users(chat_id)
+    inactive = []
+    for user_id, info in users.items():
+        if not isinstance(info, dict) or _last_active_at(info) > cutoff:
+            continue
+        try:
+            numeric_user_id = int(user_id)
+        except (TypeError, ValueError):
+            continue
+        if is_super_admin(numeric_user_id):
+            continue
+        try:
+            member = await context.bot.get_chat_member(chat_id, numeric_user_id)
+        except Exception:
+            # 已离群或无法查询的账号不在扫描和清理范围内。
+            continue
+        if getattr(member.user, "is_bot", False):
+            continue
+        if member.status not in {"member", "restricted"}:
+            # 管理员、群主以及不在群内的用户均不处理。
+            continue
+        inactive.append((numeric_user_id, info))
+        # 扫描过程中每凑满 10 人立即输出，避免成员较多时长时间没有反馈。
+        if on_inactive_batch and len(inactive) % 10 == 0:
+            await on_inactive_batch(inactive[-10:])
+    return inactive
+
+
+def _inactive_mentions(members: list[tuple[int, dict]]) -> list[str]:
+    mentions = []
+    for user_id, info in members:
+        name = str(info.get("full_name") or info.get("username") or user_id)
+        mentions.append(mention_html(user_id, name))
+    return mentions
+
+
+@register_command("扫描僵尸号", "scaninactive")
+async def scan_inactive_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """扫描指定天数内未发言、且仍在群内的已记录成员。"""
+    chat = update.effective_chat
+    days = _inactive_days_from_args(context.args)
+    if not chat or chat.type not in {"group", "supergroup"}:
+        return await safe_reply(update, context, "请在群组中使用此命令。")
+    if not await _can_manage_inactive_members(update, context):
+        return await safe_reply(update, context, "❌ 仅群主或超级管理员可使用。")
+    if days is None:
+        return await safe_reply(
+            update,
+            context,
+            "用法：扫描僵尸号 天数\n例如：扫描僵尸号 30\n"
+            "隐私模式下请使用：/scaninactive 30",
+        )
+
+    await safe_reply(update, context, f"🔎 开始扫描近 {days} 天未发言成员，请稍候…")
+
+    async def send_inactive_batch(batch: list[tuple[int, dict]]):
+        await safe_reply(
+            update,
+            context,
+            "🔎 扫描到 10 位符合条件的成员：\n"
+            + " ".join(_inactive_mentions(batch)),
+            html=True,
+        )
+
+    inactive = await _find_inactive_members(
+        chat.id, days, context, on_inactive_batch=send_inactive_batch
+    )
+    if not inactive:
+        return await safe_reply(
+            update, context, f"✅ 未发现连续 {days} 天未发言的已记录群成员。"
+        )
+
+    # 前面的整批已经实时发送，仅补发最后不足 10 人的一批。
+    remaining_count = len(inactive) % 10
+    if remaining_count:
+        await safe_reply(
+            update,
+            context,
+            f"🔎 扫描结束，最后 {remaining_count} 位符合条件的成员：\n"
+            + " ".join(_inactive_mentions(inactive[-remaining_count:])),
+            html=True,
+        )
+    await safe_reply(
+        update,
+        context,
+        f"✅ 扫描完成：共发现 {len(inactive)} 位连续 {days} 天未发言的成员。",
+    )
+
+
+@register_command("清理僵尸号", "cleaninactive")
+async def clean_inactive_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """移出指定天数内未发言的已记录普通成员。"""
+    chat = update.effective_chat
+    days = _inactive_days_from_args(context.args)
+    if not chat or chat.type not in {"group", "supergroup"}:
+        return await safe_reply(update, context, "请在群组中使用此命令。")
+    if not await _can_manage_inactive_members(update, context):
+        return await safe_reply(update, context, "❌ 仅群主或超级管理员可使用。")
+    if days is None:
+        return await safe_reply(
+            update,
+            context,
+            "用法：清理僵尸号 天数\n例如：清理僵尸号 30\n"
+            "隐私模式下请使用：/cleaninactive 30",
+        )
+
+    try:
+        bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
+        if not getattr(bot_member, "can_restrict_members", False):
+            return await safe_reply(update, context, "❌ 机器人没有移除成员权限。")
+    except Exception:
+        return await safe_reply(update, context, "❌ 无法确认机器人是否拥有移除成员权限。")
+
+    await safe_reply(update, context, f"🧹 开始核对近 {days} 天未发言成员，请稍候…")
+    inactive = await _find_inactive_members(chat.id, days, context)
+    if not inactive:
+        return await safe_reply(
+            update, context, f"✅ 没有可清理的连续 {days} 天未发言成员。"
+        )
+
+    removed = 0
+    failed = 0
+    for user_id, _ in inactive:
+        try:
+            # ban 后立即 unban 是 Telegram 的“踢出群”操作，用户仍可通过邀请链接再次加入。
+            await context.bot.ban_chat_member(chat.id, user_id)
+            await context.bot.unban_chat_member(chat.id, user_id, only_if_banned=True)
+            removed += 1
+        except Exception:
+            failed += 1
+
+    await safe_reply(
+        update,
+        context,
+        f"🧹 清理完成：已移出 {removed} 人，失败 {failed} 人（扫描条件：连续 {days} 天未发言）。",
     )
 
 

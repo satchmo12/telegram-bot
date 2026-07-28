@@ -24,12 +24,13 @@ def register_group_handlers(app):
     # 这样在运行中开启 group 后，无需重启即可立即使用群配置。
     register_group_setting_handlers(app)
 
+    # 成员状态更新用于维护 groups.json，不能依赖群功能开关；否则关闭后再
+    # 被踢出群时，机器人不会收到处理该更新的 handler，面板会保留过期群组。
+    register_group_logger_handlers(app)
+
     if not is_feature_enabled(app, "group"):
         return
 
-    # 机器人在群内状态跟踪（被踢/退出/重新加入）
-    register_group_logger_handlers(app)
-    
     register_auto_scan_handlers(app)
 
     # 导航与群核心功能

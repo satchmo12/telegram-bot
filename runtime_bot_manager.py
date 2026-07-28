@@ -56,7 +56,11 @@ async def start_bot(config: dict) -> tuple[bool, str]:
         await app.bot.get_me()
         await POST_INIT_HOOK(app)
         await app.start()
-        await app.updater.start_polling()
+        # Telegram 默认不会推送 chat_member 更新；显式订阅全部类型，确保
+        # my_chat_member（机器人被踢出/重新加入群）能更新 groups.json。
+        from telegram import Update
+
+        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
         register_running_app(app)
         return True, f"✅ 已启动机器人：{name}"
     except InvalidToken:
