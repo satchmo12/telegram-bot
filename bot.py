@@ -9,11 +9,15 @@ from datetime import datetime
 from datetime import time
 from typing import Optional
 from dotenv import load_dotenv
+
+from customer.customer_qa import handle_customer_qa, handle_business_connection
+from tool.utils.update_helper import get_message
 load_dotenv(override=True)
 
 from telegram import InlineQueryResultCachedPhoto, InlineQueryResultPhoto, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import (
     ApplicationBuilder,
+    BusinessConnectionHandler,
     MessageHandler,
     CommandHandler,
     ApplicationHandlerStop,
@@ -277,6 +281,10 @@ def bind_runtime_bot_context(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def runtime_context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    
+    # print("=" * 80)
+    # print(update.to_dict())
+    
     bind_runtime_bot_context(context)
 
 
@@ -334,8 +342,14 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
 
   
     # ()
-    msg = update.message
+    # msg = update.message
+    msg = get_message(update)
+
+    if not msg:
+        return
+
     if msg:
+        print(msg)
         if msg.text:
             matched_command = get_matched_command(msg.text)
             if matched_command:
@@ -388,7 +402,12 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
     # 主机器人私聊 AI：开启后不再转发给主人（关闭后才会转发）
     if await handle_gemini_ai(update, context):
         raise ApplicationHandlerStop
+    
+    # 机器人转发
     await forward_to_owner(update, context)
+    # 机器人自动回复
+    await handle_customer_qa(update, context)
+    # await forward_to_owner(update, context)
 
 
 async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -672,6 +691,8 @@ def create_app(bot_cfg: dict):
     app.bot_data["name"] = bot_name
     app.bot_data["enabled_features"] = set(bot_cfg.get("enabled_features", []))
     set_bot_owner(bot_name, owner_id)
+    
+    app.add_handler(BusinessConnectionHandler(handle_business_connection))
     app.add_handler(TypeHandler(Update, runtime_context_handler), group=-1000)
     app.add_handler(
         MessageHandler(filters.ChatType.GROUPS, block_disabled_group_messages),

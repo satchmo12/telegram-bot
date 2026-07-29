@@ -837,4 +837,4 @@ def _load_cannel_message() -> list:
 
 def register_publish_setting_handlers(app):
     app.add_handler( CallbackQueryHandler( _handle_callback, pattern=r"^publish:.+"))
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (~filters.COMMAND),_handle_text_input), group=10)
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (~filters.COMMAND) & ~filters.UpdateType.BUSINESS_MESSAGE ,_handle_text_input), group=10)

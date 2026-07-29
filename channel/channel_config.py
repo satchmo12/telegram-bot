@@ -2144,7 +2144,7 @@ async def handle_channel_config_text(update: Update, context: ContextTypes.DEFAU
 def register_channel_config_handlers(app):
     app.add_handler(CallbackQueryHandler(_handle_callback, pattern=f"^{CALLBACK_PREFIX}:.+"))
     app.add_handler(
-        MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & (~filters.COMMAND), _handle_text_input)
+        MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & (~filters.COMMAND) & ~filters.UpdateType.BUSINESS_MESSAGE , _handle_text_input)
     )
     app.add_handler(CommandHandler("channel_config", channel_config_entry))
     app.add_handler(CommandHandler("subscription", subscription_status))
