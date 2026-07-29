@@ -9,6 +9,7 @@ from telegram.ext import (
 )
 
 from command_router import register_command
+from tool.utils.update_helper import get_message
 from utils import load_json, save_json, safe_reply
 
 
@@ -57,6 +58,15 @@ def get_owner_by_business_connection(connection_id):
 
     return info.get("owner_id")
 
+def get_business_connection_id(owner_id: str):
+    data = load_business_connections()
+    for connection_id, info in data.items():
+        if info.get("owner_id") == str(owner_id):
+            return connection_id
+
+    return None
+
+
 # ==========================
 # 文本匹配
 # ==========================
@@ -101,12 +111,7 @@ def find_best_match(text, questions):
 # 获取当前消息
 # ==========================
 
-def get_message(update: Update):
 
-    return (
-        update.message
-        or getattr(update, "business_message", None)
-    )
 
 
 
@@ -119,12 +124,10 @@ async def handle_customer_qa(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    print("come here=====")
     msg = get_message(update)
     
     if not msg or not msg.text:
         return
-
 
     # 只处理私聊
     if msg.chat.type != "private":

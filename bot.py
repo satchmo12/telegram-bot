@@ -281,10 +281,6 @@ def bind_runtime_bot_context(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def runtime_context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    
-    # print("=" * 80)
-    # print(update.to_dict())
-    
     bind_runtime_bot_context(context)
 
 
@@ -324,11 +320,13 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
         f"user_id={getattr(user, 'id', None)} "
         f"text={getattr(update.message, 'text', None)!r}"
     )
-    print(
-        f"[private_forward_router] chat_type={getattr(chat, 'type', None)} "
-        f"user_id={getattr(user, 'id', None)} "
-        f"text={getattr(update.message, 'text', None)!r}"
-    )
+    
+    # print(
+    #     f"[private_forward_router] chat_type={getattr(chat, 'type', None)} "
+    #     f"user_id={getattr(user, 'id', None)} "
+    #     f"text={getattr(update.message, 'text', None)!r}"
+    # )
+    
     if (
         str(context.application.bot_data.get("name", "")).strip() == MASTER_BOT_NAME
         and (
@@ -349,7 +347,6 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     if msg:
-        print(msg)
         if msg.text:
             matched_command = get_matched_command(msg.text)
             if matched_command:
