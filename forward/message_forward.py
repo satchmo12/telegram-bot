@@ -1,12 +1,13 @@
 # message_forward.py
 # 用户私聊机器人，机器转发用户私聊信息，管理员通过回复把消息回复给用户
+import logging
 from functools import wraps
 from typing import Optional
 import time
 from datetime import datetime
 from html import escape
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ApplicationHandlerStop, ContextTypes
+from telegram.ext import ApplicationHandlerStop, ContextTypes, MessageHandler, filters
 import os
 import asyncio
 
@@ -36,6 +37,7 @@ PRIVATE_FORWARD_DEBUG_FILE = os.path.join("data", "private_forward_debug.log")
 PRIVATE_FORWARD_DEBUG_ENABLED = os.getenv("PRIVATE_FORWARD_DEBUG", "").strip() == "1"
 
 GROUP_LOG_DIR = "data/user_logs"
+logger = logging.getLogger(__name__)
 
 PRIVATE_CONFIG_COMMANDS = {
     "群配置",
@@ -1212,3 +1214,68 @@ def render_msg(m):
 
     # fallback
     return f"[{msg_type}]"
+
+@register_command("广播模式")
+async def cmd_broadcast_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != get_owner_id(context) and not is_super_admin(update.effective_user.id):
+        return
+
+    args = context.args
+    if not args:
+        return await safe_reply(
+            update,
+            context,
+            "用法：\n广播模式 -100xxxxxxxxxx"
+        )
+
+    try:
+        chat_id = int(args[0])
+    except ValueError:
+        return await safe_reply(update, context, "❌ 群ID格式错误")
+
+    context.user_data["broadcast_mode"] = True
+    context.user_data["broadcast_chat"] = chat_id
+
+    await safe_reply(
+        update,
+        context,
+        f"✅ 已开启广播模式\n目标：{chat_id}"
+    )
+
+@register_command("关闭广播模式")
+async def cmd_close_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("broadcast_mode", None)
+    context.user_data.pop("broadcast_chat", None)
+
+    await safe_reply(update, context, "✅ 已退出广播模式")
+
+async def broadcast_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("broadcast_mode"):
+        return
+
+    # 不转发 Telegram 命令或通过 command_router 注册的中文命令（例如“撤回”）。
+    text = (update.effective_message.text or "").strip()
+    if text.startswith("/") or get_matched_command(text):
+        return
+
+    target = context.user_data.get("broadcast_chat")
+    if not target:
+        return
+
+    try:
+        await context.bot.copy_message(
+            chat_id=target,
+            from_chat_id=update.effective_chat.id,
+            message_id=update.message.message_id,
+        )
+    except Exception as e:
+        logger.exception(e)
+        await safe_reply(update, context, f"发送失败：{e}")
+
+
+def register_message_forward_handlers(app):
+    app.add_handler(
+       # 在统一 message_router（group=999）之前处理，避免占用其他默认 group 的 handler。
+       MessageHandler(filters.ALL, broadcast_mode_handler),
+       group=998,
+    )

@@ -6,7 +6,7 @@ from telegram import (
     InputStoryContentVideo,
     InputProfilePhoto,
     InputProfilePhotoStatic,
-    TimePeriod,
+    # TimePeriod,
 )
 
 from telegram.ext import CommandHandler, ContextTypes
@@ -90,8 +90,8 @@ async def handle_business_state(
 
                 content=content,
 
-                active_period=
-                    TimePeriod.DAY,
+                active_period=86400,
+                    # TimePeriod.DAY,
 
                 caption=caption or None
             )
