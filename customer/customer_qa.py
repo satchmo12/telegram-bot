@@ -134,8 +134,18 @@ async def handle_customer_qa(
         return
 
     connection_id = msg.business_connection_id
+    
+    
 
     user_id = get_owner_by_business_connection(connection_id)
+    
+    if not user_id:
+        return
+    
+    # 自己的消息不用回复
+    if msg.from_user.id == int(user_id):
+        return
+        
     text = msg.text.strip()
     data = load_customer_qa()
 

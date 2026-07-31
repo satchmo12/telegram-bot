@@ -6,7 +6,7 @@ from typing import Optional
 import time
 from datetime import datetime
 from html import escape
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Chat, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationHandlerStop, ContextTypes, MessageHandler, filters
 import os
 import asyncio
@@ -61,18 +61,6 @@ PRIVATE_CONFIG_COMMANDS = {
     "说",
     "叫",
 }
-
-
-def _debug_private_forward(message: str) -> None:
-    if not PRIVATE_FORWARD_DEBUG_ENABLED:
-        return
-    try:
-        os.makedirs(os.path.dirname(PRIVATE_FORWARD_DEBUG_FILE), exist_ok=True)
-        with open(PRIVATE_FORWARD_DEBUG_FILE, "a", encoding="utf-8") as f:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            f.write(f"{ts} {message}\n")
-    except Exception:
-        pass
 
 
 def _get_owner_runtime_state(context: ContextTypes.DEFAULT_TYPE) -> dict:
@@ -491,41 +479,29 @@ async def forward_to_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not update.message or not user:
         return
-    _debug_private_forward(
-        f"[forward_to_owner] user_id={getattr(user, 'id', None)} "
-        f"chat_id={getattr(getattr(update, 'effective_chat', None), 'id', None)} "
-        f"text={getattr(update.message, 'text', None)!r}"
-    )
+
     print(
         f"[private_forward] 收到私聊 user_id={getattr(user, 'id', None)} "
         f"chat_id={getattr(getattr(update, 'effective_chat', None), 'id', None)} "
         f"type={'text' if getattr(update.message, 'text', None) else 'media'}"
     )
     if user.id == owner_id:
-        _debug_private_forward("[forward_to_owner] skip owner self message")
         print("[private_forward] 忽略：消息来自 owner 自己")
         return  # 管理员自己发的消息不转发
 
     user_data = _load_user_data()
     uid = str(user.id)
     if user_data.get(uid, {}).get("blocked", False):
-        _debug_private_forward(f"[forward_to_owner] skip blocked uid={uid}")
         print(f"[private_forward] 忽略：用户已拉黑 uid={uid}")
         return
 
     # 忽略命令消息
     if update.message.text and update.message.text.startswith("/"):
-        _debug_private_forward(
-            f"[forward_to_owner] skip slash command text={update.message.text!r}"
-        )
         print(f"[private_forward] 忽略：slash 命令 text={update.message.text!r}")
         return
     if update.message.text:
         matched = get_matched_command(update.message.text)
         if matched in PRIVATE_CONFIG_COMMANDS:
-            _debug_private_forward(
-                f"[forward_to_owner] skip private config cmd={matched}"
-            )
             print(f"[private_forward] 忽略：命中私聊配置命令 cmd={matched}")
             return
 
@@ -536,27 +512,18 @@ async def forward_to_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=f'来自 <a href="tg://user?id={user.id}">{safe_name}</a> 的消息：',
             parse_mode="HTML",
         )
-        _debug_private_forward(
-            f"[forward_to_owner] owner notice sent owner_id={owner_id}"
-        )
         print(f"[private_forward] 已发送提示消息给主人 owner_id={owner_id}")
     except Exception as e:
-        _debug_private_forward(f"[forward_to_owner] owner notice failed error={e}")
         print(f"[private_forward] 提示消息发送失败，但继续转发正文: {e}")
 
     try:
         # 转发消息到管理员
         sent = await safe_forward_media(context.bot, owner_id, update.message)
-        _debug_private_forward(
-            f"[forward_to_owner] forward success owner_id={owner_id} "
-            f"owner_msg_id={getattr(sent, 'message_id', None)} uid={uid}"
-        )
         print(
             f"[private_forward] 已转发给主人 owner_id={owner_id} "
             f"owner_msg_id={getattr(sent, 'message_id', None)} uid={uid}"
         )
     except Exception as e:
-        _debug_private_forward(f"[forward_to_owner] forward failed error={e}")
         print(f"❌ 转发消息失败: {e}")
         await safe_reply(update, context, "⚠️ 转发消息失败，请稍后重试。")
         return
@@ -609,7 +576,6 @@ async def forward_to_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=keyboard,
         )
     except Exception as e:
-        _debug_private_forward(f"[forward_to_owner] owner panel failed error={e}")
         print(f"[private_forward] 面板发送失败，但正文已转发: {e}")
 
     # await safe_reply(update, context,"✅ 已将你的消息转发给管理员，请等待回复。")
@@ -634,15 +600,11 @@ async def reply_from_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await safe_forward_media(context.bot, target_user_id, update.message)
-        _debug_private_forward(
-            f"[reply_from_owner] success target_user_id={target_user_id} reply_msg_id={reply_msg_id}"
-        )
         print(
             f"[private_forward] owner 回复成功 target_user_id={target_user_id} "
             f"reply_msg_id={reply_msg_id}"
         )
     except Exception as e:
-        _debug_private_forward(f"[reply_from_owner] failed error={e}")
         await safe_reply(update, context, f"发送失败: {e}")
 
 
@@ -675,17 +637,11 @@ async def owner_auto_forward_in_dialog(
 
     try:
         await safe_forward_media(context.bot, int(target_uid), update.message)
-        _debug_private_forward(
-            f"[dialog_mode] owner_id={update.effective_user.id} target_uid={target_uid} success"
-        )
         print(
             f"[private_forward] 双向模式发送成功 owner_id={update.effective_user.id} "
             f"target_uid={target_uid}"
         )
     except Exception as e:
-        _debug_private_forward(
-            f"[dialog_mode] failed target_uid={target_uid} error={e}"
-        )
         await safe_reply(update, context, f"发送失败: {e}")
         raise ApplicationHandlerStop
 
@@ -1252,12 +1208,20 @@ async def cmd_close_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def broadcast_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("broadcast_mode"):
         return
+    
+     # 只处理私聊，不处理群、超级群、频道
+    if update.effective_chat.type != Chat.PRIVATE:
+        return
+    
+            # 忽略编辑后的消息
+    if update.edited_message:
+        return
 
     # 不转发 Telegram 命令或通过 command_router 注册的中文命令（例如“撤回”）。
     text = (update.effective_message.text or "").strip()
     if text.startswith("/") or get_matched_command(text):
         return
-
+    
     target = context.user_data.get("broadcast_chat")
     if not target:
         return

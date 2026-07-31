@@ -315,18 +315,6 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
     user = update.effective_user
     chat = update.effective_chat
     
-    _debug_private_forward(
-        f"[private_forward_router] bot={context.application.bot_data.get('name')} "
-        f"chat_type={getattr(chat, 'type', None)} "
-        f"user_id={getattr(user, 'id', None)} "
-        f"text={getattr(update.message, 'text', None)!r}"
-    )
-    
-    # print(
-    #     f"[private_forward_router] chat_type={getattr(chat, 'type', None)} "
-    #     f"user_id={getattr(user, 'id', None)} "
-    #     f"text={getattr(update.message, 'text', None)!r}"
-    # )
     
     if (
         str(context.application.bot_data.get("name", "")).strip() == MASTER_BOT_NAME
@@ -335,7 +323,6 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
             or isinstance(context.user_data.get(MULTI_BOT_STAGE_KEY), dict) or context.user_data.get(WAITING_POST) or context.user_data.get(REPLY_BOTTLE)
         )
     ):
-        _debug_private_forward("[private_forward_router] skip self-service stage")
         print("[private_forward_router] 忽略：主机器人当前处于自助/多机器人输入阶段")
         return
 
