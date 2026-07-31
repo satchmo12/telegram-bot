@@ -11,6 +11,7 @@ from typing import Optional
 from dotenv import load_dotenv
 
 from customer.customer_qa import handle_customer_qa, handle_business_connection
+from customer.editUserInfo import handle_media
 from tool.utils.update_helper import get_message
 load_dotenv(override=True)
 
@@ -404,6 +405,8 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
     await forward_to_owner(update, context)
     # 机器人自动回复
     await handle_customer_qa(update, context)
+    
+    await handle_media(update, context)
     # await forward_to_owner(update, context)
 
 

@@ -41,7 +41,7 @@ INPUT_FILE = "data/found.txt"
 SCAN_STATE_FILE = "data/scan_state.json"
 AUTO_SCAN_CHAT_ID = 6085551760
 MASTER_BOT_NAME = str(os.getenv("MASTER_BOT_NAME", "")).strip()
-CONCURRENCY = 300   # 可以根据机器调 100~500
+CONCURRENCY = 100   # 可以根据机器调 100~500
 
 def load_usernames():
     path = Path(INPUT_FILE)
