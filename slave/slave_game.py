@@ -26,6 +26,7 @@ MAX_INCREASE = 1000  # 单次最高涨价幅度
 MAX_WORK_HOURS = 4
 WORK_REWARD_RATE = 0.10
 ESCAPE_LIMIT = 0.25
+cooldown_seconds = 0  
 
 def _get_slave_work_info(info: dict) -> dict:
     work = info.get("work")
@@ -104,7 +105,7 @@ async def buy_slave(update: Update, context: ContextTypes.DEFAULT_TYPE):
         owner_id = None
         owner_name = "系统"
 
-    on_cd, remain = is_on_cooldown(chat_id, buyer_id, "购买", cooldown_seconds=120)
+    on_cd, remain = is_on_cooldown(chat_id, buyer_id, "购买", cooldown_seconds)
     if on_cd:
         return await safe_reply(
             update, context, f"⌛ 购买行为冷却中，请 {remain} 秒后再试。"
@@ -187,7 +188,7 @@ async def escape_slave(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await safe_reply(update, context, "💤 你当前体力不足（需要 1 点）")
 
     # 冷却判断
-    on_cd, remain = is_on_cooldown(chat_id, user_id, "逃跑", cooldown_seconds=120)
+    on_cd, remain = is_on_cooldown(chat_id, user_id, "逃跑", cooldown_seconds)
     if on_cd:
         return await safe_reply(
             update, context, f"⌛ 逃跑行为冷却中，请 {remain} 秒后再试。"
@@ -275,7 +276,7 @@ async def free_slave(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await safe_reply(update, context, f"💤 你当前体力不足（需要 1 点）")
 
     # 冷却判断 6小时
-    on_cd, remain = is_on_cooldown(chat_id, user_id, "赎身", cooldown_seconds=21600)
+    on_cd, remain = is_on_cooldown(chat_id, user_id, "赎身", cooldown_seconds)
     if on_cd:
         return await safe_reply(
             update, context, f"⌛ 赎身行为冷却中，请 {remain} 秒后再试。"
@@ -385,7 +386,7 @@ async def assign_slave_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_reply(update, context, "\n".join(lines) if lines else "没有可派遣的奴隶。")
 
 
-@register_command("结束干活", "提前结束干活")
+@register_command("结束干活", "停止工作", "提前结束干活")
 @feature_required(FEATURE_FRIENDS)
 async def finish_slave_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
     owner = update.effective_user
@@ -448,7 +449,6 @@ async def finish_slave_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
     "睡觉",
     "洗澡",
     "捶背",
-    "讲故事",
     "去裸奔",
     "挑大粪",
     "跪榴莲",
@@ -462,8 +462,8 @@ async def finish_slave_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
     "扇风",
     "端茶",
     "挠痒",
-    "写检讨",
     "陪喝酒",
+    "抽鞭子",
 )
 @feature_required(FEATURE_FRIENDS)
 async def slave_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -493,7 +493,7 @@ async def slave_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_info.get("stamina", 0) < 1:
         return await safe_reply(update, context, f"💤 你当前体力不足（需要 1 点）")
 
-    on_cd, remain = is_on_cooldown(chat_id, buyer_id, f"折磨奴隶:{slave_id}", 300)
+    on_cd, remain = is_on_cooldown(chat_id, buyer_id, f"折磨奴隶:{slave_id}", 0)
     if on_cd:
         return await safe_reply(
             update, context, f"⏳ 你刚折磨过他，请 {remain} 秒后再命令。"
@@ -511,7 +511,6 @@ async def slave_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "睡觉": f"🛏️ {target.full_name} 陪你睡了一觉，做了七次，你很满足。",
         "洗澡": f"🛁 {target.full_name} 亲自给你搓背洗澡，还撒了花瓣和香水泡泡。",
         "捶背": f"👊 {target.full_name} 用小拳拳锤你背，直锤到你骨头发麻。",
-        "讲故事": f"📖 {target.full_name} 给你讲了个18禁的睡前故事，你彻夜难眠。",
         "去裸奔": f" {target.full_name} 去裸奔，被警察抓到揍了一顿。",
         "挑大粪": f" {target.full_name} 去挑大粪，不小心弄了一身。正好被你看到",
         "跪榴莲": f" {target.full_name} 被罚跪在榴莲上，痛得直冒汗，但嘴里还忍不住流口水。",
@@ -524,8 +523,8 @@ async def slave_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "扇风": f"🪭 {target.full_name} 给你扇了一晚上的风，胳膊都快废了。",
         "端茶": f"🍵 {target.full_name} 毕恭毕敬地给你端茶倒水，姿态十分熟练。",
         "挠痒": f"🤣 {target.full_name} 被你挠得满地打滚，连连求饶。",
-        "写检讨": f"✍️ {target.full_name} 写了一万字检讨书，手都写抽筋了。",
         "陪喝酒": f"🍺 {target.full_name} 陪你喝到天亮，最后抱着马桶痛哭流涕。",
+        "抽鞭子": f"{buyer.full_name} 抽了 {target.full_name} 100鞭子，{target.full_name}很开心。",
     }
 
     action = update.message.text.strip()

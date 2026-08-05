@@ -34,7 +34,6 @@ from telegram.error import NetworkError, TimedOut, InvalidToken
 
 from group.group_logger import GROUPS_FILE
 from forward.message_forward import (
-    _debug_private_forward,
     forward_to_owner,
     handle_private_dialog_callback,
     owner_auto_forward_in_dialog,
@@ -338,9 +337,6 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
         if msg.text:
             matched_command = get_matched_command(msg.text)
             if matched_command:
-                _debug_private_forward(
-                    f"[private_forward_router] skip matched command={matched_command}"
-                )
                 print(
                     f"[private_forward_router] 忽略：命中命令 {matched_command}"
                 )

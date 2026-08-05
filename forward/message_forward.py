@@ -13,6 +13,7 @@ import asyncio
 
 
 from command_router import get_matched_command, register_command
+from tool.utils.update_helper import get_message
 from utils import (
     BOT_OWNER_ID,
     BOT_USER_FILE,
@@ -585,10 +586,21 @@ async def forward_to_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reply_from_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != get_owner_id(context):
         return
+    
+    msg = get_message(update)
+
+    if not update.message:
+        return
+    
+    if msg.text:
+        matched = get_matched_command(msg.text)
+        if matched:
+            return
 
     if not update.message.reply_to_message:
         await safe_reply(update, context, "请使用“回复”功能回复用户消息。")
         return
+    
 
     reply_msg_id = update.message.reply_to_message.message_id
     forward_map = load_forward_map()
