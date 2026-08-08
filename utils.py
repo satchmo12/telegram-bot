@@ -41,6 +41,7 @@ INTEREST_LOG_FILE = os.path.join(DATA_DIR, "bank_interest_log.json")
 INVENTORY_DATA_FILE = os.path.join(DATA_DIR, "inventory.json")
 LOTTERY_FILE = os.path.join(DATA_DIR, "lottery.json")
 POINTS_LOTTERY_FILE = os.path.join(DATA_DIR, "points_lottery.json")
+TALk_LOTTERY_FILE = os.path.join(DATA_DIR, "talk_lottery.json")
 
 COOLDOWN_FILE = os.path.join(DATA_DIR, "cooldown.json")
 
@@ -478,11 +479,13 @@ def get_group_whitelist(context: ContextTypes.DEFAULT_TYPE = None) -> dict:
             "active_speak_enabled": False,
             "active_speak_interval_min": 2,
             "points_lottery_enabled": False,
+            "talk_lottery_enabled": False,
             "points_lottery_cost": 100,
             "points_lottery_display_text": "奖池丰厚，祝您好运。",
             "force_subscribe_new_only": False,
             "force_subscribe_set_ts": 0,
             "talk_points_enabled": False,
+            "talk_lottery_trigger_rate": 100,
             "talk_points_amount": 1,
             "talk_points_daily_limit": 20,
             "talk_points_min_length": 5,

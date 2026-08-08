@@ -40,6 +40,13 @@ from group.points_rules import (
     get_invite_points_config,
     get_talk_points_config,
 )
+from group.talk_lottery_settings import (
+    STAGE_TRIGGER_RATE,
+    handle_callback as _handle_talk_lottery_callback,
+    handle_text as _handle_talk_lottery_text,
+    open_settings_panel as _open_talk_lottery_settings_panel,
+)
+from game.talk_lottery_core import list_prizes as list_talk_lottery_prizes
 from info.economy import clean_point
 from utils import (
     GROUP_LIST_FILE,
@@ -78,6 +85,11 @@ LOTTERY_TOGGLE_FIELDS = [
     ("talk_points_enabled", "发言积分"),
     ("invite_points_enabled", "邀请积分"),
 ]
+
+TALK_LOTTERY_TOGGLE_FIELDS = [
+    ("talk_lottery_enabled", "发言抽奖"),
+]
+
 LOTTERY_TOGGLE_KEYS = {item[0] for item in LOTTERY_TOGGLE_FIELDS}
 BOT_ADMIN_REQUIRED_FIELDS = {
     "verify",
@@ -306,6 +318,7 @@ def _build_lottery_settings_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardM
     return InlineKeyboardMarkup(rows)
 
 
+
 async def _open_lottery_settings_panel(
     query, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str, user_id: int
 ):
@@ -324,8 +337,8 @@ async def _open_lottery_settings_panel(
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
-
-
+    
+    
 def _build_ad_push_settings_text(chat_id: str, cfg: dict) -> str:
     mode = str(cfg.get("ad_push_mode", "interval"))
     interval = int(cfg.get("ad_push_interval_min", 120))
@@ -729,6 +742,9 @@ def _build_group_panel_text(
         display_text = str(lottery_cfg.get("display_text", "") or "").strip()
         if display_text and display_text != "奖池丰厚，祝您好运。":
             lines.append(f"抽奖显示文案：{html.escape(display_text)}")
+    if bool(cfg.get("talk_lottery_enabled", False)):
+        talk_lottery_prize_count = len(list_talk_lottery_prizes(chat_id))
+        lines.append(f"发言抽奖：奖品数 {talk_lottery_prize_count}")
     if bool(cfg.get("talk_points_enabled", False)):
         lines.append(
             f"发言积分规则：每次 {talk_points['amount']} 分 每日上限 {talk_points['daily_limit']} 分 最小字数 {talk_points['min_length']}"
@@ -823,6 +839,11 @@ def _build_group_panel_keyboard(
                     "🎰 积分抽奖设置",
                     callback_data=f"{CALLBACK_PREFIX}:lottery_menu:{chat_id}",
                 ),
+                InlineKeyboardButton(
+                    "🎰 发言中奖设置",
+                    callback_data=f"{CALLBACK_PREFIX}:talk_lottery_menu:{chat_id}",
+                ),
+                
             ]
         )
 
@@ -1544,8 +1565,9 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             cfg = {}
         if feature_key in (
             {item[0] for item in TOGGLE_FIELDS}
-            | LOTTERY_TOGGLE_KEYS
-            | {"ad_push_enabled", "spam_limit", "force_subscribe", "force_subscribe_new_only"}
+            | LOTTERY_TOGGLE_KEYS  
+            | {"talk_lottery_enabled" }
+            | {"ad_push_enabled", "spam_limit", "force_subscribe", "force_subscribe_new_only" }
         ):
             await query.answer("处理中...", show_alert=False)
             new_value = not bool(cfg.get(feature_key, False))
@@ -1562,6 +1584,16 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             await query.answer("✅ 已更新", show_alert=False)
             return await _open_lottery_settings_panel(
                 query, context, chat_id_str, user_id
+            )
+        if feature_key == "talk_lottery_enabled":
+            await query.answer("✅ 已更新", show_alert=False)
+            return await _open_talk_lottery_settings_panel(
+                query,
+                context,
+                chat_id_str,
+                user_id,
+                _can_manage_group,
+                _parse_chat_id,
             )
         if feature_key == "ad_push_enabled":
             await query.answer("✅ 已更新", show_alert=False)
@@ -1585,6 +1617,19 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         chat_id_str = parts[2]
         await query.answer()
         return await _open_lottery_settings_panel(query, context, chat_id_str, user_id)
+    
+    if action.startswith("talk_lottery_"):
+        handled = await _handle_talk_lottery_callback(
+            action,
+            parts,
+            query,
+            context,
+            user_id,
+            _can_manage_group,
+            _parse_chat_id,
+        )
+        if handled:
+            return
 
     if action == "ad_push_menu" and len(parts) >= 3:
         chat_id_str = parts[2]
@@ -1941,7 +1986,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         )
         await query.answer()
         return await query.edit_message_text(
-            f"请选择要{'修改' if edit_mode == 'edit' else '删除'}的奖品：",
+            f"请选择要{'修改' if edit_mode == 'edit' else '删除'}的奖品：" +_build_lottery_prizes_text(chat_id_str),
             reply_markup=InlineKeyboardMarkup(rows),
         )
     if action == "lottery_prize_edit_pick" and len(parts) >= 4:
@@ -2120,6 +2165,14 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
     if update.effective_chat.type != "private":
         return
     stage = context.user_data.get("group_setting_stage")
+
+    if stage in {"talk_lottery_prize_add", "talk_lottery_prize_edit", "talk_lottery_trigger_rate"}:
+        handled = await _handle_talk_lottery_text(
+            update, context, stage, str(context.user_data.get("group_setting_chat_id") or "")
+        )
+        if handled:
+            raise ApplicationHandlerStop
+
     if stage not in {
         "force_channel",
         "active_speak_interval",

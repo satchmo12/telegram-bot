@@ -1234,10 +1234,13 @@ async def broadcast_mode_handler(update: Update, context: ContextTypes.DEFAULT_T
     if text.startswith("/") or get_matched_command(text):
         return
     
-    target = context.user_data.get("broadcast_chat")
-    if not target:
+   
+    # user_data 可能为 None
+    if not (context.user_data or {}).get("broadcast_mode"):
+    # if not target:
         return
-
+    target = context.user_data.get("broadcast_chat")
+    
     try:
         await context.bot.copy_message(
             chat_id=target,
