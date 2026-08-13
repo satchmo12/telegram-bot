@@ -97,6 +97,8 @@ IDIOM_TEXT = os.path.join(CON_DATA_DIR, "chengyu_words.txt")
 SPECIAL_FOLLOW_FILE = os.path.join(DATA_DIR, "special_follow.json")
 POINTS_REWARD_LOG_FILE = os.path.join(DATA_DIR, "points_reward_log.json")
 
+GAME_FILE = os.path.join(DATA_DIR, "virus_game.json")
+CONFIG_FILE = os.path.join(CON_DATA_DIR, "virus_config.json")  
 
 _cache_data = {}
 _cache_timestamp = {}

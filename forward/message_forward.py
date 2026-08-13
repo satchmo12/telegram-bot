@@ -1218,7 +1218,7 @@ async def cmd_close_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE
     await safe_reply(update, context, "✅ 已退出广播模式")
 
 async def broadcast_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get("broadcast_mode"):
+    if not (context.user_data or {}).get("broadcast_mode"):
         return
     
      # 只处理私聊，不处理群、超级群、频道

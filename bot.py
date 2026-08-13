@@ -531,6 +531,10 @@ def _build_help_text(context: ContextTypes.DEFAULT_TYPE, user_id: Optional[int] 
                 "检测  aabbc  也可以回复用户名批量检测 检测可用的用户名，协议号检测，可用即可用",
                 "设置用户名 aabbc  协议号在目标群有修改权限，机器人在，超级管理员的命令",
                 "创建群组/频道 群中文名 用户名  协议号创建群租上限10个",
+                "广播模式 -xxx 关闭广播模式",
+                "收藏 收藏夹 查看收藏xx",
+                "说话触发虚拟奖励",
+                "病毒开始/病毒状态/病毒结束",
             ]
         )
         if user_id and is_super_admin(user_id):

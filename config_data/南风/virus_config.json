@@ -1,0 +1,22 @@
+{
+    "enabled": true,
+    "duration": 30,
+    "min_active_players": 2,
+    "spread_required": 2,
+    "death_threshold": 3,
+    "first_spread_timeout": 120,
+    "antidote": {
+        "enabled": true,
+        "min_interval": 60,
+        "max_interval": 180,
+        "duration": 60,
+        "discover_reward": 500,
+        "items": [
+            "哈哈哈哈",
+            "666",
+            "早上好",
+            "晚安",
+            "今天吃饭了吗"
+        ]
+    }
+}

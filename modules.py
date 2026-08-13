@@ -1,6 +1,7 @@
 from customer.customer_qa import register_customer_qa_handlers
 from customer.editUserInfo import register_customer_edit_handlers
 from forward.message_forward import register_message_forward_handlers
+from game.virus_game_handler import register_virus_handlers
 from group.favorite import register_favorite
 from group.note import register_note
 from multi_bot_manager import register_multi_bot_manager_handlers
@@ -18,5 +19,6 @@ def register_all_handlers(app):
     register_customer_qa_handlers(app)
     register_customer_edit_handlers(app)
     register_message_forward_handlers(app)
+    register_virus_handlers(app)
     register_note(app)
     register_favorite(app)
