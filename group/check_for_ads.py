@@ -286,6 +286,7 @@ async def _is_linked_channel_message(
 
 @group_allowed
 async def check_for_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    
     if not await is_bot_admin(update, context):
         return  # 普通机器人只做日志/转发，不删
     if update.channel_post:
@@ -302,11 +303,20 @@ async def check_for_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_admin(update, context):
         return
 
-    msg = update.message or update.edited_message or update.channel_post
+    msg = update.message or update.edited_message or update.channel_post 
     if not msg:
         return
     if await _is_linked_channel_message(update, context, msg):
         return  # 本群关联频道/频道身份发言不删除
+    
+    # 访客机器人消息删除
+    api_kwargs = getattr(msg, "api_kwargs", {}) or {}
+    guest_bot_caller_user = api_kwargs.get("guest_bot_caller_user")
+    if guest_bot_caller_user:
+        try:
+            await msg.delete()
+        except Exception as e:
+            print(f"❌ 删除 Guest Bot 消息失败: {e}", flush=True)
 
     user = msg.from_user
     if not user:
@@ -315,6 +325,11 @@ async def check_for_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ✅ 白名单放行
     if is_whitelisted(user.id, chat_id, context):
         return
+    
+    
+    
+    
+   
 
     # 统一提取文本
     text = ((msg.text or "") + " " + (msg.caption or "")).lower()
