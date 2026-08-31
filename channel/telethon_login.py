@@ -19,7 +19,13 @@ from utils import (
     is_super_admin,
 )
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, CallbackQueryHandler
+from telegram.ext import (
+    ApplicationHandlerStop,
+    CallbackQueryHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 from channel.channel_config import start_channel_config_with_source, start_channel_config_new
 
 HISTORY_RANGE_FILE = os.path.join("data", "history_forward_range.json")
@@ -686,6 +692,13 @@ async def handle_telethon_login_text(update: Update, context: ContextTypes.DEFAU
     return False
 
 
+async def telethon_login_input_router(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    if await handle_telethon_login_text(update, context):
+        raise ApplicationHandlerStop
+
+
 @register_command("历史转发范围")
 async def history_forward_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_super_admin(update.effective_user.id):
@@ -1196,4 +1209,11 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
 def register_telethon_login_handlers(app):
     app.add_handler(
         CallbackQueryHandler(handle_telethon_login_callback, pattern=f"^{CALLBACK_PREFIX}:")
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & (~filters.COMMAND),
+            telethon_login_input_router,
+        ),
+        group=-1,
     )

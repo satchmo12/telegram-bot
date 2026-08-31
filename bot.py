@@ -739,6 +739,7 @@ def create_app(bot_cfg: dict):
     
     # 内连
     app.add_handler(InlineQueryHandler(inline_query_handler))
+    # app.add_handler( TypeHandler(Update, guest_bot_handler)  , group=-1200)
     # app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
 
     # ===== 注册所有功能模块 =====
@@ -959,6 +960,94 @@ async def post_init_setup(app):
 
 
 configure_runtime_hooks(create_app, post_init_setup)
+
+
+async def guest_bot_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    print("\n========================================", flush=True)
+    print("🔥 收到 Telegram Update", flush=True)
+    print(update, flush=True)
+    print("========================================", flush=True)
+
+    # --------------------------------------------------------
+    # 获取 Guest Message
+    # --------------------------------------------------------
+
+    guest_message = (
+        update.api_kwargs or {}
+    ).get("guest_message")
+
+    if not guest_message:
+        print("ℹ️ 不是 Guest Message，忽略", flush=True)
+        return
+
+    # --------------------------------------------------------
+    # 获取 query_id
+    # --------------------------------------------------------
+
+    query_id = guest_message.get(
+        "guest_query_id"
+    )
+
+    if not query_id:
+        print("❌ Guest Message 没有 guest_query_id", flush=True)
+        return
+
+    # --------------------------------------------------------
+    # 获取用户信息
+    # --------------------------------------------------------
+
+    user = guest_message.get("from", {})
+
+    user_id = user.get("id")
+    username = user.get("username")
+    first_name = user.get("first_name") or "用户"
+
+    text = guest_message.get("text") or ""
+
+    chat = guest_message.get("chat", {})
+
+
+    # --------------------------------------------------------
+    # 回复内容
+    # --------------------------------------------------------
+
+    reply_text = (
+        f"🤖 你好，{first_name}！\n\n"
+         f"我是 {text}。\n"
+        "这里是测试数据。"
+    )
+
+    # --------------------------------------------------------
+    # Guest Bot 回复
+    # --------------------------------------------------------
+
+    # try:
+
+    #     await send_guest_reply(
+    #         query_id=query_id,
+    #         text=reply_text,
+    #     )
+
+    # except Exception as e:
+
+    #     print(
+    #         "\n❌ Guest Bot 回复失败",
+    #         flush=True,
+    #     )
+
+    #     print(
+    #         f"   类型: {type(e).__name__}",
+    #         flush=True,
+    #     )
+
+    #     print(
+    #         f"   错误: {e}",
+    #         flush=True,
+    #     )
+
 
 
 async def main():
