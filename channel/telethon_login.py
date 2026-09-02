@@ -3,6 +3,7 @@ import json
 import re
 import sqlite3
 import asyncio
+import tempfile
 from datetime import datetime
 from typing import Optional
 
@@ -41,7 +42,10 @@ CALLBACK_PREFIX = "tlogin"
 _JOIN_STATE = {}
 _SESSION_LABEL_CACHE = {}
 _CHANNEL_LIST_CACHE = {}
+_GROUP_LIST_CACHE = {}
 _BROADCAST_STATE = {}
+
+GROUP_LIST_PAGE_SIZE = 15
 
 
 async def _plain_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None):
@@ -307,14 +311,7 @@ def _list_session_names(context: ContextTypes.DEFAULT_TYPE, user=None) -> list[s
 
 
 def _build_sessions_keyboard(sessions: list[str]) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(s, callback_data=f"{CALLBACK_PREFIX}:menu:{s}")] for s in sessions]
-    rows.append(
-        [
-            InlineKeyboardButton("🔁 刷新列表", callback_data=f"{CALLBACK_PREFIX}:list"),
-            InlineKeyboardButton("🔄 刷新用户名", callback_data=f"{CALLBACK_PREFIX}:refresh"),
-        ]
-    )
-    return InlineKeyboardMarkup(rows)
+    return InlineKeyboardMarkup(_build_session_list_rows(sessions))
 
 
 def _build_back_keyboard() -> InlineKeyboardMarkup:
@@ -330,6 +327,7 @@ def _build_account_menu_keyboard(session_name: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("👥 查看群组", callback_data=f"{CALLBACK_PREFIX}:groups:{session_name}")],
             [InlineKeyboardButton("➕ 加群", callback_data=f"{CALLBACK_PREFIX}:join:{session_name}")],
             [InlineKeyboardButton("📣 群发消息", callback_data=f"{CALLBACK_PREFIX}:broadcast:{session_name}")],
+            [InlineKeyboardButton("🗑 删除协议号", callback_data=f"{CALLBACK_PREFIX}:delete:{session_name}")],
             [InlineKeyboardButton("⬅️ 返回账号列表", callback_data=f"{CALLBACK_PREFIX}:list")],
         ]
     )
@@ -355,6 +353,357 @@ async def _teardown_client(state: dict):
             await client.disconnect()
         except Exception:
             pass
+
+
+def _is_group_entity(entity) -> bool:
+    """Return whether a dialog entity is a Telegram group, excluding channels."""
+    if getattr(entity, "broadcast", False):
+        return False
+    return bool(
+        getattr(entity, "megagroup", False)
+        or entity.__class__.__name__ == "Chat"  # 普通基础群
+    )
+
+
+def _group_display_name(group: dict) -> str:
+    title = (group.get("title") or "未命名群组").strip()
+    username = (group.get("username") or "").strip()
+    group_id = group.get("id", "")
+    if username:
+        return f"{title} (@{username}) [{group_id}]"
+    return f"{title} [{group_id}]"
+
+
+def _truncate_button_text(text: str, max_bytes: int = 52) -> str:
+    text = (text or "未命名群组").strip()
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[: max_bytes - len("…".encode("utf-8"))].decode(
+        "utf-8", errors="ignore"
+    ) + "…"
+
+
+def _truncate_display_text(text: str, max_length: int = 180) -> str:
+    text = (text or "未命名群组").strip()
+    return text if len(text) <= max_length else f"{text[:max_length - 1]}…"
+
+
+def _build_session_list_rows(sessions: list[str], include_start_back: bool = False) -> list[list[InlineKeyboardButton]]:
+    rows = [
+        [
+            InlineKeyboardButton(
+                _truncate_button_text(_get_cached_session_label(session_name), 60),
+                callback_data=f"{CALLBACK_PREFIX}:menu:{session_name}",
+            )
+        ]
+        for session_name in sessions
+    ]
+    rows.append(
+        [
+            InlineKeyboardButton("🔁 刷新列表", callback_data=f"{CALLBACK_PREFIX}:list"),
+            InlineKeyboardButton("🔄 刷新用户名", callback_data=f"{CALLBACK_PREFIX}:refresh"),
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "📣 所有协议号群发", callback_data=f"{CALLBACK_PREFIX}:broadcast_all"
+            )
+        ]
+    )
+    if include_start_back:
+        rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
+    return rows
+
+
+def _build_group_list_page(
+    session_name: str, groups: list[dict], page: int
+) -> tuple[str, InlineKeyboardMarkup]:
+    total = len(groups)
+    total_pages = max(1, (total + GROUP_LIST_PAGE_SIZE - 1) // GROUP_LIST_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * GROUP_LIST_PAGE_SIZE
+    visible_groups = groups[start : start + GROUP_LIST_PAGE_SIZE]
+
+    lines = []
+    keyboard_rows = []
+    for idx, group in enumerate(visible_groups, start=start + 1):
+        group_id = group.get("id")
+        lines.append(f"{idx}. {_truncate_display_text(_group_display_name(group))}")
+        keyboard_rows.append(
+            [
+                InlineKeyboardButton(
+                    _truncate_button_text(f"{idx}. {group.get('title') or '未命名群组'}"),
+                    callback_data=f"{CALLBACK_PREFIX}:gpage:{session_name}|{page}",
+                ),
+                InlineKeyboardButton(
+                    "✉️ 发送消息",
+                    callback_data=f"{CALLBACK_PREFIX}:sendgroup:{session_name}|{group_id}",
+                ),
+            ]
+        )
+
+    if total_pages > 1:
+        nav = []
+        if page > 1:
+            nav.append(
+                InlineKeyboardButton(
+                    "⬅️ 上一页", callback_data=f"{CALLBACK_PREFIX}:gpage:{session_name}|{page - 1}"
+                )
+            )
+        if page < total_pages:
+            nav.append(
+                InlineKeyboardButton(
+                    "下一页 ➡️", callback_data=f"{CALLBACK_PREFIX}:gpage:{session_name}|{page + 1}"
+                )
+            )
+        if nav:
+            keyboard_rows.append(nav)
+    keyboard_rows.append(
+        [InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:menu:{session_name}")]
+    )
+    text = (
+        f"加入的群组（共 {total} 个，第 {page}/{total_pages} 页；点击右侧按钮可单独发送）：\n"
+        + "\n".join(lines)
+    )
+    return text, InlineKeyboardMarkup(keyboard_rows)
+
+
+def _build_single_group_send_markup(session_name: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "❌ 结束发送", callback_data=f"{CALLBACK_PREFIX}:bcancel:{session_name}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅️ 返回群组列表", callback_data=f"{CALLBACK_PREFIX}:groups:{session_name}"
+                )
+            ],
+        ]
+    )
+
+
+async def _delete_session_files(context: ContextTypes.DEFAULT_TYPE, session_name: str) -> int:
+    """Delete one locally managed Telethon session and its SQLite sidecar files."""
+    if not session_name or is_shared_session_name(session_name):
+        return 0
+    # Do not construct a path from arbitrary callback input.
+    if session_name not in _list_session_names(context):
+        return 0
+
+    # A forwarding rule may keep this session open.  Disconnect it first so
+    # Telethon cannot recreate the SQLite session file after it is deleted.
+    try:
+        from channel.telethon_forwarder import SESSION_CLIENTS_BY_BOT
+
+        bot_name = str(context.application.bot_data.get("name", "") or "").strip()
+        client = SESSION_CLIENTS_BY_BOT.get(bot_name, {}).pop(session_name, None)
+        if client:
+            await client.disconnect()
+    except Exception as exc:
+        print(f"删除协议号前断开监听失败 session={session_name}: {exc}")
+
+    session_path = get_session_path(context, session_name)
+    removed = 0
+    for suffix in (".session", ".session-journal", ".session-wal", ".session-shm"):
+        path = f"{session_path}{suffix}"
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+                removed += 1
+        except OSError:
+            continue
+
+    owners = _load_session_owners()
+    if owners.get("sessions", {}).pop(session_name, None) is not None:
+        _save_session_owners(owners)
+    _SESSION_LABEL_CACHE.pop(session_name, None)
+    for cache_key in list(_CHANNEL_LIST_CACHE):
+        if cache_key[1] == session_name:
+            _CHANNEL_LIST_CACHE.pop(cache_key, None)
+    return removed
+
+
+def _get_message_attachment(message):
+    """Return attachment metadata needed to preserve Telegram media types."""
+    if message.sticker:
+        sticker = message.sticker
+        if getattr(sticker, "is_animated", False):
+            suffix, mime_type = ".tgs", "application/x-tgsticker"
+        elif getattr(sticker, "is_video", False):
+            suffix, mime_type = ".webm", "video/webm"
+        else:
+            suffix, mime_type = ".webp", "image/webp"
+        return sticker, suffix, "sticker", mime_type
+    if message.photo:
+        return message.photo[-1], ".jpg", "photo", "image/jpeg"
+    if message.video:
+        return message.video, ".mp4", "video", getattr(message.video, "mime_type", None)
+    if message.animation:
+        animation = message.animation
+        mime_type = getattr(animation, "mime_type", None)
+        suffix = ".mp4" if mime_type == "video/mp4" else ".gif"
+        return animation, suffix, "animation", mime_type
+    if message.document:
+        document = message.document
+        mime_type = getattr(document, "mime_type", None)
+        # GIF sent as a file should still retain its animation presentation.
+        if mime_type == "image/gif":
+            return document, ".gif", "animation", mime_type
+        return document, "", "document", mime_type
+    return None, None, None, None
+
+
+async def _send_payload_to_group_targets(
+    context: ContextTypes.DEFAULT_TYPE,
+    targets: list[tuple[str, int]],
+    message,
+) -> tuple[int, int, int]:
+    """Send one private-chat message through the selected sessions to group targets."""
+    api_id, api_hash = _get_api_creds()
+    if not api_id or not api_hash:
+        raise RuntimeError("未配置 API_ID/API_HASH。")
+    try:
+        from telethon import TelegramClient, types
+    except Exception as exc:
+        raise RuntimeError("Telethon 未安装，请先安装依赖。") from exc
+
+    text = (message.text or "").strip()
+    attachment, suffix, attachment_kind, mime_type = _get_message_attachment(message)
+    if not text and not attachment:
+        raise ValueError("仅支持发送文字、图片、视频、文件、GIF 动图或贴纸。")
+
+    temp_path = None
+    if attachment:
+        fd, temp_path = tempfile.mkstemp(prefix="tg_broadcast_", suffix=suffix or ".file")
+        os.close(fd)
+        try:
+            telegram_file = await context.bot.get_file(attachment.file_id)
+            await telegram_file.download_to_drive(temp_path)
+        except Exception:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+            raise
+
+    grouped_targets: dict[str, list[int]] = {}
+    for session_name, group_id in targets:
+        try:
+            group_id = int(group_id)
+        except (TypeError, ValueError):
+            continue
+        grouped_targets.setdefault(session_name, []).append(group_id)
+
+    sent = failed = unavailable_sessions = 0
+    try:
+        for session_name, group_ids in grouped_targets.items():
+            client = TelegramClient(get_session_path(context, session_name), api_id, api_hash)
+            try:
+                await client.connect()
+                if not await client.is_user_authorized():
+                    unavailable_sessions += 1
+                    failed += len(group_ids)
+                    continue
+                for group_id in group_ids:
+                    try:
+                        if text:
+                            await client.send_message(group_id, text)
+                        elif attachment_kind == "animation":
+                            await client.send_file(
+                                group_id,
+                                temp_path,
+                                caption=message.caption or "",
+                                force_document=False,
+                                mime_type=mime_type,
+                                attributes=[types.DocumentAttributeAnimated()],
+                                # 无声 MP4 动图也按 GIF 动图样式发送，而不是普通视频。
+                                nosound_video=True,
+                            )
+                        elif attachment_kind == "sticker":
+                            await client.send_file(
+                                group_id,
+                                temp_path,
+                                force_document=False,
+                                mime_type=mime_type,
+                                attributes=[
+                                    types.DocumentAttributeSticker(
+                                        alt=getattr(message.sticker, "emoji", None) or "🙂",
+                                        stickerset=types.InputStickerSetEmpty(),
+                                    )
+                                ],
+                            )
+                        else:
+                            await client.send_file(
+                                group_id,
+                                temp_path,
+                                caption=message.caption or "",
+                                force_document=False,
+                                mime_type=mime_type,
+                            )
+                        sent += 1
+                        await asyncio.sleep(0.3)
+                    except Exception as exc:
+                        failed += 1
+                        print(f"群发失败 session={session_name} group={group_id}: {exc}")
+            except Exception as exc:
+                failed += len(group_ids)
+                print(f"协议号连接失败 session={session_name}: {exc}")
+            finally:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+    finally:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+    return sent, failed, unavailable_sessions
+
+
+async def _handle_broadcast_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    state: dict,
+) -> str:
+    """Resolve broadcast state into concrete groups and send the incoming payload."""
+    user = update.effective_user
+    mode = state.get("mode")
+    targets: list[tuple[str, int]] = []
+
+    if mode == "all":
+        sessions = _list_session_names(context, user)
+    else:
+        session_name = state.get("session")
+        sessions = [session_name] if session_name else []
+
+    for session_name in sessions:
+        if not _can_access_session(user, session_name):
+            continue
+        if mode == "group":
+            group_ids = [state.get("group_id")]
+        else:
+            group_ids = await _fetch_account_group_ids(context, session_name)
+        for group_id in group_ids:
+            try:
+                targets.append((session_name, int(group_id)))
+            except (TypeError, ValueError):
+                continue
+
+    if not targets:
+        return "未获取到可发送的群组，请确认协议号已登录且已加入群组。"
+
+    sent, failed, unavailable_sessions = await _send_payload_to_group_targets(
+        context, targets, update.message
+    )
+    extra = f"\n未登录协议号: {unavailable_sessions}" if unavailable_sessions else ""
+    return f"✅ 发送完成\n成功: {sent}\n失败: {failed}{extra}"
 
 
 async def _start_login_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -412,79 +761,26 @@ async def handle_telethon_login_text(update: Update, context: ContextTypes.DEFAU
         return False
 
     if broadcast_state and not state and not join_state:
-        session_name = broadcast_state.get("session")
-        _BROADCAST_STATE.pop(uid, None)
-        if not session_name:
-            await _plain_reply(update, context, "群发失败：未找到小号。")
-            return True
-        if not _can_access_session(update.effective_user, session_name):
-            await _plain_reply(update, context, "🚫 无权使用该账号群发。")
-            return True
-        api_id, api_hash = _get_api_creds()
-        if not api_id or not api_hash:
-            await _plain_reply(update, context, "❗ 未配置 API_ID/API_HASH。")
-            return True
+        # 单群发送保持在输入状态，后续私聊消息继续通过同一个协议号发往该群；
+        # 账号群发和全协议号群发仍然保持一次发送即结束的行为。
+        keep_single_group_send = broadcast_state.get("mode") == "group"
+        if not keep_single_group_send:
+            _clear_broadcast_state(uid)
         try:
-            from telethon import TelegramClient
-        except Exception:
-            await _plain_reply(update, context, "❗ Telethon 未安装，请先安装依赖。")
-            return True
-        group_ids = await _fetch_account_group_ids(context, session_name)
-        if not group_ids:
-            await _plain_reply(update, context, "未获取到群组列表（可能未加入群）。")
-            return True
-        session_path = get_session_path(context, session_name)
-        client = TelegramClient(session_path, api_id, api_hash)
-        await client.connect()
-        try:
-            if not await client.is_user_authorized():
-                await _plain_reply(update, context, "该小号未登录，请重新登录。")
-                return True
-            sent, failed = 0, 0
-            msg = update.message
-            for gid in group_ids:
-                try:
-                    if msg.text:
-                        await client.send_message(gid, msg.text)
-                    elif msg.photo:
-                        file = await context.bot.get_file(msg.photo[-1].file_id)
-                        temp_path = f"/tmp/tg_bc_{msg.photo[-1].file_id}.jpg"
-                        await file.download_to_drive(temp_path)
-                        await client.send_file(gid, temp_path, caption=msg.caption or "")
-                        os.remove(temp_path)
-                    elif msg.video:
-                        file = await context.bot.get_file(msg.video.file_id)
-                        temp_path = f"/tmp/tg_bc_{msg.video.file_id}.mp4"
-                        await file.download_to_drive(temp_path)
-                        await client.send_file(gid, temp_path, caption=msg.caption or "")
-                        os.remove(temp_path)
-                    elif msg.document:
-                        file = await context.bot.get_file(msg.document.file_id)
-                        temp_path = f"/tmp/tg_bc_{msg.document.file_id}"
-                        await file.download_to_drive(temp_path)
-                        await client.send_file(gid, temp_path, caption=msg.caption or "")
-                        os.remove(temp_path)
-                    elif msg.animation:
-                        file = await context.bot.get_file(msg.animation.file_id)
-                        temp_path = f"/tmp/tg_bc_{msg.animation.file_id}.gif"
-                        await file.download_to_drive(temp_path)
-                        await client.send_file(gid, temp_path, caption=msg.caption or "")
-                        os.remove(temp_path)
-                    else:
-                        failed += 1
-                        continue
-                    sent += 1
-                    await asyncio.sleep(0.3)
-                except Exception as e:
-                    failed += 1
-                    print(f"群发失败 {gid}: {e}")
-            await _plain_reply(update, context, f"✅ 群发完成\n成功: {sent}\n失败: {failed}")
-            return True
-        finally:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
+            result = await _handle_broadcast_message(update, context, broadcast_state)
+        except (RuntimeError, ValueError) as exc:
+            result = f"❗ 发送失败：{exc}"
+        except Exception as exc:
+            print(f"协议号群发异常: {exc}")
+            result = "❗ 发送失败，请稍后重试。"
+        reply_markup = None
+        if keep_single_group_send:
+            session_name = broadcast_state.get("session")
+            if session_name:
+                result += "\n\n✉️ 当前仍处于该群发送状态，可继续发送下一条消息。"
+                reply_markup = _build_single_group_send_markup(session_name)
+        await _plain_reply(update, context, result, reply_markup=reply_markup)
+        return True
 
     if not update.message.text:
         return False
@@ -762,23 +1058,11 @@ async def list_logged_accounts(update: Update, context: ContextTypes.DEFAULT_TYP
             "暂无可查看的小号。",
             reply_markup=_empty_sessions_reply_markup(context),
         )
-    labels = []
-    for s in sessions:
-        label = _get_cached_session_label(s)
-        labels.append((s, label))
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton(label, callback_data=f"{CALLBACK_PREFIX}:menu:{s}")] for s, label in labels]
-        + [
-            [
-                InlineKeyboardButton("🔁 刷新列表", callback_data=f"{CALLBACK_PREFIX}:list"),
-                InlineKeyboardButton("🔄 刷新用户名", callback_data=f"{CALLBACK_PREFIX}:refresh"),
-            ]
-        ]
-    )
+    keyboard = InlineKeyboardMarkup(_build_session_list_rows(sessions))
     await _plain_reply(
         update,
         context,
-        "已登录小号列表（点击查看关注频道）：",
+        "已登录协议号列表（点击进入管理）：",
         reply_markup=keyboard,
     )
 
@@ -824,17 +1108,16 @@ async def _fetch_account_channels(
 
 async def _fetch_account_groups(
     context: ContextTypes.DEFAULT_TYPE, session_name: str
-) -> list[str]:
+) -> list[dict]:
     api_id, api_hash = _get_api_creds()
     if not api_id or not api_hash:
         return []
     try:
-        from telethon import TelegramClient
+        from telethon import TelegramClient, utils as telethon_utils
     except Exception:
         return []
 
-    session_path = get_session_path(context, session_name)
-    client = TelegramClient(session_path, api_id, api_hash)
+    client = TelegramClient(get_session_path(context, session_name), api_id, api_hash)
     try:
         await client.connect()
     except sqlite3.OperationalError:
@@ -842,25 +1125,27 @@ async def _fetch_account_groups(
     try:
         if not await client.is_user_authorized():
             return []
-        lines = []
+        groups = []
         async for dialog in client.iter_dialogs():
             entity = dialog.entity
-            if not getattr(entity, "megagroup", False) and getattr(entity, "broadcast", False):
+            if not _is_group_entity(entity):
                 continue
-            if not getattr(entity, "megagroup", False) and not getattr(entity, "broadcast", False):
+            try:
+                # Marked peer IDs preserve whether the dialog is a basic group or
+                # a megagroup/channel when Telethon resolves the destination later.
+                group_id = int(telethon_utils.get_peer_id(entity))
+            except Exception:
                 continue
-            if getattr(entity, "broadcast", False):
-                continue
-            title = getattr(entity, "title", "") or "未命名群组"
-            username = getattr(entity, "username", "")
-            cid = getattr(entity, "id", "")
-            if username:
-                lines.append(f"{title} (@{username}) [{cid}]")
-            else:
-                lines.append(f"{title} [{cid}]")
-            if len(lines) >= 100:
+            groups.append(
+                {
+                    "title": getattr(entity, "title", "") or "未命名群组",
+                    "username": getattr(entity, "username", "") or "",
+                    "id": group_id,
+                }
+            )
+            if len(groups) >= 100:
                 break
-        return lines
+        return groups
     finally:
         try:
             await client.disconnect()
@@ -871,79 +1156,8 @@ async def _fetch_account_groups(
 async def _fetch_account_group_ids(
     context: ContextTypes.DEFAULT_TYPE, session_name: str
 ) -> list[int]:
-    api_id, api_hash = _get_api_creds()
-    if not api_id or not api_hash:
-        return []
-    try:
-        from telethon import TelegramClient
-    except Exception:
-        return []
-
-    session_path = get_session_path(context, session_name)
-    client = TelegramClient(session_path, api_id, api_hash)
-    try:
-        await client.connect()
-    except sqlite3.OperationalError:
-        return []
-    try:
-        if not await client.is_user_authorized():
-            return []
-        ids = []
-        async for dialog in client.iter_dialogs():
-            entity = dialog.entity
-            if not getattr(entity, "megagroup", False):
-                continue
-            cid = getattr(entity, "id", None)
-            if cid is None:
-                continue
-            ids.append(int(cid))
-            if len(ids) >= 200:
-                break
-        return ids
-    finally:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
-
-
-async def _fetch_account_group_ids(
-    context: ContextTypes.DEFAULT_TYPE, session_name: str
-) -> list[int]:
-    api_id, api_hash = _get_api_creds()
-    if not api_id or not api_hash:
-        return []
-    try:
-        from telethon import TelegramClient
-    except Exception:
-        return []
-
-    session_path = get_session_path(context, session_name)
-    client = TelegramClient(session_path, api_id, api_hash)
-    try:
-        await client.connect()
-    except sqlite3.OperationalError:
-        return []
-    try:
-        if not await client.is_user_authorized():
-            return []
-        ids = []
-        async for dialog in client.iter_dialogs():
-            entity = dialog.entity
-            if not getattr(entity, "megagroup", False):
-                continue
-            cid = getattr(entity, "id", None)
-            if cid is None:
-                continue
-            ids.append(int(cid))
-            if len(ids) >= 200:
-                break
-        return ids
-    finally:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+    groups = await _fetch_account_groups(context, session_name)
+    return [group["id"] for group in groups if group.get("id") is not None]
 
 
 async def _get_session_label(context: ContextTypes.DEFAULT_TYPE, session_name: str) -> str:
@@ -997,7 +1211,7 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
     uid = str(query.from_user.id)
 
     # 只要离开“等待输入群发内容”的界面，就清掉待群发状态，避免后续任意私聊文本被误当成群发内容。
-    if action != "broadcast":
+    if action not in {"broadcast", "broadcast_all", "sendgroup"}:
         _clear_broadcast_state(uid)
 
     if action == "list":
@@ -1010,22 +1224,13 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
                 "暂无可查看的小号。",
                 reply_markup=_empty_sessions_reply_markup(context),
             )
-        labels = []
-        for s in sessions:
-            label = _get_cached_session_label(s)
-            labels.append((s, label))
-        rows = [[InlineKeyboardButton(label, callback_data=f"{CALLBACK_PREFIX}:menu:{s}")] for s, label in labels]
-        rows.append(
-            [
-                InlineKeyboardButton("🔁 刷新列表", callback_data=f"{CALLBACK_PREFIX}:list"),
-                InlineKeyboardButton("🔄 刷新用户名", callback_data=f"{CALLBACK_PREFIX}:refresh"),
-            ]
+        keyboard = InlineKeyboardMarkup(
+            _build_session_list_rows(
+                sessions, include_start_back=bool(context.user_data.get("start_panel"))
+            )
         )
-        if context.user_data.get("start_panel"):
-            rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
-        keyboard = InlineKeyboardMarkup(rows)
         return await query.edit_message_text(
-            "已登录小号列表（点击查看关注频道）：",
+            "已登录协议号列表（点击进入管理）：",
             reply_markup=keyboard,
         )
 
@@ -1045,22 +1250,13 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
                 await _get_session_label(context, s)
             except Exception:
                 continue
-        labels = []
-        for s in sessions:
-            label = _get_cached_session_label(s)
-            labels.append((s, label))
-        rows = [[InlineKeyboardButton(label, callback_data=f"{CALLBACK_PREFIX}:menu:{s}")] for s, label in labels]
-        rows.append(
-            [
-                InlineKeyboardButton("🔁 刷新列表", callback_data=f"{CALLBACK_PREFIX}:list"),
-                InlineKeyboardButton("🔄 刷新用户名", callback_data=f"{CALLBACK_PREFIX}:refresh"),
-            ]
+        keyboard = InlineKeyboardMarkup(
+            _build_session_list_rows(
+                sessions, include_start_back=bool(context.user_data.get("start_panel"))
+            )
         )
-        if context.user_data.get("start_panel"):
-            rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
-        keyboard = InlineKeyboardMarkup(rows)
         return await query.edit_message_text(
-            "已登录小号列表（点击查看关注频道）：",
+            "已登录协议号列表（点击进入管理）：",
             reply_markup=keyboard,
         )
 
@@ -1104,7 +1300,7 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
             return await query.edit_message_text("🚫 订阅已到期，无法群发。")
         if not _can_access_session(query.from_user, session_name):
             return await query.edit_message_text("🚫 无权使用该账号群发。")
-        _BROADCAST_STATE[uid] = {"session": session_name}
+        _BROADCAST_STATE[uid] = {"mode": "session", "session": session_name}
         keyboard = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("❌ 取消群发", callback_data=f"{CALLBACK_PREFIX}:bcancel:{session_name}")],
@@ -1113,10 +1309,68 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
         )
         return await query.edit_message_text("请发送要群发的消息：", reply_markup=keyboard)
 
+    if action == "broadcast_all":
+        await _clear_login_state(uid, context)
+        if not _require_active_subscription(query.from_user):
+            return await query.edit_message_text("🚫 订阅已到期，无法群发。")
+        sessions = _list_session_names(context, query.from_user)
+        if not sessions:
+            return await query.edit_message_text("暂无可使用的协议号。")
+        _BROADCAST_STATE[uid] = {"mode": "all"}
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("❌ 取消群发", callback_data=f"{CALLBACK_PREFIX}:bcancel:all")],
+                [InlineKeyboardButton("⬅️ 返回账号列表", callback_data=f"{CALLBACK_PREFIX}:list")],
+            ]
+        )
+        return await query.edit_message_text(
+            f"将使用全部 {len(sessions)} 个可管理协议号，向各自已加入的群组发送消息。\n\n"
+            "请发送要群发的消息：",
+            reply_markup=keyboard,
+        )
+
+    if action == "sendgroup":
+        await _clear_login_state(uid, context)
+        try:
+            session_name, group_id_raw = payload.rsplit("|", 1)
+            group_id = int(group_id_raw)
+        except (TypeError, ValueError):
+            return await query.edit_message_text("群组信息无效，请重新查看群组列表。")
+        if not _require_active_subscription(query.from_user):
+            return await query.edit_message_text("🚫 订阅已到期，无法发送消息。")
+        if not _can_access_session(query.from_user, session_name):
+            return await query.edit_message_text("🚫 无权使用该协议号发送消息。")
+        groups = await _fetch_account_groups(context, session_name)
+        if group_id not in {group.get("id") for group in groups}:
+            return await query.edit_message_text("群组已不存在或协议号不在该群内，请重新查看群组列表。")
+        _BROADCAST_STATE[uid] = {
+            "mode": "group",
+            "session": session_name,
+            "group_id": group_id,
+        }
+        keyboard = _build_single_group_send_markup(session_name)
+        return await query.edit_message_text(
+            "请发送要发到该群的消息。\n发送成功后可继续连续发送，点击「结束发送」才会退出。",
+            reply_markup=keyboard,
+        )
+
     if action == "bcancel":
         await _clear_login_state(uid, context)
         session_name = payload
         _clear_broadcast_state(uid)
+        if session_name == "all":
+            sessions = _list_session_names(context, query.from_user)
+            keyboard = (
+                InlineKeyboardMarkup(
+                    _build_session_list_rows(
+                        sessions,
+                        include_start_back=bool(context.user_data.get("start_panel")),
+                    )
+                )
+                if sessions
+                else _empty_sessions_reply_markup(context)
+            )
+            return await query.edit_message_text("已取消群发。", reply_markup=keyboard)
         if not session_name:
             return await query.edit_message_text("已取消。")
         label = _get_cached_session_label(session_name)
@@ -1124,6 +1378,54 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
             f"已选择账号：{label}\n请选择操作：",
             reply_markup=_build_account_menu_keyboard(session_name),
         )
+
+    if action == "delete":
+        await _clear_login_state(uid, context)
+        session_name = payload
+        if not session_name:
+            return await query.edit_message_text("账号无效。")
+        if is_shared_session_name(session_name):
+            return await query.edit_message_text("🚫 共享主协议号不能在这里删除。")
+        if not _can_access_session(query.from_user, session_name):
+            return await query.edit_message_text("🚫 无权删除该协议号。")
+        label = _get_cached_session_label(session_name)
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "⚠️ 确认删除", callback_data=f"{CALLBACK_PREFIX}:delconfirm:{session_name}"
+                    ),
+                    InlineKeyboardButton(
+                        "取消", callback_data=f"{CALLBACK_PREFIX}:menu:{session_name}"
+                    ),
+                ]
+            ]
+        )
+        return await query.edit_message_text(
+            f"确定删除协议号「{label}」吗？\n删除后需要重新登录才能使用。",
+            reply_markup=keyboard,
+        )
+
+    if action == "delconfirm":
+        await _clear_login_state(uid, context)
+        session_name = payload
+        if not session_name or is_shared_session_name(session_name):
+            return await query.edit_message_text("🚫 该协议号不能删除。")
+        if not _can_access_session(query.from_user, session_name):
+            return await query.edit_message_text("🚫 无权删除该协议号。")
+        if not await _delete_session_files(context, session_name):
+            return await query.edit_message_text("删除失败：未找到本地协议号文件。")
+        sessions = _list_session_names(context, query.from_user)
+        keyboard = (
+            InlineKeyboardMarkup(
+                _build_session_list_rows(
+                    sessions, include_start_back=bool(context.user_data.get("start_panel"))
+                )
+            )
+            if sessions
+            else _empty_sessions_reply_markup(context)
+        )
+        return await query.edit_message_text("✅ 协议号已删除。", reply_markup=keyboard)
 
     if action == "channels":
         await _clear_login_state(uid, context)
@@ -1172,11 +1474,35 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
         groups = await _fetch_account_groups(context, session_name)
         if not groups:
             return await query.edit_message_text(
-                f"未获取到群组列表（可能未加入群）。",
+                "未获取到群组列表（可能未加入群）。",
                 reply_markup=_build_account_menu_keyboard(session_name),
             )
-        text = "加入的群组（最多 100 个）：\n" + "\n".join(groups)
-        return await query.edit_message_text(text, reply_markup=_build_account_menu_keyboard(session_name))
+        _GROUP_LIST_CACHE[(uid, session_name)] = groups
+        text, keyboard = _build_group_list_page(session_name, groups, page=1)
+        return await query.edit_message_text(text, reply_markup=keyboard)
+
+    if action == "gpage":
+        await _clear_login_state(uid, context)
+        try:
+            session_name, page_raw = payload.rsplit("|", 1)
+            page = int(page_raw)
+        except (TypeError, ValueError):
+            return await query.edit_message_text("群组分页信息无效，请重新查看群组列表。")
+        if not _require_active_subscription(query.from_user):
+            return await query.edit_message_text("🚫 订阅已到期，无法查看小号。")
+        if not _can_access_session(query.from_user, session_name):
+            return await query.edit_message_text("🚫 无权查看该账号。")
+        groups = _GROUP_LIST_CACHE.get((uid, session_name))
+        if not groups:
+            groups = await _fetch_account_groups(context, session_name)
+            _GROUP_LIST_CACHE[(uid, session_name)] = groups
+        if not groups:
+            return await query.edit_message_text(
+                "未获取到群组列表（可能未加入群）。",
+                reply_markup=_build_account_menu_keyboard(session_name),
+            )
+        text, keyboard = _build_group_list_page(session_name, groups, page)
+        return await query.edit_message_text(text, reply_markup=keyboard)
 
     if action == "join":
         await _clear_login_state(uid, context)

@@ -282,6 +282,8 @@ async def track_bot_group_membership(
     prev_cfg = groups.get(chat_id_str, {})
     prev_type = prev_cfg.get("type", "") if isinstance(prev_cfg, dict) else ""
 
+    inviter = None
+    
     if in_group and not was_in_group and chat.type == "supergroup":
         inviter = getattr(update.my_chat_member, "from_user", None)
         _reward_inviter(chat.id, inviter)
@@ -293,6 +295,39 @@ async def track_bot_group_membership(
     changed = update_bot_group_presence(chat, in_group=in_group, bot_muted=bot_muted)
     if changed:
         print(f"🤖 机器人群状态变更: {chat.title}({chat.id}) -> bot_in_group={in_group}")
+    
+        # # 功能测试 非机器人所有者拉群推出   
+    # if not inviter: 
+    #     return; 
+
+
+    # inviter_id = inviter.id
+
+    # # 当前机器人的主人
+    # owner_id = int(
+    #     context.application.bot_data.get("owner_id", 0)
+    # )
+    
+    # # bot_username = getattr(context.bot, "username", "")
+    # if inviter_id == owner_id:
+    #     return
+
+    # # ==================================================
+    # # 非主人邀请 → 自动退出
+    # # ==================================================
+    # try:
+    #     await context.bot.send_message(
+    #     chat_id=chat.id,
+    #     text="👋🏻 您好，很抱歉，但这个机器人只能由群组管理员添加到群组中。",
+    # )
+
+    #     await context.bot.leave_chat(chat.id)
+    # except Exception as e:
+    #     print(
+    #         "❌ 自动退出群失败 | chat_id=%s | error=%s",
+    #         chat.id,
+    #         e,
+    #     )
 
 
 def register_group_logger_handlers(app):

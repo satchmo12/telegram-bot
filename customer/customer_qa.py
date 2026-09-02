@@ -60,8 +60,12 @@ def get_owner_by_business_connection(connection_id):
 
 def get_business_connection_id(owner_id: str):
     data = load_business_connections()
+
     for connection_id, info in data.items():
-        if info.get("owner_id") == str(owner_id):
+        if (
+            info.get("owner_id") == str(owner_id)
+            and info.get("is_enabled") is True
+        ):
             return connection_id
 
     return None
@@ -305,18 +309,12 @@ async def handle_business_connection(
 ):
 
     connection = update.business_connection
-
     if not connection:
         return
 
-
     connection_id = connection.id
-
     user_id = connection.user.id
-
-
     data = load_business_connections()
-
 
     data[connection_id] = {
         "owner_id": str(user_id),
@@ -326,7 +324,6 @@ async def handle_business_connection(
 
 
     save_business_connections(data)
-
 
     print(
         "保存Business绑定:",
@@ -340,15 +337,12 @@ async def handle_business_connection(
 # ==========================
 
 def register_customer_qa_handlers(app):
-
     app.add_handler(
         CommandHandler(
             "add_customer_qa",
             add_customer_qa
         )
     )
-
-
     app.add_handler(
         CommandHandler(
             "customer_qa_list",

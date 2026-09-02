@@ -323,6 +323,7 @@ def create_music_handlers(music_service):
                     audio=audio_file,
                     title=song["name"],
                     performer=song["artist"],
+                    caption="来自satchmo的爱"
                 )
             finally:
                 audio_file.close()

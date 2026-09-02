@@ -15,7 +15,7 @@ from customer.editUserInfo import handle_media
 from tool.utils.update_helper import get_message
 load_dotenv(override=True)
 
-from telegram import InlineQueryResultCachedPhoto, InlineQueryResultPhoto, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
+from telegram import InlineQueryResultCachedPhoto, InlineQueryResultPhoto, MessageEntity, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import (
     ApplicationBuilder,
     BusinessConnectionHandler,
@@ -386,9 +386,9 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
     
     # 机器人转发
     await forward_to_owner(update, context)
-    # 机器人自动回复
+    # 客服机器人自动回复
     await handle_customer_qa(update, context)
-    
+    # 客服机器人修改功能
     await handle_media(update, context)
     # await forward_to_owner(update, context)
 
@@ -408,8 +408,12 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.effective_user else None
     keyboard_rows = _build_start_panel_rows(context, user_id)
     keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
+    
+    
+    text = _build_start_welcome_text(bot_name)
+    # text = "👏"
     await update.message.reply_text(
-        _build_start_welcome_text(bot_name),
+        text,
         # f"当前启用功能：{feature_text}\n\n",
         reply_markup=keyboard,
         parse_mode="HTML",
@@ -613,7 +617,7 @@ def _build_start_panel_rows(
 def _build_start_welcome_text(bot_name: str) -> str:
     safe_name = html.escape(str(bot_name or "机器人"))
     if str(bot_name or "").strip() == MASTER_BOT_NAME:
-        return f"👋 欢迎使用 {safe_name}\n 漂流瓶正在测试中 @qplpbot"
+        return f"👏 欢迎使用 {safe_name}\n 能帮你便捷安全地管理频道和群组，是TG上领先的管理的机器人之一\n➡️请赋予我频道/群组管理员权限！"
     # "用户名出售 @woaini555  @e6web @fj618 @iabc6 @iabc7 @chihe2 @bcifa @bcifb @bciff\n"
 
     if MASTER_BOT_USERNAME:
@@ -622,7 +626,7 @@ def _build_start_welcome_text(bot_name: str) -> str:
         )
     else:
         master_label = html.escape(MASTER_BOT_NAME)
-    return f"👋 欢迎使用 {safe_name} 克隆自 {master_label}\n 漂流瓶正在测试中 @qplpbot \n 克隆机器人，看片请点击 {master_label}"
+    return f"👏欢迎使用 {safe_name} 克隆自 {master_label}\n 能帮你便捷安全地管理频道和群组，是TG上领先的管理的机器人之一\n➡️请赋予我频道/群组管理员权限！"
 
 
 async def clear_login_prompt_on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -739,7 +743,8 @@ def create_app(bot_cfg: dict):
     
     # 内连
     app.add_handler(InlineQueryHandler(inline_query_handler))
-    # app.add_handler( TypeHandler(Update, guest_bot_handler)  , group=-1200)
+    # 访客机器人必须新的才可以，别的地方启动过就不可以了 guest_bot_handler 这个消息就见听不到
+    # app.add_handler(TypeHandler(Update, guest_bot_handler)  , group=-1200)
     # app.add_handler(MessageHandler(filters.PHOTO, get_file_id))
 
     # ===== 注册所有功能模块 =====
@@ -966,11 +971,6 @@ async def guest_bot_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    print("\n========================================", flush=True)
-    print("🔥 收到 Telegram Update", flush=True)
-    print(update, flush=True)
-    print("========================================", flush=True)
-
     # --------------------------------------------------------
     # 获取 Guest Message
     # --------------------------------------------------------

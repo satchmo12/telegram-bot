@@ -4,6 +4,7 @@ import traceback
 from channel.channel_forwarder import handle_message
 from command_router import dispatch_command
 from forward.message_forward import handle_text_private_message
+from game.calculator import calculator_handler
 from game.checkin import daycheckin
 from game.lottery_game import points_lottery_panel
 from game.talk_lottery_core import handle_talk_lottery
@@ -92,6 +93,8 @@ async def handle_text_dispatcher(update: Update, context: ContextTypes.DEFAULT_T
         await handle_qa_message(update, context)  # 问答模块
         await handle_chengyu(update, context)  # 成语接龙模块
         await handle_talk_lottery(update, context)  # 聊天抽奖
+        
+        await calculator_handler(update, context)  # 计算器
         # await handle_text_message(update, context)  # 聊天记录 (只记录私聊) 
         await handle_text_private_message(update, context)  # 聊天记录 (只记录私聊)
        
