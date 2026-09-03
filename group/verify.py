@@ -1,4 +1,5 @@
 import asyncio
+import html
 from datetime import datetime, timedelta
 import logging
 import time
@@ -11,22 +12,21 @@ from telegram import (
 )
 
 from telegram.constants import ChatMemberStatus
+from telegram.constants import ParseMode
 
 from telegram.ext import (
     CallbackQueryHandler,
     ChatJoinRequestHandler,
+    ChatMemberHandler,
     ContextTypes,
     CommandHandler,
     MessageHandler,
     filters,
 )
+from telegram.helpers import mention_html
 from group.grouplist import load_users, save_users
 
-from command_router import (
-    FEATURE_WELCOME,
-    is_feature_enabled,
-    register_command,
-)
+from command_router import register_command
 from utils import (
     BOT_ID,
     BOT_USER_FILE,
@@ -43,62 +43,171 @@ pending_verification = {}
 # 映射用户 ID 到验证群 ID
 override_chat_map = {}
 
-async def handle_new_member_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+JOIN_EVENT_DEDUP_SECONDS = 15
+_recent_join_events = {}
 
-    chat_id = str(update.effective_chat.id)
 
-    group_config = get_group_whitelist(context).get(chat_id, {})
-    welcome_msg_template = group_config.get("welcome_message", "欢迎 {name} 🎉")
+def _is_new_member_join(old_status, new_status) -> bool:
+    old_status = str(old_status or "").lower()
+    new_status = str(new_status or "").lower()
+    return old_status in {"left", "kicked"} and new_status in {
+        "member",
+        "restricted",
+        "administrator",
+        "creator",
+        "owner",
+    }
 
-    if not group_config.get("verify", False):
 
-        # 静默模式不提醒
-        if not is_feature_enabled(chat_id, FEATURE_WELCOME):
-            return
+def _claim_join_event(chat_id: str, user_id: int) -> bool:
+    """Avoid duplicate handling when both service and chat_member updates arrive."""
+    now = time.monotonic()
+    key = (str(chat_id), int(user_id))
+    previous = _recent_join_events.get(key, 0.0)
+    if previous and now - previous < JOIN_EVENT_DEDUP_SECONDS:
+        return False
+    _recent_join_events[key] = now
+    if len(_recent_join_events) > 2000:
+        cutoff = now - JOIN_EVENT_DEDUP_SECONDS
+        for stale_key, timestamp in list(_recent_join_events.items()):
+            if timestamp < cutoff:
+                _recent_join_events.pop(stale_key, None)
+    return True
 
-        for member in update.message.new_chat_members:
-            welcome_msg = welcome_msg_template.format(name=member.full_name)
-            await update.message.reply_text(welcome_msg)
+
+async def _send_join_message(
+    chat_id: str, text: str, context: ContextTypes.DEFAULT_TYPE, reply_markup=None
+):
+    return await context.bot.send_message(
+        chat_id=int(chat_id),
+        text=text,
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def _process_new_members(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: str,
+    members: list,
+    *,
+    source: str,
+):
+    members = [member for member in members if member and _claim_join_event(chat_id, member.id)]
+    if not members:
         return
 
-    # 获取机器人自身权限
+    print(
+        f"[入群事件] source={source} chat={chat_id} "
+        f"members={','.join(str(member.id) for member in members)}"
+    )
+    group_config = get_group_whitelist(context).get(chat_id, {})
+    welcome_msg_template = str(
+        group_config.get("welcome_message") or "欢迎 {name} 🎉"
+    )
+
+    if not group_config.get("verify", False):
+        if not bool(group_config.get("welcome", False)):
+            return
+        for member in members:
+            try:
+                welcome_msg = welcome_msg_template.format(
+                    name=mention_html(member.id, member.full_name or "新成员"),
+                    username=html.escape(f"@{member.username}") if member.username else "",
+                    user_id=member.id,
+                )
+            except (KeyError, ValueError, IndexError):
+                welcome_msg = (
+                    f"欢迎 {mention_html(member.id, member.full_name or '新成员')} 🎉"
+                )
+            try:
+                await _send_join_message(chat_id, welcome_msg, context)
+                print(f"[入群欢迎] 已发送 chat={chat_id} user={member.id}")
+            except Exception as exc:
+                print(f"[入群欢迎] 发送失败 chat={chat_id} user={member.id}: {exc}")
+        return
+
     bot_is_admin = await is_bot_admin(update, context)
+    bot_username = (getattr(context.bot, "username", "") or "").strip().lstrip("@")
+    if not bot_username:
+        try:
+            bot_username = (await context.bot.get_me()).username or ""
+        except Exception as exc:
+            print(f"[入群验证] 获取机器人用户名失败 chat={chat_id}: {exc}")
 
-    for user in update.message.new_chat_members:
+    for user in members:
         user_id = user.id
-
-        # 私聊验证链接（无论是否能禁言，都生成）
-        bot_username = (await context.bot.get_me()).username
-        verify_link = f"https://t.me/{bot_username}?start=verify_{user_id}"
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("✅ 点此私聊验证身份", url=verify_link)]]
-        )
+        keyboard = None
+        if bot_username:
+            verify_link = f"https://t.me/{bot_username}?start=verify_{user_id}"
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("✅ 点此私聊验证身份", url=verify_link)]]
+            )
 
         if bot_is_admin:
-            # 机器人有权限时，禁言+验证
-            await context.bot.restrict_chat_member(
-                chat_id, user_id, permissions=ChatPermissions(can_send_messages=False)
-            )
-            # 记录验证时间（2分钟）
-            pending_verification.setdefault(chat_id, {})[
-                user_id
-            ] = datetime.utcnow() + timedelta(minutes=2)
-            override_chat_map[user_id] = chat_id
-            # 发送提示
-            tip_msg = await update.message.reply_text(
-                f"👋 欢迎 {user.full_name}！请在 2 分钟内私聊我进行验证，否则将被移出群组。",
-                reply_markup=keyboard,
-            )
-            # 启动自动踢
-            asyncio.create_task(auto_kick_if_not_verified(chat_id, user_id, context))
+            try:
+                await context.bot.restrict_chat_member(
+                    int(chat_id), user_id, permissions=ChatPermissions(can_send_messages=False)
+                )
+                pending_verification.setdefault(chat_id, {})[
+                    user_id
+                ] = datetime.utcnow() + timedelta(minutes=2)
+                override_chat_map[user_id] = chat_id
+                tip_msg = await _send_join_message(
+                    chat_id,
+                    f"👋 欢迎 {mention_html(user.id, user.full_name or '新成员')}！"
+                    "请在 2 分钟内私聊我进行验证，否则将被移出群组。",
+                    context,
+                    reply_markup=keyboard,
+                )
+                asyncio.create_task(auto_kick_if_not_verified(chat_id, user_id, context))
+                asyncio.create_task(delete_later(tip_msg, delay=60 * 2))
+                continue
+            except Exception as exc:
+                print(f"[入群验证] 禁言失败 chat={chat_id} user={user_id}: {exc}")
 
-            asyncio.create_task(delete_later(tip_msg, delay=60 * 2))
-        else:
-            # 机器人不是管理员，只发送私聊验证提示
-            await update.message.reply_text(
-                f"👋 欢迎 {user.full_name}！请点击下面按钮私聊我进行验证。",
+        try:
+            await _send_join_message(
+                chat_id,
+                f"👋 欢迎 {mention_html(user.id, user.full_name or '新成员')}！"
+                "请点击下面按钮私聊我进行验证。",
+                context,
                 reply_markup=keyboard,
             )
+        except Exception as exc:
+            print(f"[入群验证] 欢迎提示发送失败 chat={chat_id} user={user_id}: {exc}")
+
+
+async def handle_new_member_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.new_chat_members or not update.effective_chat:
+        return
+    await _process_new_members(
+        update,
+        context,
+        str(update.effective_chat.id),
+        list(update.message.new_chat_members),
+        source="new_chat_members",
+    )
+
+
+async def handle_chat_member_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fallback for groups where Telegram does not deliver new_chat_members messages."""
+    change = update.chat_member
+    if not change or not change.chat or not _is_new_member_join(
+        change.old_chat_member.status, change.new_chat_member.status
+    ):
+        return
+    member = getattr(change.new_chat_member, "user", None)
+    if not member or getattr(member, "is_bot", False):
+        return
+    await _process_new_members(
+        update,
+        context,
+        str(change.chat.id),
+        [member],
+        source="chat_member",
+    )
 
 
 # /start 私聊入口
@@ -303,7 +412,17 @@ def register_verification_handlers(app):
     app.add_handler(CallbackQueryHandler(verify_callback, pattern=r"^verify_group\|"))
 
     app.add_handler(
-        MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member_verify)
+        MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member_verify),
+        # 与邀请统计（group=10）和用户记录（group=12）分开，避免同组内
+        # 第一个匹配的 MessageHandler 截获入群欢迎事件。
+        group=11,
+    )
+    app.add_handler(
+        ChatMemberHandler(
+            handle_chat_member_join,
+            chat_member_types=ChatMemberHandler.CHAT_MEMBER,
+        ),
+        group=12,
     )
 
     app.add_handler(
