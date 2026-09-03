@@ -106,6 +106,7 @@ CONFIG_FILE = os.path.join(CON_DATA_DIR, "virus_config.json")
 
 _cache_data = {}
 _cache_timestamp = {}
+_cache_file_signatures = {}
 _cache_lock = Lock()
 CACHE_TTL = 300  # 缓存有效时间（秒）
 
@@ -256,6 +257,39 @@ def _is_expired(path: str) -> bool:
     return (time.time() - _cache_timestamp.get(path, 0)) > CACHE_TTL
 
 
+def _file_signature(path: str):
+    """Small stat signature used to detect manual JSON edits without reparsing each call."""
+    try:
+        stat = os.stat(path)
+        return stat.st_mtime_ns, stat.st_size
+    except OSError:
+        return None
+
+
+def refresh_json_cache_if_changed(path: str) -> bool:
+    """Invalidate one cached JSON file when it was edited outside save_json().
+
+    Scheduled jobs call this once per run so direct edits to groups.json / timed
+    message configuration take effect on the next job tick instead of waiting for
+    the normal five-minute cache TTL.  Regular message paths keep their fast cache.
+    """
+    resolved_path = _resolve_json_path(path)
+    current_signature = _file_signature(resolved_path)
+    with _cache_lock:
+        if resolved_path not in _cache_data:
+            return False
+        cached_signature = _cache_file_signatures.get(resolved_path)
+        if cached_signature is None:
+            _cache_file_signatures[resolved_path] = current_signature
+            return False
+        if cached_signature == current_signature:
+            return False
+        _cache_data.pop(resolved_path, None)
+        _cache_timestamp.pop(resolved_path, None)
+        _cache_file_signatures.pop(resolved_path, None)
+        return True
+
+
 def load_json(path: str):
     """带缓存的 JSON 加载，支持 list 和 dict，自动隔离+自动复制默认配置"""
 
@@ -291,6 +325,7 @@ def load_json(path: str):
                 if not os.path.exists(path):
                     _cache_data[path] = {}
                     _cache_timestamp[path] = time.time()
+                    _cache_file_signatures[path] = None
                     return _cache_data[path]
 
             # ===== 正常读取 =====
@@ -305,6 +340,7 @@ def load_json(path: str):
                 _cache_data[path] = {}
 
             _cache_timestamp[path] = time.time()
+            _cache_file_signatures[path] = _file_signature(path)
 
         # groups.json 默认 bot_in_group=false（避免误判在群内）。
         # 只在缓存重载时补一次，避免每条消息读取配置时重复遍历全部群组。
@@ -359,6 +395,7 @@ def save_json(path: str, data):
             raise
         _cache_data[path] = data
         _cache_timestamp[path] = time.time()
+        _cache_file_signatures[path] = _file_signature(path)
 
 
 def invalidate_cache(path: str):
@@ -367,6 +404,7 @@ def invalidate_cache(path: str):
     with _cache_lock:
         _cache_data.pop(path, None)
         _cache_timestamp.pop(path, None)
+        _cache_file_signatures.pop(path, None)
 
 
 # ===== 拼音处理 =====

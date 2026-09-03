@@ -227,6 +227,11 @@ async def show_invites(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def register_invite_handlers(app):
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member))
+    # PTB 在同一个 handler group 内只会执行第一个匹配的 handler。
+    # 新成员事件还要交给欢迎词和用户记录处理，因此使用独立 group。
+    app.add_handler(
+        MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member),
+        group=10,
+    )
     app.add_handler(CommandHandler("invites", show_invites))
     app.add_handler(CommandHandler("link", create_personal_invite_link))

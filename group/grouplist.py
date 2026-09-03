@@ -486,8 +486,21 @@ async def clean_inactive_members(update: Update, context: ContextTypes.DEFAULT_T
 
 def register_user_tracker_handlers(app):
     # 不拦截 /命令，避免吞掉后续 CommandHandler（如 /sign）
-    app.add_handler(MessageHandler(filters.ChatType.GROUPS & (~filters.COMMAND), record_user))
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member))
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS
+            & (~filters.COMMAND)
+            & (~filters.StatusUpdate.NEW_CHAT_MEMBERS),
+            record_user,
+        ),
+        group=20,
+    )
+    # 必须与普通群消息记录器、欢迎词、邀请统计分开 group；否则同一条
+    # NEW_CHAT_MEMBERS 更新会被第一个匹配的 MessageHandler 吞掉。
+    app.add_handler(
+        MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member),
+        group=12,
+    )
     # 群用户列表命令
     app.add_handler(CommandHandler("list", list_group_users))
     # 群用户私聊链接命令

@@ -37,6 +37,7 @@ from utils import (
     is_admin,
     is_super_admin,
     load_json,
+    refresh_json_cache_if_changed,
     save_json,
     safe_reply,
 )
@@ -116,6 +117,8 @@ last_ad_push_ts = {}
 last_ad_push_slot = {}
 last_global_ad_push_ts = {}
 last_global_ad_push_slot = {}
+active_speak_pool_cache = {}
+active_speak_memory_version = {}
 
 # ---------------- 数据存储 ----------------
 
@@ -447,6 +450,10 @@ def add_pair(q_text: str, a_text: str):
     answers = memory[nq]["answers"]
     answers[a_text] = answers.get(a_text, 0) + 1
     memory[nq]["total"] += 1
+    bot_name = get_runtime_bot_name() or "default"
+    active_speak_memory_version[bot_name] = (
+        active_speak_memory_version.get(bot_name, 0) + 1
+    )
     maybe_save_memory(memory)
 
 
@@ -1192,41 +1199,83 @@ async def navigation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
 
-def _pick_active_speak_text(memory: dict, ad_keywords: list[str]) -> Optional[str]:
+def _build_active_speak_pool(memory: dict, ad_keywords: list[str]) -> tuple[list[str], list[str], list[int]]:
+    """Build reusable candidate pools once for one scheduled-send run."""
     if not isinstance(memory, dict) or not memory:
-        return None
+        return [], [], []
+
+    keyword_pattern = None
+    unique_keywords = sorted({kw for kw in ad_keywords if kw}, key=len, reverse=True)
+    if unique_keywords:
+        keyword_pattern = re.compile("|".join(re.escape(kw) for kw in unique_keywords))
+
+    def is_ad_text(text: str) -> bool:
+        return bool(keyword_pattern and keyword_pattern.search((text or "").lower()))
 
     question_pool = []
     answer_pool = {}
-
     for q, info in memory.items():
-        if isinstance(q, str) and looks_ok(q) and not _contains_ad(q, ad_keywords):
+        if isinstance(q, str) and looks_ok(q) and not is_ad_text(q):
             question_pool.append(q)
 
         answers = info.get("answers", {}) if isinstance(info, dict) else {}
         if not isinstance(answers, dict):
             continue
         for ans, cnt in answers.items():
-            if (
+            if not (
                 isinstance(ans, str)
                 and looks_ok(ans)
-                and not _contains_ad(ans, ad_keywords)
+                and not is_ad_text(ans)
             ):
-                try:
-                    cnt_num = int(cnt or 0)
-                except Exception:
-                    cnt_num = 1
-                answer_pool[ans] = answer_pool.get(ans, 0) + max(1, cnt_num)
+                continue
+            try:
+                cnt_num = int(cnt or 0)
+            except Exception:
+                cnt_num = 1
+            answer_pool[ans] = answer_pool.get(ans, 0) + max(1, cnt_num)
 
-    if not question_pool and not answer_pool:
+    answers = list(answer_pool)
+    weights = [max(1, answer_pool[answer]) for answer in answers]
+    return question_pool, answers, weights
+
+
+def _get_active_speak_pool(
+    context: ContextTypes.DEFAULT_TYPE,
+    memory: dict,
+    raw_ad_keywords,
+    ad_keywords: list[str],
+) -> tuple[list[str], list[str], list[int]]:
+    """Cache the expensive learned-pairs scan until memory or ad rules change."""
+    bot_name = get_runtime_bot_name() or str(
+        context.application.bot_data.get("name", "default")
+    )
+    cache_key = (
+        id(memory),
+        id(raw_ad_keywords),
+        active_speak_memory_version.get(bot_name, 0),
+    )
+    cached = active_speak_pool_cache.get(bot_name)
+    if cached and cached.get("key") == cache_key:
+        return cached["pool"]
+
+    started = time.perf_counter()
+    pool = _build_active_speak_pool(memory, ad_keywords)
+    active_speak_pool_cache[bot_name] = {"key": cache_key, "pool": pool}
+    print(
+        f"[定时发送] 候选内容缓存已构建: bot={bot_name} "
+        f"questions={len(pool[0])} answers={len(pool[1])} "
+        f"cost={time.perf_counter() - started:.3f}s"
+    )
+    return pool
+
+
+def _pick_active_speak_text(candidate_pool: tuple[list[str], list[str], list[int]]) -> Optional[str]:
+    question_pool, answers, weights = candidate_pool
+    if not question_pool and not answers:
         return None
-
-    choose_question = bool(question_pool) and (not answer_pool or random.random() < 0.5)
+    choose_question = bool(question_pool) and (not answers or random.random() < 0.5)
     if choose_question:
         return random.choice(question_pool)
-
-    answers = list(answer_pool.keys())
-    weights = [max(1, answer_pool[a]) for a in answers]
     return random.choices(answers, weights=weights, k=1)[0]
 
 
@@ -1262,15 +1311,26 @@ async def _send_active_speak_with_delay(bot, chat_id: int, text: str, delay_sec:
 
 # ---------------- 定时群发 ----------------
 async def speaking_to(context: ContextTypes.DEFAULT_TYPE):
+    # 定时任务每分钟运行一次。仅在配置文件被手动修改时失效缓存，避免
+    # 直接编辑 JSON 后还要等待五分钟 CACHE_TTL 才读取到新的开关/频率/文案。
+    refreshed = any(
+        refresh_json_cache_if_changed(path)
+        for path in (GROUP_LIST_FILE, DATA_FILE, AD_KEYWORDS_FILE)
+    )
+    if refreshed:
+        print(f"[定时发送] 检测到配置已更新: bot={get_runtime_bot_name()}")
     groups = load_json(GROUP_LIST_FILE)
     memory = get_memory()
-    ad_keywords = _normalize_keywords(load_json(AD_KEYWORDS_FILE))
+    raw_ad_keywords = load_json(AD_KEYWORDS_FILE)
+    ad_keywords = _normalize_keywords(raw_ad_keywords)
     now_ts = time.time()
 
     if not isinstance(groups, dict) or not groups:
         return
 
-    # 复制快照，避免并发写 groups.json 时触发 "dictionary changed size during iteration"
+    # 先筛选本分钟真正到期的群。旧实现会为每一个到期群重复遍历全部
+    # learned_pairs；小雅等机器人有数万条记忆，会显著拖慢定时任务。
+    due_groups = []
     for chat_id, cfg in list(groups.items()):
         if not isinstance(cfg, dict):
             continue
@@ -1298,17 +1358,30 @@ async def speaking_to(context: ContextTypes.DEFAULT_TYPE):
         runtime_chat_key = get_runtime_chat_key(context, str(chat_id))
         current_minute = int(now_ts // 60)
         offset_min = _active_speak_offset_min(runtime_chat_key, interval_min)
-        title = cfg.get("title", "Unknown")
-        
-        # 确定性错峰：按分钟槽位分散不同机器人/群的触发时机
         if current_minute % interval_min != offset_min:
             continue
-
         if now_ts - last_active_speak_ts.get(runtime_chat_key, 0) < interval_min * 60:
             continue
+        due_groups.append((chat_id, cfg, interval_min, runtime_chat_key))
 
+    if not due_groups:
+        return
+
+    # 只扫描一次记忆库，随后为每个群从同一候选池随机选择内容。
+    candidate_pool = _get_active_speak_pool(
+        context, memory, raw_ad_keywords, ad_keywords
+    )
+    if not _pick_active_speak_text(candidate_pool):
+        print(
+            f"[定时发送] 无可用主动说话内容: bot={get_runtime_bot_name()} "
+            f"memory={len(memory) if isinstance(memory, dict) else 0}"
+        )
+        return
+
+    for chat_id, cfg, interval_min, runtime_chat_key in due_groups:
+        title = cfg.get("title", "Unknown")
         try:
-            text = _pick_active_speak_text(memory, ad_keywords)
+            text = _pick_active_speak_text(candidate_pool)
             if not text:
                 continue
             last_active_speak_ts[runtime_chat_key] = now_ts
@@ -1319,7 +1392,6 @@ async def speaking_to(context: ContextTypes.DEFAULT_TYPE):
                 text,
                 jitter_sec,
             )
-            # print(f"✅ 主动说话发送成功: {chat_id} ({interval_min}min)")
         except Exception as e:
             if isinstance(e, telegram.error.Forbidden) or (
                 isinstance(e, telegram.error.BadRequest)
@@ -1327,7 +1399,6 @@ async def speaking_to(context: ContextTypes.DEFAULT_TYPE):
             ):
                 _set_group_bot_muted_flag(str(chat_id), True)
             bot_name = get_runtime_bot_name() or getattr(context.bot, "username", "")
-            
             print(f"⚠️ 主动说话发送失败: bot={bot_name} chat={chat_id}, title={title} {e}")
 
 
@@ -1417,6 +1488,12 @@ async def _global_ad_push_to_groups(
 
 
 async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
+    refreshed = any(
+        refresh_json_cache_if_changed(path)
+        for path in (GROUP_LIST_FILE, GLOBAL_AD_PUSH_FILE)
+    )
+    if refreshed:
+        print(f"[定时广告] 检测到配置已更新: bot={get_runtime_bot_name()}")
     groups = load_json(GROUP_LIST_FILE)
     now_ts = time.time()
     current_hm = time.strftime("%H:%M")
