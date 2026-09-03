@@ -694,6 +694,13 @@ async def handle_private_dialog_callback(
     if not update.effective_chat or update.effective_chat.type != "private":
         return await query.edit_message_text("⚠️ 请在私聊里使用该面板")
 
+    enabled_features = context.application.bot_data.get("enabled_features") or set()
+    if "private_forward" not in enabled_features:
+        return await query.edit_message_text(
+            "⚠️ 当前克隆机器人未开启「私聊双向转发」功能。\n"
+            "请在机器人管理中启用 private_forward 并重启该机器人后再使用。"
+        )
+
     parts = query.data.split(":")
     action = parts[1] if len(parts) > 1 else ""
     state = _get_owner_runtime_state(context)

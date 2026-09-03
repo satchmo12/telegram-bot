@@ -3,7 +3,12 @@
 from telegram import Update
 from telegram.ext import ChatMemberHandler, ContextTypes
 import time
-from utils import load_json, save_json, INVITE_BOT_USERS_FILE
+from utils import (
+    INVITE_BOT_USERS_FILE,
+    load_json,
+    save_json,
+    update_bot_admin_cache,
+)
 
 GROUPS_FILE = "data/groups.json"
 
@@ -258,6 +263,14 @@ async def track_bot_group_membership(
 
     old_status = update.my_chat_member.old_chat_member.status
     new_status = update.my_chat_member.new_chat_member.status
+
+    # my_chat_member 是机器人自身身份变化的可靠事件来源。这里直接刷新
+    # 广告检测使用的管理员缓存，之后无需在每条消息里调用 Telegram API 查询。
+    update_bot_admin_cache(
+        context.bot.id,
+        chat.id,
+        str(new_status).lower() in {"administrator", "creator", "owner"},
+    )
 
     # 状态没变化时，若已是离群状态仍同步 bot_in_group=false
     status_unchanged = old_status == new_status

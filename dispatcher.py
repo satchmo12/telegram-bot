@@ -1,4 +1,5 @@
 import asyncio
+import time
 import traceback
 
 from channel.channel_forwarder import handle_message
@@ -30,19 +31,60 @@ from channel.telethon_login import handle_telethon_login_text
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 可以并行执行
-    tasks = [
-        check_and_restrict_scam_user(update, context),
-        check_for_ads(update, context),
-        log_group(update, context),
-        watch_special_users(update, context),
-    ]
-    if is_feature_enabled(context.application, "channel"):
-        tasks.append(handle_message(update, context))
-    await asyncio.gather(*tasks)
 
-    await handle_text_dispatcher(update, context)
+_BACKGROUND_TASKS = set()
+SLOW_HANDLER_SECONDS = 0.8
+
+
+async def _run_background_task(label: str, coroutine):
+    """Run non-response work without delaying the user-facing message pipeline."""
+    started = time.perf_counter()
+    try:
+        await coroutine
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        print(f"[后台任务出错] {label}: {exc}")
+        traceback.print_exc()
+    finally:
+        elapsed = time.perf_counter() - started
+        if elapsed >= SLOW_HANDLER_SECONDS:
+            print(f"[性能] 后台任务耗时 {elapsed:.3f}s: {label}")
+
+
+def _schedule_background(label: str, coroutine):
+    task = asyncio.create_task(_run_background_task(label, coroutine), name=f"bg:{label}")
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+
+async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 这些任务不决定普通消息/命令的回复内容。此前 asyncio.gather 会等待其中
+    # 任意一次管理员接口或频道转发网络请求完成，导致用户感觉“机器人反应慢”。
+    chat = update.effective_chat
+    is_group_chat = bool(chat and chat.type in {"group", "supergroup"})
+    background_tasks = []
+    if is_group_chat:
+        background_tasks.extend(
+            [
+                ("scam_check", check_and_restrict_scam_user(update, context)),
+                ("ad_check", check_for_ads(update, context)),
+                ("group_log", log_group(update, context)),
+                ("special_follow", watch_special_users(update, context)),
+            ]
+        )
+        if is_feature_enabled(context.application, "channel"):
+            background_tasks.append(("channel_forward", handle_message(update, context)))
+    for label, coroutine in background_tasks:
+        _schedule_background(label, coroutine)
+
+    started = time.perf_counter()
+    try:
+        await handle_text_dispatcher(update, context)
+    finally:
+        elapsed = time.perf_counter() - started
+        if elapsed >= SLOW_HANDLER_SECONDS:
+            print(f"[性能] 前台消息处理耗时 {elapsed:.3f}s")
 
 
 async def handle_text_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE):

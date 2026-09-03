@@ -16,6 +16,10 @@ import shutil
 
 BOT_ID = None
 ADMIN_CACHE = {}  # {chat_id: {"admins": set(), "timestamp": float}}
+# 机器人自身管理员身份缓存。my_chat_member 状态变化时会即时更新；TTL 是兜底，
+# 避免因极少数漏收 update 导致永久使用过期状态。
+BOT_ADMIN_CACHE = {}  # {(bot_id, chat_id): {"is_admin": bool, "timestamp": float}}
+BOT_ADMIN_CACHE_TTL = 6 * 60 * 60
 
 bot_reply = False
 
@@ -259,7 +263,9 @@ def load_json(path: str):
     path = _resolve_json_path(path)
     # print(path)
     with _cache_lock:
+        cache_reloaded = False
         if path not in _cache_data or _is_expired(path):
+            cache_reloaded = True
 
             # ===== 如果隔离路径不存在 =====
             if not os.path.exists(path):
@@ -300,9 +306,11 @@ def load_json(path: str):
 
             _cache_timestamp[path] = time.time()
 
-        # groups.json 默认 bot_in_group=false（避免误判在群内）
+        # groups.json 默认 bot_in_group=false（避免误判在群内）。
+        # 只在缓存重载时补一次，避免每条消息读取配置时重复遍历全部群组。
         if (
-            isinstance(_cache_data.get(path), dict)
+            cache_reloaded
+            and isinstance(_cache_data.get(path), dict)
             and isinstance(original_path, str)
             and original_path.replace("\\", "/").endswith("groups.json")
         ):
@@ -446,65 +454,73 @@ def is_valid_idiom(word, idioms_data):
 GROUP_WHITELIST = {}
 SUPER_ADMINS = [int(uid) for uid in safe_load_file(ADMIN_WHITELIST_FILE)]
 
+# 群配置默认字段不应在每条消息中重复创建和遍历。
+GROUP_CONFIG_DEFAULTS = {
+    "enabled": True,
+    "bot_enabled": True,
+    "bot_in_group": False,
+    "recommend": False,
+    "exposure": 0,
+    "recommend_last_ts": 0,
+    "verify": False,
+    "silent": False,
+    "ad_filter": False,
+    "ad_push_enabled": False,
+    "ad_push_mode": "interval",
+    "ad_push_interval_min": 120,
+    "ad_push_text": "",
+    "ad_push_times": "",
+    "business_coop_link": "",
+    "manor": False,
+    "welcome": False,
+    "learning_enabled": False,
+    "reply_enabled": False,
+    "voice_reply_enabled": False,
+    "active_speak_enabled": False,
+    "active_speak_interval_min": 2,
+    "points_lottery_enabled": False,
+    "talk_lottery_enabled": False,
+    "points_lottery_cost": 100,
+    "points_lottery_display_text": "奖池丰厚，祝您好运。",
+    "force_subscribe_new_only": False,
+    "force_subscribe_set_ts": 0,
+    "talk_points_enabled": False,
+    "talk_lottery_trigger_rate": 100,
+    "talk_points_amount": 1,
+    "talk_points_daily_limit": 20,
+    "talk_points_min_length": 5,
+    "invite_points_enabled": False,
+    "invite_points_amount": 100,
+    "invite_points_daily_limit": 500,
+    "force_subscribe": False,
+    "name_change_notice": False,
+}
+# key -> (loaded dict identity, group count). Group count lets newly-created groups be initialized.
+_GROUP_CONFIG_NORMALIZATION_STATE = {}
+
 
 def get_group_whitelist(context: ContextTypes.DEFAULT_TYPE = None) -> dict:
     data = load_json(GROUP_LIST_FILE)
     if not isinstance(data, dict):
         return {}
 
+    cache_key = get_bot_path(context, GROUP_LIST_FILE)
+    state = (id(data), len(data))
+    if _GROUP_CONFIG_NORMALIZATION_STATE.get(cache_key) == state:
+        return data
+
     changed = False
-    for chat_id, cfg in data.items():
+    for cfg in data.values():
         if not isinstance(cfg, dict):
             continue
-
-        defaults = {
-            "enabled": True,
-            "bot_enabled": True,
-            "bot_in_group": False,
-            "recommend": False,
-            "exposure": 0,
-            "recommend_last_ts": 0,
-            "verify": False,
-            "silent": False,
-            "ad_filter": False,
-            "ad_push_enabled": False,
-            "ad_push_mode": "interval",
-            "ad_push_interval_min": 120,
-            "ad_push_text": "",
-            "ad_push_times": "",
-            "business_coop_link": "",
-            "manor": False,
-            "welcome": False,
-            "learning_enabled": False,
-            "reply_enabled": False,
-            "voice_reply_enabled": False,
-            "active_speak_enabled": False,
-            "active_speak_interval_min": 2,
-            "points_lottery_enabled": False,
-            "talk_lottery_enabled": False,
-            "points_lottery_cost": 100,
-            "points_lottery_display_text": "奖池丰厚，祝您好运。",
-            "force_subscribe_new_only": False,
-            "force_subscribe_set_ts": 0,
-            "talk_points_enabled": False,
-            "talk_lottery_trigger_rate": 100,
-            "talk_points_amount": 1,
-            "talk_points_daily_limit": 20,
-            "talk_points_min_length": 5,
-            "invite_points_enabled": False,
-            "invite_points_amount": 100,
-            "invite_points_daily_limit": 500,
-            "force_subscribe": False,
-            "name_change_notice": False,
-        }
-        for key, val in defaults.items():
+        for key, val in GROUP_CONFIG_DEFAULTS.items():
             if key not in cfg:
                 cfg[key] = val
                 changed = True
 
     if changed:
         save_json(GROUP_LIST_FILE, data)
-
+    _GROUP_CONFIG_NORMALIZATION_STATE[cache_key] = (id(data), len(data))
     return data
 
 
@@ -784,10 +800,53 @@ async def get_target_user(
     return None
 
 
+def update_bot_admin_cache(bot_id: int, chat_id: int, is_admin: bool) -> None:
+    """由 my_chat_member 更新机器人自身的管理员身份缓存。"""
+    try:
+        cache_key = (int(bot_id), int(chat_id))
+    except (TypeError, ValueError):
+        return
+    BOT_ADMIN_CACHE[cache_key] = {
+        "is_admin": bool(is_admin),
+        "timestamp": time.time(),
+    }
+    # 机器人身份变化也会影响完整管理员列表，顺带清掉旧缓存。
+    ADMIN_CACHE.pop(cache_key, None)
+
+
+def invalidate_bot_admin_cache(bot_id: int, chat_id: int) -> None:
+    try:
+        BOT_ADMIN_CACHE.pop((int(bot_id), int(chat_id)), None)
+    except (TypeError, ValueError):
+        return
+
+
 async def is_bot_admin(update, context):
+    """检查机器人是否管理员，正常情况下不请求 get_chat_administrators。"""
+    chat = getattr(update, "effective_chat", None)
+    if not chat:
+        return False
+
     bot_id = context.bot.id
-    admin_ids = await get_admin_ids(update.effective_chat.id, context)
-    return bot_id in admin_ids
+    chat_id = chat.id
+    cache_key = (bot_id, chat_id)
+    now = time.time()
+    cached = BOT_ADMIN_CACHE.get(cache_key)
+    if cached and now - cached.get("timestamp", 0) < BOT_ADMIN_CACHE_TTL:
+        return bool(cached.get("is_admin", False))
+
+    try:
+        member = await context.bot.get_chat_member(chat_id, bot_id)
+        status = str(getattr(member, "status", "") or "").lower()
+        is_admin = status in {"administrator", "creator", "owner"}
+        update_bot_admin_cache(bot_id, chat_id, is_admin)
+        return is_admin
+    except Exception as exc:
+        # 网络短暂异常时优先使用已有状态，避免一次超时关闭广告过滤。
+        if cached:
+            return bool(cached.get("is_admin", False))
+        print(f"⚠️ 获取机器人管理员状态失败: {exc}")
+        return False
 
 
 # 缓存版获取管理员 ID 集合
@@ -872,4 +931,3 @@ def save_chat_message(log_dir: str, chat_id: str, msg):
     })
 
     save_json(file_path, data)
-

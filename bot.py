@@ -578,13 +578,20 @@ def _build_start_panel_rows(
         )
         
     if user_id and int(user_id) == owner_id:
-        rows.append(
+        owner_row = []
+        # 私聊面板依赖 private_forward 的消息和回调处理器；未开启时不显示，
+        # 避免克隆机器人出现“按钮可点但没有反应”的假入口。
+        if "private_forward" in enabled:
+            owner_row.append(
+                InlineKeyboardButton("💬私聊面板", callback_data="pfmode:open:1")
+            )
+        owner_row.extend(
             [
-                InlineKeyboardButton("💬私聊面板", callback_data="pfmode:open:1"),
                 InlineKeyboardButton("📢全群广告推送", callback_data="gcfg:global_ad_menu"),
-                InlineKeyboardButton("⚙️投稿配置", callback_data="publish:publishset")
+                InlineKeyboardButton("⚙️投稿配置", callback_data="publish:publishset"),
             ]
         )
+        rows.append(owner_row)
    
     if "channel" in enabled:
         rows.append(
@@ -733,11 +740,11 @@ def create_app(bot_cfg: dict):
             ),
             group=1,
         )
-        app.add_handler(
-            CallbackQueryHandler(
-                handle_private_dialog_callback, pattern=r"^pfmode:"
-            )
-        )
+    # 无论是否启用私聊转发，都注册 callback：旧 /start 菜单中的按钮、或配置
+    # 刚关闭时，用户至少会得到明确提示，而不是 Telegram 客户端一直转圈。
+    app.add_handler(
+        CallbackQueryHandler(handle_private_dialog_callback, pattern=r"^pfmode:")
+    )
     app.add_handler(CallbackQueryHandler(clear_login_prompt_on_callback), group=-900)
     app.add_handler(CallbackQueryHandler(start_panel_callback, pattern=r"^start:"))
     

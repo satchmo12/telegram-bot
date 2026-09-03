@@ -20,13 +20,42 @@ from utils import (
     WHITELIST_FILE,
 )
 
-
 # 正则匹配 URL
 URL_PATTERN = re.compile(r"(https?://\S+|t\.me/\S+|bit\.ly/\S+)", re.IGNORECASE)
 
 TELEGRAM_LINK_PATTERN = re.compile(
     r"(https?://)?(t\.me|telegram\.me)/\S+", re.IGNORECASE
 )
+
+ZODIAC = "鼠牛虎兔龙蛇马羊猴鸡狗猪"
+# 生肖判断,防六合彩
+# def contains_zodiac_ad(text: str) -> bool:
+#     if not text:
+#         return False
+
+#     pattern = rf"[{re.escape(ZODIAC)}](?:\s*[{re.escape(ZODIAC)}]){{2,}}"
+#     return bool(re.search(pattern, text))
+# 生肖判断，防六合彩
+def contains_zodiac_ad(text: str) -> bool:
+    if not text:
+        return False
+
+    count = sum(1 for char in text if char in ZODIAC)
+    return count >= 3
+
+# 配置文件由 utils.load_json 缓存，但旧实现仍会在每条消息上重新清洗、排序
+# 所有群的关键词和白名单。这里按底层缓存对象复用标准化结果。
+_AD_KEYWORDS_CACHE = {}
+_WHITELIST_CACHE = {}
+_LOWER_GROUP_KEYWORDS_CACHE = {}
+
+
+def _drop_path_caches(path: str):
+    _AD_KEYWORDS_CACHE.pop(path, None)
+    _WHITELIST_CACHE.pop(path, None)
+    for key in list(_LOWER_GROUP_KEYWORDS_CACHE):
+        if key[0] == path:
+            _LOWER_GROUP_KEYWORDS_CACHE.pop(key, None)
 
 
 async def _ensure_ad_command_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -52,6 +81,9 @@ def get_ad_keywords(context: ContextTypes.DEFAULT_TYPE):
     """兼容旧结构并按群读取广告关键词。"""
     path = get_bot_path(context, AD_KEYWORDS_FILE)
     raw = load_json(path)
+    cached = _AD_KEYWORDS_CACHE.get(path)
+    if cached and cached[0] == id(raw):
+        return cached[1]
 
     # 旧结构：直接是 list（全局共享）
     if isinstance(raw, list):
@@ -62,7 +94,9 @@ def get_ad_keywords(context: ContextTypes.DEFAULT_TYPE):
                 if isinstance(kw, str) and kw.strip()
             }
         )
-        return {"__legacy__": cleaned}
+        data = {"__legacy__": cleaned}
+        _AD_KEYWORDS_CACHE[path] = (id(raw), data)
+        return data
 
     # 新结构：{chat_id: [kw1, kw2]}
     if isinstance(raw, dict):
@@ -76,13 +110,17 @@ def get_ad_keywords(context: ContextTypes.DEFAULT_TYPE):
                         if isinstance(kw, str) and kw.strip()
                     }
                 )
+        _AD_KEYWORDS_CACHE[path] = (id(raw), data)
         return data
-    return {}
+    data = {}
+    _AD_KEYWORDS_CACHE[path] = (id(raw), data)
+    return data
 
 
 def save_ad_keywords(context: ContextTypes.DEFAULT_TYPE, data: dict):
     path = get_bot_path(context, AD_KEYWORDS_FILE)
     save_json(path, data)
+    _drop_path_caches(path)
 
 
 def get_group_ad_keywords(
@@ -104,6 +142,21 @@ def get_group_ad_keywords(
         return list(legacy)
 
     return []
+
+
+def get_lower_group_ad_keywords(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: str
+) -> tuple[str, ...]:
+    """返回可直接用于匹配的低成本小写关键词缓存。"""
+    path = get_bot_path(context, AD_KEYWORDS_FILE)
+    keywords = get_group_ad_keywords(context, chat_id)
+    cache_key = (path, str(chat_id))
+    cached = _LOWER_GROUP_KEYWORDS_CACHE.get(cache_key)
+    if cached and cached[0] == id(keywords):
+        return cached[1]
+    normalized = tuple(kw.lower() for kw in keywords if isinstance(kw, str) and kw.strip())
+    _LOWER_GROUP_KEYWORDS_CACHE[cache_key] = (id(keywords), normalized)
+    return normalized
 
 
 def _normalize_keywords(items: list[str]) -> list[str]:
@@ -182,7 +235,11 @@ def _merge_all_keywords(context: ContextTypes.DEFAULT_TYPE) -> list[str]:
 
 def get_whitelist(context: ContextTypes.DEFAULT_TYPE):
     """只读取按群白名单新结构：{chat_id: {user_id: {...}}}。"""
-    raw = load_json(get_bot_path(context, WHITELIST_FILE))
+    path = get_bot_path(context, WHITELIST_FILE)
+    raw = load_json(path)
+    cached = _WHITELIST_CACHE.get(path)
+    if cached and cached[0] == id(raw):
+        return cached[1]
     if not isinstance(raw, dict):
         # 忽略旧结构并重置
         save_whitelist(context, {})
@@ -209,11 +266,14 @@ def get_whitelist(context: ContextTypes.DEFAULT_TYPE):
         save_whitelist(context, {})
         return {}
 
+    _WHITELIST_CACHE[path] = (id(raw), data)
     return data
 
 
 def save_whitelist(context: ContextTypes.DEFAULT_TYPE, data: dict):
-    save_json(get_bot_path(context, WHITELIST_FILE), data)
+    path = get_bot_path(context, WHITELIST_FILE)
+    save_json(path, data)
+    _drop_path_caches(path)
 
 
 def get_group_whitelist_users(
@@ -286,96 +346,62 @@ async def _is_linked_channel_message(
 
 @group_allowed
 async def check_for_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    
-    if not await is_bot_admin(update, context):
-        return  # 普通机器人只做日志/转发，不删
+    """只在命中广告规则后才做管理员 API 查询和删除操作。"""
     if update.channel_post:
         return  # 频道消息不删除
-    chat_id = str(update.effective_chat.id)
-    group_config = get_group_whitelist(context).get(chat_id, {})
 
-    # 广告开关关闭 → 直接放行
-    if not group_config.get("ad_filter", False):
-        return
-    if not await is_bot_admin(update, context):
-        return
-
-    if await is_admin(update, context):
-        return
-
-    msg = update.message or update.edited_message or update.channel_post 
+    msg = update.message or update.edited_message
     if not msg:
         return
-    if await _is_linked_channel_message(update, context, msg):
-        return  # 本群关联频道/频道身份发言不删除
-    
-    # 访客机器人消息删除
+
+    chat_id = str(update.effective_chat.id)
+    group_config = get_group_whitelist(context).get(chat_id, {})
+    # 大多数群没有开启广告过滤；此前这里会先请求管理员列表，造成首条消息变慢。
+    if not group_config.get("ad_filter", False):
+        return
+
     api_kwargs = getattr(msg, "api_kwargs", {}) or {}
     guest_bot_caller_user = api_kwargs.get("guest_bot_caller_user")
-    if guest_bot_caller_user:
-        try:
-            await msg.delete()
-        except Exception as e:
-            print(f"❌ 删除 Guest Bot 消息失败: {e}", flush=True)
-
     user = msg.from_user
+
+    # 访客机器人消息不需要关键词命中，仍保留原有的删除行为。
+    if guest_bot_caller_user:
+        if await is_bot_admin(update, context):
+            try:
+                await msg.delete()
+            except Exception as exc:
+                print(f"❌ 删除 Guest Bot 消息失败: {exc}", flush=True)
+        return
+
     if not user:
         return
-
-    # ✅ 白名单放行
     if is_whitelisted(user.id, chat_id, context):
         return
-    
-    
-    
-    
-   
 
-    # 统一提取文本
     text = ((msg.text or "") + " " + (msg.caption or "")).lower()
-
-    keyword_list = get_group_ad_keywords(context, chat_id)
-    keyword_hit = any(
-        isinstance(kw, str) and kw.strip() and kw.strip().lower() in text
-        for kw in keyword_list
+    keyword_hit = any(keyword in text for keyword in get_lower_group_ad_keywords(context, chat_id))
+    should_delete = bool(
+        keyword_hit or URL_PATTERN.search(text) or TELEGRAM_LINK_PATTERN.search(text) or contains_zodiac_ad(text)
     )
-
-    # 🔥 核心判断
-    # is_link_preview = bool(msg.link_preview_options)
-    # is_tg_link = has_any_link(msg)
-    is_tg_link = False
-    should_delete = (
-        keyword_hit
-        or URL_PATTERN.search(text)
-        or TELEGRAM_LINK_PATTERN.search(text)
-        # or is_link_preview  # ✅ 你截图那种预览名片
-        or is_tg_link  # ✅ t.me 频道 / 群链接
-    )
-
     if not should_delete:
         return
 
-    # ================= 执行删除 =================
+    # 只有可疑消息才查询管理员；管理员列表有缓存，但缓存冷启动时是一次网络请求。
+    if not await is_bot_admin(update, context):
+        return
+    if await is_admin(update, context):
+        return
+    if await _is_linked_channel_message(update, context, msg):
+        return
 
     try:
         await msg.delete()
-    except telegram.error.BadRequest as e:
-        msg = str(e).lower()
-        if "message can't be deleted" in msg or "message to delete not found" in msg:
+    except telegram.error.BadRequest as exc:
+        error_text = str(exc).lower()
+        if "message can't be deleted" in error_text or "message to delete not found" in error_text:
             return
-        print(f"[删除失败] {e}")
-        return
+        print(f"[删除失败] {exc}")
 
-    # 提示删除
-
-    # try:
-
-    #     tip_msg = await msg.chat.send_message(
-    #         f"🚫 @{user.username or user.first_name}，广告内容{msg}已被删除。"
-    #     )
-    #     asyncio.create_task(delete_later(tip_msg, delay=5))
-    # except telegram.error.BadRequest as e:
-    #     print(f"[发送提示失败] {e}")
 
 
 # ---------- 添加广告词命令 ----------
