@@ -4,6 +4,7 @@ import time
 from typing import Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import Forbidden
 from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
@@ -1020,6 +1021,23 @@ def _parse_chat_id(raw: str) -> Optional[int]:
         return None
 
 
+async def _validate_bot_broadcast_target(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int
+):
+    """Ensure the group-setting broadcast target is a real Telegram group.
+
+    This menu always sends through the current bot account, so a positive ID
+    must never be treated as a private user target.
+    """
+    if chat_id >= 0:
+        raise ValueError("广播目标不是群聊，请重新从群配置中选择群组。")
+
+    chat = await context.bot.get_chat(chat_id)
+    if getattr(chat, "type", "") not in {"group", "supergroup"}:
+        raise ValueError("广播目标不是群聊，请重新从群配置中选择群组。")
+    return chat
+
+
 async def _open_group_panel(
     query, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str, user_id: int
 ):
@@ -1730,7 +1748,9 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["group_setting_chat_id"] = chat_id_str
         await query.answer()
         return await query.edit_message_text(
-            "请输入要广播到群里的消息内容。\n发送“取消”可返回。",
+            "请输入要广播到群里的消息内容。\n"
+            "该功能由当前机器人账号发送，不使用协议号。\n"
+            "发送“取消”可返回。",
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
@@ -2344,13 +2364,27 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
             await update.message.reply_text("✅ 已取消。")
         else:
             try:
+                target_chat = await _validate_bot_broadcast_target(context, chat_id)
                 payload = build_message_payload(message)
                 await send_message_payload(context.bot, chat_id=chat_id, payload=payload)
                 context.user_data.pop("group_setting_stage", None)
                 context.user_data.pop("group_setting_chat_id", None)
-                await update.message.reply_text("✅ 已发送到群里。")
-            except Exception as e:
-                return await update.message.reply_text(f"❌ 发送失败：{e}")
+                await update.message.reply_text(
+                    f"✅ 已通过机器人发送到群里：{target_chat.title or chat_id}。"
+                )
+            except Forbidden as exc:
+                error_text = str(exc).lower()
+                if "user is deactivated" in error_text:
+                    message_text = (
+                        "❌ 广播目标是已注销的私聊账号，不是可用群聊。"
+                        "该“消息广播”由机器人账号发送，不经过协议号；"
+                        "请重新进入群配置并选择正确群组。"
+                    )
+                else:
+                    message_text = f"❌ 机器人无法向目标群发送：{exc}"
+                return await update.message.reply_text(message_text)
+            except Exception as exc:
+                return await update.message.reply_text(f"❌ 发送失败：{exc}")
         data = get_group_whitelist(context)
         cfg = data.get(chat_id_str, {})
         if not isinstance(cfg, dict):

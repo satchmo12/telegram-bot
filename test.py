@@ -5,7 +5,7 @@ from telegram.ext import Application, InlineQueryHandler, MessageHandler, filter
 from telegram.ext import TypeHandler
 
 # 启用详细日志
-
+from group.ai_group_reply import register_ai_group_reply_handlers
 import asyncio
 
 from telegram import Update
@@ -201,7 +201,8 @@ def main():
     )
     
     # 只要包含文本就放行，我们在函数内部去拆解 api_kwargs
-    app.add_handler( TypeHandler(Update, guest_bot_handler))
+    # app.add_handler( TypeHandler(Update, guest_bot_handler))
+    register_ai_group_reply_handlers(app)
     app.run_polling()
         
 if __name__ == "__main__":

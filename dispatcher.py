@@ -26,7 +26,7 @@ from utils import safe_reply
 from feature_flags import is_feature_enabled
 from channel.channel_config import handle_channel_config_text
 from channel.telethon_login import handle_telethon_login_text
-
+from group.ai_group_reply import ai_group_reply_handler
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -71,6 +71,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ("ad_check", check_for_ads(update, context)),
                 ("group_log", log_group(update, context)),
                 ("special_follow", watch_special_users(update, context)),
+                ("ai_reply", ai_group_reply_handler(update, context)),
             ]
         )
         if is_feature_enabled(context.application, "channel"):

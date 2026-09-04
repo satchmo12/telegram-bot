@@ -569,6 +569,7 @@ async def _send_payload_to_group_targets(
         raise RuntimeError("未配置 API_ID/API_HASH。")
     try:
         from telethon import TelegramClient, types
+        from telethon.errors import UserDeactivatedBanError, UserDeactivatedError
     except Exception as exc:
         raise RuntimeError("Telethon 未安装，请先安装依赖。") from exc
 
@@ -599,7 +600,7 @@ async def _send_payload_to_group_targets(
             continue
         grouped_targets.setdefault(session_name, []).append(group_id)
 
-    sent = failed = unavailable_sessions = 0
+    sent = failed = unavailable_sessions = deactivated_sessions = 0
     try:
         for session_name, group_ids in grouped_targets.items():
             client = TelegramClient(get_session_path(context, session_name), api_id, api_hash)
@@ -650,6 +651,11 @@ async def _send_payload_to_group_targets(
                     except Exception as exc:
                         failed += 1
                         print(f"群发失败 session={session_name} group={group_id}: {exc}")
+            except (UserDeactivatedError, UserDeactivatedBanError) as exc:
+                # 这是协议号本身已注销/停用，不是私聊机器人的 Bot API 故障。
+                deactivated_sessions += 1
+                failed += len(group_ids)
+                print(f"协议号已注销或停用 session={session_name}: {exc}")
             except Exception as exc:
                 failed += len(group_ids)
                 print(f"协议号连接失败 session={session_name}: {exc}")
@@ -664,7 +670,7 @@ async def _send_payload_to_group_targets(
                 os.remove(temp_path)
             except OSError:
                 pass
-    return sent, failed, unavailable_sessions
+    return sent, failed, unavailable_sessions, deactivated_sessions
 
 
 async def _handle_broadcast_message(
@@ -699,10 +705,17 @@ async def _handle_broadcast_message(
     if not targets:
         return "未获取到可发送的群组，请确认协议号已登录且已加入群组。"
 
-    sent, failed, unavailable_sessions = await _send_payload_to_group_targets(
+    sent, failed, unavailable_sessions, deactivated_sessions = await _send_payload_to_group_targets(
         context, targets, update.message
     )
-    extra = f"\n未登录协议号: {unavailable_sessions}" if unavailable_sessions else ""
+    details = []
+    if unavailable_sessions:
+        details.append(f"未登录协议号: {unavailable_sessions}")
+    if deactivated_sessions:
+        details.append(
+            f"已注销/停用协议号: {deactivated_sessions}（请删除该 session 后重新登录有效账号）"
+        )
+    extra = f"\n" + "\n".join(details) if details else ""
     return f"✅ 发送完成\n成功: {sent}\n失败: {failed}{extra}"
 
 

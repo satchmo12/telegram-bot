@@ -96,6 +96,10 @@ async def calculator_handler(
     # 太长的普通聊天直接忽略
     if len(text) > 100:
         return
+    
+    # 单个数字 / 小数不回复
+    if re.fullmatch(r"\d+(\.\d+)?", text):
+        return
 
     # 只允许包含数学表达式相关字符
     # 数字、运算符、小数点、括号、空格
@@ -120,5 +124,5 @@ async def calculator_handler(
         return
 
     await msg.reply_text(
-        f"🧮 {text} = {result}"
+        f"{text} = {result}"
     )

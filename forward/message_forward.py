@@ -1248,6 +1248,14 @@ async def broadcast_mode_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
     target = context.user_data.get("broadcast_chat")
     
+    print(
+        f"[广播] 准备复制消息: "
+        f"from_chat_id={update.effective_chat.id}, "
+        f"target={target}, "
+        f"message_id={update.effective_message.message_id}, "
+        f"user_id={update.effective_user.id if update.effective_user else None}"
+    )
+    
     try:
         await context.bot.copy_message(
             chat_id=target,

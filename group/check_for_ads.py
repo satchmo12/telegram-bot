@@ -41,7 +41,7 @@ def contains_zodiac_ad(text: str) -> bool:
         return False
 
     count = sum(1 for char in text if char in ZODIAC)
-    return count >= 3
+    return count >= 2
 
 # 配置文件由 utils.load_json 缓存，但旧实现仍会在每条消息上重新清洗、排序
 # 所有群的关键词和白名单。这里按底层缓存对象复用标准化结果。
