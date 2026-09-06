@@ -58,6 +58,16 @@ def _schedule_background(label: str, coroutine):
     task.add_done_callback(_BACKGROUND_TASKS.discard)
 
 
+async def _check_ads_then_run_ai_reply(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    """Run AI replies only after the ad filter has allowed the group message."""
+    is_ad = await check_for_ads(update, context)
+    if is_ad:
+        return
+    await ai_group_reply_handler(update, context)
+
+
 async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 这些任务不决定普通消息/命令的回复内容。此前 asyncio.gather 会等待其中
     # 任意一次管理员接口或频道转发网络请求完成，导致用户感觉“机器人反应慢”。
@@ -68,10 +78,9 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         background_tasks.extend(
             [
                 ("scam_check", check_and_restrict_scam_user(update, context)),
-                ("ad_check", check_for_ads(update, context)),
+                ("ad_check_then_ai", _check_ads_then_run_ai_reply(update, context)),
                 ("group_log", log_group(update, context)),
                 ("special_follow", watch_special_users(update, context)),
-                ("ai_reply", ai_group_reply_handler(update, context)),
             ]
         )
         if is_feature_enabled(context.application, "channel"):

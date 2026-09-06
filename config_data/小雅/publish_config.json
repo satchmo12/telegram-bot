@@ -3,5 +3,12 @@
     "review_enabled": false,
     "daily_limit": 0,
     "ads_enabled": false,
-    "ads": []
+    "ads": [],
+    "buttons": [
+        {
+            "id": 1,
+            "text": "Raptor加速器",
+            "url": "http://skyk.cc"
+        }
+    ]
 }

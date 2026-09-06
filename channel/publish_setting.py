@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from datetime import datetime
+from urllib.parse import urlparse
 import os
 import random
 import time
@@ -15,6 +16,8 @@ USER_MESSAGE_FILE = "data/user_message_file.json"
 BOTTLE_HISTORY_FILE = "data/bottle_history.json"
 
 CALLBACK_PREFIX = "publish"
+BUTTON_TEXT_MAX_LENGTH = 64
+MAX_PUBLISH_BUTTONS = 20
 
 # =========================
 # 配置读写
@@ -26,21 +29,109 @@ def load_publish_config():
         "review_enabled": False,
         "daily_limit": 0,
         "ads_enabled": False,
-        "ads": []
+        "ads": [],
+        "buttons": [],
     }
 
 
     data = load_json(PUBLISH_CONFIG_FILE)
     
     if not data:
-        data = default; 
-        save_json(PUBLISH_CONFIG_FILE, data) 
-        
+        data = default
+        save_json(PUBLISH_CONFIG_FILE, data)
+    elif "buttons" not in data:
+        # Existing bots retain their publish settings and gain an empty button list.
+        data["buttons"] = []
+        save_json(PUBLISH_CONFIG_FILE, data)
+
     return data
 
 
 def save_publish_config(data):
     save_json(PUBLISH_CONFIG_FILE, data)
+
+
+def _publish_buttons(config: dict) -> list[dict]:
+    """Return valid custom buttons from the current publish configuration."""
+    buttons = config.get("buttons", []) if isinstance(config, dict) else []
+    if not isinstance(buttons, list):
+        return []
+    return [button for button in buttons if isinstance(button, dict)]
+
+
+def _button_settings_text(config: dict) -> str:
+    buttons = _publish_buttons(config)
+    lines = [
+        "🔘 投稿按钮设置",
+        "投稿发布到频道时，会在消息下方附加这些链接按钮。",
+        "",
+    ]
+    if not buttons:
+        lines.append("当前未设置按钮。")
+    else:
+        lines.append(f"当前已设置 {len(buttons)} 个按钮：")
+        for button in buttons:
+            lines.append(
+                f"#{button.get('id')} {button.get('text', '未命名')}\n{button.get('url', '')}"
+            )
+    return "\n".join(lines)
+
+
+def publish_buttons_keyboard(config: dict):
+    """Build the URL keyboard appended to a published submission."""
+    rows = []
+    for button in _publish_buttons(config):
+        button_text = str(button.get("text", "")).strip()
+        button_url = str(button.get("url", "")).strip()
+        if button_text and button_url:
+            rows.append([InlineKeyboardButton(button_text, url=button_url)])
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+def publish_button_settings_keyboard(config: dict):
+    buttons = _publish_buttons(config)
+    rows = [[InlineKeyboardButton("➕ 添加按钮", callback_data="publish:button_add")]]
+    if buttons:
+        rows.extend(
+            [
+                [InlineKeyboardButton("📝 修改按钮", callback_data="publish:button_edit")],
+                [InlineKeyboardButton("🗑 删除按钮", callback_data="publish:button_delete")],
+            ]
+        )
+    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="publish:back")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _button_selection_keyboard(config: dict, action: str):
+    rows = []
+    for button in _publish_buttons(config):
+        button_id = button.get("id")
+        button_text = str(button.get("text", "未命名"))[:40]
+        prefix = "📝" if action == "edit" else "🗑"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"{prefix} #{button_id} {button_text}",
+                    callback_data=f"publish:button_{action}_{button_id}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="publish:buttons")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _normalize_button_url(value: str):
+    url = (value or "").strip()
+    if url.startswith("t.me/"):
+        url = f"https://{url}"
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https", "tg"} or not parsed.netloc and parsed.scheme != "tg":
+        return None
+    return url
+
+
+def _clear_button_input(context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("publish_button_input", None)
 
 
 # =========================
@@ -52,6 +143,7 @@ def publish_setting_keyboard():
         [InlineKeyboardButton("📝 审核设置", callback_data="publish:review")],
         [InlineKeyboardButton("📊 每日发布上限", callback_data="publish:limit")],
         [InlineKeyboardButton("📣 广告管理", callback_data="publish:ads")],
+        [InlineKeyboardButton("🔘 按钮设置", callback_data="publish:buttons")],
         [InlineKeyboardButton("⬅️ 返回", callback_data="start:back")]
     ])
 
@@ -336,6 +428,83 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ) 
         return
         
+    if action == "buttons":
+        _clear_button_input(context)
+        return await query.edit_message_text(
+            _button_settings_text(config),
+            reply_markup=publish_button_settings_keyboard(config),
+        )
+
+    if action == "button_add":
+        buttons = _publish_buttons(config)
+        if len(buttons) >= MAX_PUBLISH_BUTTONS:
+            return await query.edit_message_text(
+                f"最多只能设置 {MAX_PUBLISH_BUTTONS} 个投稿按钮。",
+                reply_markup=publish_button_settings_keyboard(config),
+            )
+        context.user_data["waiting_post"] = False
+        context.user_data["publish_button_input"] = {"mode": "add", "step": "text"}
+        return await query.edit_message_text(
+            "请输入按钮文字（最多 64 个字符）。\n例如：加入交流群"
+        )
+
+    if action == "button_edit":
+        buttons = _publish_buttons(config)
+        if not buttons:
+            return await query.edit_message_text(
+                "当前未设置按钮。",
+                reply_markup=publish_button_settings_keyboard(config),
+            )
+        return await query.edit_message_text(
+            "请选择要修改的按钮：",
+            reply_markup=_button_selection_keyboard(config, "edit"),
+        )
+
+    if action.startswith("button_edit_"):
+        try:
+            button_id = int(action.removeprefix("button_edit_"))
+        except ValueError:
+            return await query.answer("按钮数据无效", show_alert=True)
+        if not any(button.get("id") == button_id for button in _publish_buttons(config)):
+            return await query.answer("按钮不存在或已删除", show_alert=True)
+        context.user_data["waiting_post"] = False
+        context.user_data["publish_button_input"] = {
+            "mode": "edit",
+            "step": "text",
+            "button_id": button_id,
+        }
+        return await query.edit_message_text(
+            "请输入新的按钮文字（最多 64 个字符）。"
+        )
+
+    if action == "button_delete":
+        buttons = _publish_buttons(config)
+        if not buttons:
+            return await query.edit_message_text(
+                "当前未设置按钮。",
+                reply_markup=publish_button_settings_keyboard(config),
+            )
+        return await query.edit_message_text(
+            "请选择要删除的按钮：",
+            reply_markup=_button_selection_keyboard(config, "delete"),
+        )
+
+    if action.startswith("button_delete_"):
+        try:
+            button_id = int(action.removeprefix("button_delete_"))
+        except ValueError:
+            return await query.answer("按钮数据无效", show_alert=True)
+        buttons = _publish_buttons(config)
+        updated_buttons = [button for button in buttons if button.get("id") != button_id]
+        if len(updated_buttons) == len(buttons):
+            return await query.answer("按钮不存在或已删除", show_alert=True)
+        config["buttons"] = updated_buttons
+        save_publish_config(config)
+        return await query.edit_message_text(
+            "✅ 按钮已删除。\n\n" + _button_settings_text(config),
+            reply_markup=publish_button_settings_keyboard(config),
+        )
+
     if action == "back":
         return await query.edit_message_text(
             "⚙️ 发布设置",
@@ -650,7 +819,8 @@ async def handle_wall_publish(update, context):
         published = await context.bot.copy_message(
             chat_id=channel_id,
             from_chat_id=msg.chat_id,
-            message_id=msg.message_id
+            message_id=msg.message_id,
+            reply_markup=publish_buttons_keyboard(config),
         )
         
         data =  _load_cannel_message()
@@ -687,7 +857,62 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     
     config = load_publish_config()
-    
+
+    button_input = context.user_data.get("publish_button_input")
+    if isinstance(button_input, dict):
+        value = update.message.text.strip()
+        if button_input.get("step") == "text":
+            if not value:
+                return await update.message.reply_text("❗ 按钮文字不能为空，请重新输入。")
+            if len(value) > BUTTON_TEXT_MAX_LENGTH:
+                return await update.message.reply_text(
+                    f"❗ 按钮文字不能超过 {BUTTON_TEXT_MAX_LENGTH} 个字符，请重新输入。"
+                )
+            button_input["text"] = value
+            button_input["step"] = "url"
+            return await update.message.reply_text(
+                "请输入按钮链接。\n支持 https://、http://、tg:// 或 t.me/ 开头的链接。"
+            )
+
+        if button_input.get("step") == "url":
+            url = _normalize_button_url(value)
+            if not url:
+                return await update.message.reply_text(
+                    "❗ 链接格式不正确，请输入完整链接，例如：https://t.me/example"
+                )
+
+            buttons = _publish_buttons(config)
+            if button_input.get("mode") == "edit":
+                button_id = button_input.get("button_id")
+                for button in buttons:
+                    if button.get("id") == button_id:
+                        button["text"] = button_input["text"]
+                        button["url"] = url
+                        break
+                else:
+                    _clear_button_input(context)
+                    return await update.message.reply_text("❗ 按钮不存在或已删除。")
+                result_text = "✅ 按钮修改成功。"
+            else:
+                if len(buttons) >= MAX_PUBLISH_BUTTONS:
+                    _clear_button_input(context)
+                    return await update.message.reply_text(
+                        f"❗ 最多只能设置 {MAX_PUBLISH_BUTTONS} 个投稿按钮。"
+                    )
+                button_id = max(
+                    (int(button.get("id", 0) or 0) for button in buttons), default=0
+                ) + 1
+                buttons.append({"id": button_id, "text": button_input["text"], "url": url})
+                config["buttons"] = buttons
+                result_text = "✅ 按钮添加成功。"
+
+            save_publish_config(config)
+            _clear_button_input(context)
+            return await update.message.reply_text(
+                result_text + "\n\n" + _button_settings_text(config),
+                reply_markup=publish_button_settings_keyboard(config),
+            )
+
     if context.user_data.get("waiting_channel_id"):
         context.user_data["waiting_channel_id"] = False
 

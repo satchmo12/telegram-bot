@@ -201,8 +201,8 @@ def main():
     )
     
     # 只要包含文本就放行，我们在函数内部去拆解 api_kwargs
-    # app.add_handler( TypeHandler(Update, guest_bot_handler))
-    register_ai_group_reply_handlers(app)
+    app.add_handler( TypeHandler(Update, guest_bot_handler))
+    # register_ai_group_reply_handlers(app)
     app.run_polling()
         
 if __name__ == "__main__":

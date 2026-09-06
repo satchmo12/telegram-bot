@@ -345,20 +345,20 @@ async def _is_linked_channel_message(
     return True
 
 @group_allowed
-async def check_for_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """只在命中广告规则后才做管理员 API 查询和删除操作。"""
+async def check_for_ads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """检查并删除广告；返回 ``True`` 表示该消息应视为广告。"""
     if update.channel_post:
-        return  # 频道消息不删除
+        return False  # 频道消息不删除
 
     msg = update.message or update.edited_message
     if not msg:
-        return
+        return False
 
     chat_id = str(update.effective_chat.id)
     group_config = get_group_whitelist(context).get(chat_id, {})
     # 大多数群没有开启广告过滤；此前这里会先请求管理员列表，造成首条消息变慢。
     if not group_config.get("ad_filter", False):
-        return
+        return False
 
     api_kwargs = getattr(msg, "api_kwargs", {}) or {}
     guest_bot_caller_user = api_kwargs.get("guest_bot_caller_user")
@@ -371,12 +371,12 @@ async def check_for_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.delete()
             except Exception as exc:
                 print(f"❌ 删除 Guest Bot 消息失败: {exc}", flush=True)
-        return
+        return True
 
     if not user:
-        return
+        return False
     if is_whitelisted(user.id, chat_id, context):
-        return
+        return False
 
     text = ((msg.text or "") + " " + (msg.caption or "")).lower()
     keyword_hit = any(keyword in text for keyword in get_lower_group_ad_keywords(context, chat_id))
@@ -384,23 +384,25 @@ async def check_for_ads(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyword_hit or URL_PATTERN.search(text) or TELEGRAM_LINK_PATTERN.search(text) or contains_zodiac_ad(text)
     )
     if not should_delete:
-        return
+        return False
 
-    # 只有可疑消息才查询管理员；管理员列表有缓存，但缓存冷启动时是一次网络请求。
+    # 普通成员命中规则后，即使机器人暂时没有删除权限，也不能再交给 AI 回复。
+    # 管理员、白名单和关联频道消息仍按原规则放行。
     if not await is_bot_admin(update, context):
-        return
+        return True
     if await is_admin(update, context):
-        return
+        return False
     if await _is_linked_channel_message(update, context, msg):
-        return
+        return False
 
     try:
         await msg.delete()
     except telegram.error.BadRequest as exc:
         error_text = str(exc).lower()
         if "message can't be deleted" in error_text or "message to delete not found" in error_text:
-            return
+            return True
         print(f"[删除失败] {exc}")
+    return True
 
 
 

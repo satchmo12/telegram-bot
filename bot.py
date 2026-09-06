@@ -611,7 +611,7 @@ def _build_start_panel_rows(
     if "group" in enabled:
         rows.append([InlineKeyboardButton("👥群配置", callback_data="gcfg:list")])
         
-    if bot_name == MASTER_BOT_NAME:
+    # if bot_name == MASTER_BOT_NAME:
         rows.append(
             [
                 InlineKeyboardButton("上传资源", callback_data="publish:publish"),

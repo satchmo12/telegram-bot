@@ -17,8 +17,6 @@ from telegram.ext import (
     filters,
 )
 
-from utils import group_allowed
-
 
 # ============================================================
 # 配置
@@ -27,6 +25,8 @@ from utils import group_allowed
 # Ollama
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 OLLAMA_MODEL = "qwen3:8b"
+# 让 Ollama 尽量保持模型在内存中，减少重复加载
+OLLAMA_KEEP_ALIVE = "10m"
 
 # ============================================================
 # AI 接话配置
@@ -37,23 +37,23 @@ AI_REPLY_ENABLED = True
 
 # AI 判断为适合回复后，实际回复的概率
 # 例如 0.7 = 70%
-REPLY_PROBABILITY = 0.70
+REPLY_PROBABILITY = 1
 
 # 同一个群，两次 AI 回复之间至少间隔多少秒
-MIN_REPLY_INTERVAL = 30
+MIN_REPLY_INTERVAL = 3
 
 # 每小时最多回复多少次
-MAX_REPLIES_PER_HOUR = 100
+MAX_REPLIES_PER_HOUR = 1000
 
 # AI 查看最近多少条消息
-CONTEXT_LIMIT = 3
+CONTEXT_LIMIT = 10
 
 # AI 回复最长多少字
 MAX_REPLY_LENGTH = 40
 
 # 回复前随机等待
-MIN_DELAY = 2
-MAX_DELAY = 5
+MIN_DELAY = 0.5
+MAX_DELAY = 1.5
 
 
 # ============================================================
@@ -299,62 +299,71 @@ async def ask_ollama(
 ) -> Optional[str]:
     """
     调用本地 Ollama。
+    优化：
+    1. 关闭 Qwen3 thinking，避免简单接话判断生成大量思考内容。
+    2. 缩短 Prompt，减少 prompt_eval。
+    3. 限制输出长度，避免模型生成过多无关内容。
+    4. keep_alive 保持模型在内存中。
     """
 
-    prompt = f"""
-你是一个 Telegram 群聊 AI 助手。
+    prompt = f"""判断 Telegram 群消息是否值得自然接话。
 
-你的任务是判断当前这句话是否值得接一句话。
-
-聊天上下文：
-
-{context_text}
+最近聊天：
+{context_text or "(无)"}
 
 当前消息：
-
 {current_text}
 
-请根据上下文判断。
+规则：
 
-如果不适合回复：
-只输出：
-NO
+1. 以下情况只输出 NO：
+- 纯乱码
+- 明显无意义的内容
+- 广告、推广、群发内容
+- 单纯的网址或链接
+- 明显只是命令、通知或系统消息
+- 程序日志、报错信息、调试信息、JSON、代码片段
+- 包含 message_id、sent_message_id、耗时、status、HTTP、Telegram 发送成功等明显技术日志内容
+- 明显是机器人运行状态、系统提示或后台记录
+- 完全没有自然聊天意义的内容
 
-如果适合回复：
-只输出一句简短、自然的中文聊天回复。
+2. 普通聊天、闲聊、八卦、吐槽、抱怨、分享观点、讲经历，即使不是提问，也可以自然接一句。
 
-要求：
+3. 可以主动接话，不需要用户明确提问。
 
-1. 回复尽量简短。
-2. 最多40个字。
-3. 不要解释。
-4. 不要重复对方原话。
-5. 不要输出“作为AI”之类的话。
-6. 不要声称自己是真人。
-7. 不要冒充群里的某个人。
-8. 不要连续使用很多表情。
-9. 不要每条消息都回复。
-10. 如果回复会显得突兀，就输出 NO。
+4. 回复必须有新的内容。
+- 禁止重复用户刚刚说的话。
+- 禁止把用户的话换几个字重新说一遍。
+- 禁止总结用户刚才的话来充当回复。
+- 不能只重复用户句子中的关键词。
+- 不要用“你说的是……”“你刚才说……”这类方式机械回应。
 
-例如：
+5. 不要为了回复而强行回复。
 
-当前消息：
-这老板脾气太好了吧
+6. 如果前面的聊天中已经回答过相同问题：
+- 不要重复之前相同的答案。
+- 可以换一个角度回答。
+- 如果没有新的内容可说，输出 NO。
 
-合适回复：
-说的就是好脾气
+7. 回复最多40个字。
 
-只输出最终结果，不要输出分析过程。
-"""
+8. 回复必须简短、自然、口语化，像真实群聊中的一句接话。
+
+9. 不解释，不输出分析过程，不说“作为AI”。
+
+如果没有自然且有新内容的回复方式，就输出 NO。
+
+只输出最终结果：
+- 一句直接发送给用户的中文回复
+
+不要输出其他任何内容。"""
 
     payload = {
         "model": OLLAMA_MODEL,
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "你是一个简短、自然的中文群聊助手。"
-                ),
+                "content": "你是一个简短、自然的中文群聊助手。",
             },
             {
                 "role": "user",
@@ -362,35 +371,47 @@ NO
             },
         ],
         "stream": False,
+
+        # Qwen3 支持时关闭 thinking，可明显降低简单任务延迟
+        "think": False,
+
+        # 尽量保持模型在内存中
+        "keep_alive": OLLAMA_KEEP_ALIVE,
+
         "options": {
-            "temperature": 0.8,
+            "temperature": 0.7,
+            # 只需要 NO 或一条 <=40 字的回复，不需要很长输出
+            "num_predict": 60,
         },
     }
 
     try:
-        async with httpx.AsyncClient(
-            timeout=120
-        ) as http:
+        print(
+            f"[Ollama][REQUEST] url={OLLAMA_URL} "
+            f"model={OLLAMA_MODEL} think=False"
+        )
 
-            print(
-                f"[Ollama][REQUEST] url={OLLAMA_URL} "
-                f"model={OLLAMA_MODEL}"
-            )
+        request_start = time.time()
 
+        # timeout 不需要 120 秒；正常本地推理应该更快。
+        async with httpx.AsyncClient(timeout=60) as http:
             response = await http.post(
                 OLLAMA_URL,
                 json=payload,
             )
 
-            print(
-                f"[Ollama][HTTP] status={response.status_code}"
-            )
+        request_cost = time.time() - request_start
 
-            response.raise_for_status()
+        print(
+            f"[Ollama][HTTP] status={response.status_code} "
+            f"耗时={request_cost:.2f}s"
+        )
 
-            data = response.json()
+        response.raise_for_status()
 
-            print(f"[Ollama][RAW] {data}")
+        data = response.json()
+
+        print(f"[Ollama][RAW] {data}")
 
         result = (
             data
@@ -402,36 +423,23 @@ NO
         print(f"[Ollama][CONTENT] {result!r}")
 
         if not result:
-            print(
-                "[Ollama] 没有返回内容"
-            )
+            print("[Ollama] 没有返回内容")
             return None
 
-        # ----------------------------------------------------
-        # Qwen 有时会输出 NO 前后的内容
-        # ----------------------------------------------------
-
+        # NO / NO 前缀都视为不回复
         if result.upper() == "NO":
             return None
 
-        if result.startswith("NO"):
+        if result.upper().startswith("NO"):
             return None
 
-        # ----------------------------------------------------
-        # 清理一些可能出现的格式
-        # ----------------------------------------------------
-
-        result = result.strip(
-            "` \n\t\"'“”"
-        )
+        # 清理格式
+        result = result.strip("` \n\t\"'“”")
 
         if not result:
             return None
 
-        # ----------------------------------------------------
         # 限制长度
-        # ----------------------------------------------------
-
         if len(result) > MAX_REPLY_LENGTH:
             result = result[:MAX_REPLY_LENGTH]
 
@@ -445,24 +453,18 @@ NO
         return None
 
     except httpx.HTTPError as e:
-        print(
-            "[Ollama] HTTP 错误: %s",
-            e,
-        )
+        print(f"[Ollama] HTTP 错误: {e}")
         return None
 
     except Exception as e:
-        print(
-            "[Ollama] 调用失败: %s",
-            e,
-        )
+        print(f"[Ollama] 调用失败: {e}")
         return None
 
 
 # ============================================================
 # AI 群聊 Handler
 # ============================================================
-@group_allowed
+
 async def ai_group_reply_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
