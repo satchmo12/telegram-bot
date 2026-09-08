@@ -106,7 +106,7 @@ class NetEaseProvider:
             )
 
             album = song.get("album") or {}
-
+        
             result.append({
                 "provider": self.NAME,
                 "provider_song_id": str(
@@ -180,7 +180,7 @@ class NetEaseProvider:
     # =========================
     # 下载歌曲
     # =========================
-    async def download(self, song_id):
+    async def download(self, song_id, cover_url=None):
 
         timeout = aiohttp.ClientTimeout(
             total=90
@@ -217,19 +217,49 @@ class NetEaseProvider:
                 else None
             )
 
-
             if not audio_url:
-
                 print(
                     f"[NetEase] ❌ "
-                    f"没有获取到播放地址: "
-                    f"{song_id}"
+                    f"没有获取到播放地址: {song_id}"
                 )
-
                 return None
 
             # =========================
-            # 2. 下载音频
+            # 2. 下载专辑封面
+            # =========================
+
+            thumbnail = None
+
+            if cover_url:
+                try:
+                    async with session.get(
+                        cover_url,
+                        allow_redirects=True,
+                    ) as response:
+
+                        response.raise_for_status()
+
+                        cover_data = await response.read()
+
+                        if cover_data:
+                            thumbnail = BytesIO(cover_data)
+                            thumbnail.name = "cover.jpg"
+
+                            print(
+                                f"[NetEase] ✅ "
+                                f"封面下载成功: {song_id}, "
+                                f"size={len(cover_data)}"
+                            )
+
+                except Exception as e:
+                    print(
+                        f"[NetEase] ⚠️ "
+                        f"封面下载失败: {song_id}, "
+                        f"error={e}"
+                    )
+
+            # =========================
+            # 3. 下载音频
             # =========================
 
             async with session.get(
@@ -251,12 +281,10 @@ class NetEaseProvider:
 
                 # 防止返回 HTML 错误页面
                 if "text/html" in content_type:
-
                     print(
                         "[NetEase] ❌ "
                         "返回的是 HTML，不是音频"
                     )
-
                     return None
 
                 # Content-Length 超过限制
@@ -265,13 +293,11 @@ class NetEaseProvider:
                     and content_length
                     > self.MAX_AUDIO_SIZE
                 ):
-
                     print(
                         f"[NetEase] ❌ "
                         f"音频超过大小限制: "
                         f"{content_length}"
                     )
-
                     return None
 
                 audio = BytesIO()
@@ -291,43 +317,42 @@ class NetEaseProvider:
                         audio.tell()
                         > self.MAX_AUDIO_SIZE
                     ):
-
                         print(
                             "[NetEase] ❌ "
                             "下载过程中超过大小限制"
                         )
 
                         audio.close()
-
                         return None
 
         # =========================
-        # 检查是否为空文件
+        # 4. 检查是否为空文件
         # =========================
 
         if not audio.tell():
-
             print(
                 f"[NetEase] ❌ "
                 f"下载结果为空: {song_id}"
             )
 
             audio.close()
-
             return None
 
         # =========================
-        # 设置文件指针
+        # 5. 设置文件指针
         # =========================
 
         audio.seek(0)
-
         audio.name = f"{song_id}.mp3"
 
         print(
             f"[NetEase] ✅ 下载成功: "
             f"{song_id}, "
-            f"size={audio.getbuffer().nbytes}"
+            f"size={audio.getbuffer().nbytes}, "
+            f"thumbnail={'有' if thumbnail else '无'}"
         )
 
-        return audio
+        return {
+            "audio": audio,
+            "thumbnail": thumbnail,
+        }

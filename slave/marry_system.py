@@ -717,6 +717,20 @@ async def dongfang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 概率生宝宝
     if random.random() > BABY_PROBABILITY:
         return  # 没怀上，结束
+    
+    # 👶 宝宝数量限制
+    MAX_BABIES = 58
+
+    uid_children = group.get(uid, {}).get("children", [])
+    tid_children = group.get(tid, {}).get("children", [])
+
+    if len(uid_children) >= MAX_BABIES or len(tid_children) >= MAX_BABIES:
+        return await safe_reply(
+            update,
+            context,
+            "👶 宝宝数量已经达到上限 58 个啦，暂时不能再迎接新宝宝了~"
+        )
+
 
     # 👶 生宝宝
     baby_name = random.choice(["小团子", "小星星", "小奶糖", "小糯米", "小月亮"])
@@ -728,6 +742,7 @@ async def dongfang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for pid in (uid, tid):
         pdata = group.setdefault(pid, {})
         children = pdata.setdefault("children", [])
+        
         children.append(
             {
                 "id": baby_id,
@@ -751,7 +766,7 @@ async def dongfang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-@register_command("宝宝")
+@register_command("宝宝", "我的宝宝")
 @feature_required(FEATURE_FRIENDS)
 async def children(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user

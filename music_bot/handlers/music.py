@@ -309,7 +309,16 @@ def create_music_handlers(music_service):
                 return
 
             # 下载歌曲
-            audio_file = await music_service.download(song)
+            # audio_file = await music_service.download(song)
+            result = await music_service.download(song)
+
+            if not result:
+                return
+
+            audio_file = result["audio"]
+            thumbnail = result["thumbnail"]
+                
+    
 
             if not audio_file:
                 await query.edit_message_text(
@@ -323,7 +332,8 @@ def create_music_handlers(music_service):
                     audio=audio_file,
                     title=song["name"],
                     performer=song["artist"],
-                    caption="来自satchmo的爱"
+                    caption="来自satchmo的爱",
+                    thumbnail=thumbnail,
                 )
             finally:
                 audio_file.close()

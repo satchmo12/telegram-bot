@@ -83,9 +83,10 @@ class MusicService:
         """
         调用具体的音乐服务提供商(provider)去下载歌曲或获取音频文件/链接
         """
+    
         if not hasattr(self.provider, 'download'):
             # 如果你的 provider 里不叫 download，可以根据实际情况修改
             # 例如：return await self.provider.get_audio_url(song["provider_song_id"])
             raise AttributeError(f"当前的 provider '{self.provider.NAME}' 没有实现 download 方法")
             
-        return await self.provider.download(song["provider_song_id"])
+        return await self.provider.download(song["provider_song_id"], song.get("cover_url"))

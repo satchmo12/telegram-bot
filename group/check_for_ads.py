@@ -48,10 +48,11 @@ def contains_zodiac_ad(text: str) -> bool:
     return count >= 2
 
 def is_advertisement(text: str) -> bool:
-    # 匹配 0~49 的独立数字
-    numbers = re.findall(r'(?<!\d)(?:[0-9]|[1-4][0-9])(?!\d)', text)
+    # 提取所有数字
+    numbers = re.findall(r'\d+', text)
 
-    return len(numbers) >= 10
+    # 8 个及以上数字，拦截
+    return len(numbers) >= 8
 
 
 
