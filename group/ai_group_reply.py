@@ -9,6 +9,8 @@ import httpx
 
 from telegram import Update
 from telegram.constants import ChatType
+from utils import get_group_whitelist
+
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -32,21 +34,14 @@ OLLAMA_KEEP_ALIVE = "10m"
 # AI 接话配置
 # ============================================================
 
-# 是否开启
-AI_REPLY_ENABLED = True
-
-# AI 判断为适合回复后，实际回复的概率
-# 例如 0.7 = 70%
-REPLY_PROBABILITY = 1
-
-# 同一个群，两次 AI 回复之间至少间隔多少秒
-MIN_REPLY_INTERVAL = 3
-
-# 每小时最多回复多少次
-MAX_REPLIES_PER_HOUR = 1000
+# 以下默认值只用于兼容缺少字段的旧群配置；实际开关和限额均从每个群的配置读取。
+DEFAULT_AI_REPLY_ENABLED = True
+DEFAULT_REPLY_PROBABILITY_PERCENT = 100
+DEFAULT_MIN_REPLY_INTERVAL_SEC = 3
+DEFAULT_MAX_REPLIES_PER_HOUR = 1000
 
 # AI 查看最近多少条消息
-CONTEXT_LIMIT = 10
+CONTEXT_LIMIT = 1
 
 # AI 回复最长多少字
 MAX_REPLY_LENGTH = 40
@@ -60,18 +55,40 @@ MAX_DELAY = 1.5
 # 群配置
 # ============================================================
 
-# 如果设置为空 set()：
-# 表示所有群都允许使用 AI 接话。
-#
-# 如果只想指定某几个群：
-#
-# AI_REPLY_GROUPS = {
-#     -1001234567890,
-#     -1009876543210,
-# }
-#
-# 那么只有这些群会运行。
-AI_REPLY_GROUPS = set()
+def _clamp_int(value, minimum: int, maximum: int, default: int) -> int:
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, value))
+
+
+def get_ai_reply_settings(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> dict:
+    """Read the AI reply controls for one group from the group configuration."""
+    group_config = get_group_whitelist(context).get(str(chat_id), {})
+    if not isinstance(group_config, dict):
+        group_config = {}
+    return {
+        "enabled": bool(group_config.get("ai_reply_enabled", DEFAULT_AI_REPLY_ENABLED)),
+        "probability_percent": _clamp_int(
+            group_config.get("ai_reply_probability", DEFAULT_REPLY_PROBABILITY_PERCENT),
+            0,
+            100,
+            DEFAULT_REPLY_PROBABILITY_PERCENT,
+        ),
+        "min_interval_sec": _clamp_int(
+            group_config.get("ai_reply_min_interval_sec", DEFAULT_MIN_REPLY_INTERVAL_SEC),
+            0,
+            3600,
+            DEFAULT_MIN_REPLY_INTERVAL_SEC,
+        ),
+        "max_replies_per_hour": _clamp_int(
+            group_config.get("ai_reply_max_per_hour", DEFAULT_MAX_REPLIES_PER_HOUR),
+            1,
+            10000,
+            DEFAULT_MAX_REPLIES_PER_HOUR,
+        ),
+    }
 
 
 # ============================================================
@@ -92,23 +109,6 @@ processing_chats = set()
 # 基础判断
 # ============================================================
 
-def group_enabled(chat_id: int) -> bool:
-    """
-    判断当前群是否开启 AI 接话。
-
-    AI_REPLY_GROUPS 为空：
-        所有群开启
-
-    AI_REPLY_GROUPS 有内容：
-        只有列表中的群开启
-    """
-
-    if not AI_REPLY_GROUPS:
-        return True
-
-    return chat_id in AI_REPLY_GROUPS
-
-
 def cleanup_reply_history(chat_id: int):
     """
     删除一小时前的回复记录。
@@ -125,13 +125,11 @@ def cleanup_reply_history(chat_id: int):
             break
 
 
-def can_reply(chat_id: int) -> bool:
-    """
-    判断当前群是否允许再次 AI 回复。
-    同时输出详细调试信息。
-    """
-
+def can_reply(chat_id: int, settings: dict) -> bool:
+    """Check the per-group cooldown and hourly reply cap."""
     now = time.time()
+    min_interval = settings["min_interval_sec"]
+    max_replies_per_hour = settings["max_replies_per_hour"]
 
     # --------------------------------------------------------
     # 最短间隔
@@ -142,15 +140,15 @@ def can_reply(chat_id: int) -> bool:
         print(f"[AI][CHECK] 群 {chat_id} 从未回复过，可以继续")
     else:
         elapsed = now - last_time
-        remaining = MIN_REPLY_INTERVAL - elapsed
+        remaining = min_interval - elapsed
 
         print(
             f"[AI][CHECK] 群 {chat_id} "
             f"距离上次回复 {elapsed:.1f}s，"
-            f"冷却要求 {MIN_REPLY_INTERVAL}s"
+            f"冷却要求 {min_interval}s"
         )
 
-        if elapsed < MIN_REPLY_INTERVAL:
+        if elapsed < min_interval:
             print(
                 f"[AI][SKIP] 群 {chat_id} 还在冷却，"
                 f"剩余 {remaining:.1f}s"
@@ -164,12 +162,8 @@ def can_reply(chat_id: int) -> bool:
 
     history = reply_history[chat_id]
 
-    print(
-        f"[AI][CHECK] 群 {chat_id} "
-        f"最近1小时回复次数 {len(history)}/{MAX_REPLIES_PER_HOUR}"
-    )
-
-    if len(history) >= MAX_REPLIES_PER_HOUR:
+    
+    if len(history) >= max_replies_per_hour:
         print(
             f"[AI][SKIP] 群 {chat_id} "
             f"已达到每小时最大回复次数"
@@ -372,7 +366,8 @@ async def ask_ollama(
         ],
         "stream": False,
 
-        # Qwen3 支持时关闭 thinking，可明显降低简单任务延迟
+        # 关闭 Qwen3 的思考输出；群接话只读取 message.content。
+        # 启用 thinking 时，有限的 num_predict 可能全被 thinking 占用，导致 content 为空。
         "think": False,
 
         # 尽量保持模型在内存中
@@ -386,10 +381,6 @@ async def ask_ollama(
     }
 
     try:
-        print(
-            f"[Ollama][REQUEST] url={OLLAMA_URL} "
-            f"model={OLLAMA_MODEL} think=False"
-        )
 
         request_start = time.time()
 
@@ -400,19 +391,8 @@ async def ask_ollama(
                 json=payload,
             )
 
-        request_cost = time.time() - request_start
-
-        print(
-            f"[Ollama][HTTP] status={response.status_code} "
-            f"耗时={request_cost:.2f}s"
-        )
-
         response.raise_for_status()
-
         data = response.json()
-
-        print(f"[Ollama][RAW] {data}")
-
         result = (
             data
             .get("message", {})
@@ -420,10 +400,8 @@ async def ask_ollama(
             .strip()
         )
 
-        print(f"[Ollama][CONTENT] {result!r}")
 
         if not result:
-            print("[Ollama] 没有返回内容")
             return None
 
         # NO / NO 前缀都视为不回复
@@ -476,34 +454,17 @@ async def ai_group_reply_handler(
     用来定位“为什么没有回复”。
     """
 
-    print("\n" + "=" * 70)
-    print("[AI][UPDATE] 收到一条 Update")
 
     message = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
 
-    print(
-        f"[AI][UPDATE] message={bool(message)} "
-        f"chat={bool(chat)} user={bool(user)}"
-    )
 
     if not message or not chat:
         print("[AI][SKIP] 没有 message 或 chat")
         return
 
-    print(
-        f"[AI][CHAT] id={chat.id} "
-        f"type={chat.type} "
-        f"title={getattr(chat, 'title', None)!r}"
-    )
 
-    print(
-        f"[AI][USER] id={getattr(user, 'id', None)} "
-        f"name={getattr(user, 'full_name', None)!r} "
-        f"username={getattr(user, 'username', None)!r} "
-        f"is_bot={getattr(user, 'is_bot', None)}"
-    )
 
     # ========================================================
     # 只处理群
@@ -521,33 +482,19 @@ async def ai_group_reply_handler(
     chat_id = chat.id
 
     # ========================================================
-    # 群是否开启
+    # 群配置开关与限额
     # ========================================================
 
-    enabled = group_enabled(chat_id)
-
+    ai_settings = get_ai_reply_settings(context, chat_id)
     print(
         f"[AI][CONFIG] 群 {chat_id} "
-        f"group_enabled={enabled} "
-        f"AI_REPLY_GROUPS={AI_REPLY_GROUPS}"
+        f"enabled={ai_settings['enabled']} "
+        f"probability={ai_settings['probability_percent']}% "
+        f"hourly_limit={ai_settings['max_replies_per_hour']} "
+        f"cooldown={ai_settings['min_interval_sec']}s"
     )
-
-    if not enabled:
-        print(
-            f"[AI][SKIP] 群 {chat_id} 没有开启 AI 接话"
-        )
-        return
-
-    # ========================================================
-    # 总开关
-    # ========================================================
-
-    print(
-        f"[AI][CONFIG] AI_REPLY_ENABLED={AI_REPLY_ENABLED}"
-    )
-
-    if not AI_REPLY_ENABLED:
-        print("[AI][SKIP] AI 总开关关闭")
+    if not ai_settings["enabled"]:
+        print(f"[AI][SKIP] 群 {chat_id} 没有开启 AI 接话")
         return
 
     # ========================================================
@@ -614,7 +561,7 @@ async def ai_group_reply_handler(
     # 冷却检查
     # ========================================================
 
-    if not can_reply(chat_id):
+    if not can_reply(chat_id, ai_settings):
         return
 
     # ========================================================
@@ -633,15 +580,16 @@ async def ai_group_reply_handler(
 
     random_value = random.random()
 
+    reply_probability = ai_settings["probability_percent"] / 100
     print(
         f"[AI][PROBABILITY] random={random_value:.4f} "
-        f"threshold={REPLY_PROBABILITY}"
+        f"threshold={reply_probability:.2f} ({ai_settings['probability_percent']}%)"
     )
 
-    if random_value > REPLY_PROBABILITY:
+    if random_value > reply_probability:
         print(
             f"[AI][SKIP] 概率未命中："
-            f"{random_value:.4f} > {REPLY_PROBABILITY}"
+            f"{random_value:.4f} > {reply_probability:.2f}"
         )
         return
 
@@ -657,23 +605,6 @@ async def ai_group_reply_handler(
         # ----------------------------------------------------
 
         context_text = build_context(chat_id)
-
-        print(
-            "[AI][CONTEXT] 当前上下文："
-        )
-        print(
-            context_text if context_text else "(空)"
-        )
-
-        # ----------------------------------------------------
-        # 调用 Ollama
-        # ----------------------------------------------------
-
-        print(
-            f"[AI][OLLAMA] 开始请求，"
-            f"current_text={text!r}"
-        )
-
         ollama_start = time.time()
 
         reply_text = await ask_ollama(
@@ -683,25 +614,14 @@ async def ai_group_reply_handler(
 
         ollama_cost = time.time() - ollama_start
 
-        print(
-            f"[AI][OLLAMA] 请求结束，"
-            f"耗时={ollama_cost:.2f}s，"
-            f"result={reply_text!r}"
-        )
-
-        # ----------------------------------------------------
+       
         # AI 判断不回复
         # ----------------------------------------------------
 
         if not reply_text:
-            print(
-                "[AI][DECISION] Ollama 判断：NO / 不回复"
-            )
             return
 
-        print(
-            f"[AI][DECISION] AI 决定回复：{reply_text!r}"
-        )
+      
 
         # ----------------------------------------------------
         # 随机等待
@@ -710,10 +630,6 @@ async def ai_group_reply_handler(
         delay = random.uniform(
             MIN_DELAY,
             MAX_DELAY,
-        )
-
-        print(
-            f"[AI][DELAY] 回复前等待 {delay:.2f}s"
         )
 
         await asyncio.sleep(delay)
@@ -726,7 +642,12 @@ async def ai_group_reply_handler(
             "[AI][CHECK] 等待结束，发送前再次检查冷却"
         )
 
-        if not can_reply(chat_id):
+        # AI 请求期间管理员可能关闭了功能或修改了限额，因此发送前重新读取群配置。
+        send_settings = get_ai_reply_settings(context, chat_id)
+        if not send_settings["enabled"]:
+            print("[AI][SKIP] AI 接话已被关闭，取消发送")
+            return
+        if not can_reply(chat_id, send_settings):
             print(
                 "[AI][SKIP] 发送前冷却检查未通过"
             )
@@ -735,14 +656,6 @@ async def ai_group_reply_handler(
         # ----------------------------------------------------
         # 回复原消息
         # ----------------------------------------------------
-
-        print(
-            f"[AI][SEND] 准备回复 "
-            f"chat_id={chat_id} "
-            f"message_id={message.message_id} "
-            f"text={reply_text!r}"
-        )
-
         send_start = time.time()
 
         # sent_message = await message.reply_text(
@@ -773,10 +686,7 @@ async def ai_group_reply_handler(
         last_reply_time[chat_id] = now
         reply_history[chat_id].append(now)
 
-        print(
-            f"[AI][RECORD] 已记录回复，"
-            f"当前1小时次数={len(reply_history[chat_id])}"
-        )
+    
 
         # ----------------------------------------------------
         # 把 AI 回复也加入上下文
@@ -836,18 +746,4 @@ def register_ai_group_reply_handlers(app):
             ai_group_reply_handler,
         )  
     )
-
-    print("=" * 70)
-    print("[AI][STARTUP] AI 群聊助手 Handler 已注册")
-    print(f"[AI][STARTUP] AI_REPLY_ENABLED={AI_REPLY_ENABLED}")
-    print(f"[AI][STARTUP] OLLAMA_URL={OLLAMA_URL}")
-    print(f"[AI][STARTUP] OLLAMA_MODEL={OLLAMA_MODEL}")
-    print(f"[AI][STARTUP] REPLY_PROBABILITY={REPLY_PROBABILITY}")
-    print(f"[AI][STARTUP] MIN_REPLY_INTERVAL={MIN_REPLY_INTERVAL}s")
-    print(f"[AI][STARTUP] MAX_REPLIES_PER_HOUR={MAX_REPLIES_PER_HOUR}")
-    print(f"[AI][STARTUP] CONTEXT_LIMIT={CONTEXT_LIMIT}")
-    print(f"[AI][STARTUP] MAX_REPLY_LENGTH={MAX_REPLY_LENGTH}")
-    print(f"[AI][STARTUP] DELAY={MIN_DELAY}-{MAX_DELAY}s")
-    print(f"[AI][STARTUP] AI_REPLY_GROUPS={AI_REPLY_GROUPS}")
-    print("=" * 70)
 

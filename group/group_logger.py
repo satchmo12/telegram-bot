@@ -99,6 +99,10 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "voice_reply_enabled": False,
             "active_speak_enabled": False,  # 默认不主动说话
             "active_speak_interval_min": 2,
+            "ai_reply_enabled": True,
+            "ai_reply_probability": 100,
+            "ai_reply_max_per_hour": 1000,
+            "ai_reply_min_interval_sec": 3,
             "points_lottery_enabled": False,
             "points_lottery_cost": 100,
             "points_lottery_display_text": "奖池丰厚，祝您好运。",
@@ -147,6 +151,18 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             changed = True
         if "active_speak_interval_min" not in group:
             group["active_speak_interval_min"] = 2
+            changed = True
+        if "ai_reply_enabled" not in group:
+            group["ai_reply_enabled"] = False
+            changed = True
+        if "ai_reply_probability" not in group:
+            group["ai_reply_probability"] = 100
+            changed = True
+        if "ai_reply_max_per_hour" not in group:
+            group["ai_reply_max_per_hour"] = 1000
+            changed = True
+        if "ai_reply_min_interval_sec" not in group:
+            group["ai_reply_min_interval_sec"] = 3
             changed = True
         if "force_subscribe_new_only" not in group:
             group["force_subscribe_new_only"] = False

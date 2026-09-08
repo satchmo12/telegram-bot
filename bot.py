@@ -611,14 +611,20 @@ def _build_start_panel_rows(
     if "group" in enabled:
         rows.append([InlineKeyboardButton("👥群配置", callback_data="gcfg:list")])
         
-    # if bot_name == MASTER_BOT_NAME:
-        rows.append(
-            [
-                InlineKeyboardButton("上传资源", callback_data="publish:publish"),
-                InlineKeyboardButton("我要看片", callback_data="publish:channel_message")    
-            ]
+    resource_row = []
+    can_upload_resource = bool(
+        user_id
+        and (int(user_id) == owner_id or is_super_admin(user_id))
+    )
+    if can_upload_resource:
+        resource_row.append(
+            InlineKeyboardButton("上传资源", callback_data="publish:publish")
         )
-        
+    resource_row.append(
+        InlineKeyboardButton("我要看片", callback_data="publish:channel_message")
+    )
+    rows.append(resource_row)
+
     return rows
 
 def _build_start_welcome_text(bot_name: str) -> str:

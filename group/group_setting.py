@@ -102,6 +102,12 @@ BOT_ADMIN_REQUIRED_FIELDS = {
 ACTIVE_SPEAK_MIN_INTERVAL = 1
 ACTIVE_SPEAK_MAX_INTERVAL = 1440
 ACTIVE_SPEAK_DEFAULT_INTERVAL = 2
+AI_REPLY_PROBABILITY_MIN = 0
+AI_REPLY_PROBABILITY_MAX = 100
+AI_REPLY_MAX_PER_HOUR_MIN = 1
+AI_REPLY_MAX_PER_HOUR_MAX = 10000
+AI_REPLY_MIN_INTERVAL_SEC_MIN = 0
+AI_REPLY_MIN_INTERVAL_SEC_MAX = 3600
 AD_PUSH_MIN_INTERVAL = 5
 AD_PUSH_MAX_INTERVAL = 1440
 MANAGE_CHECK_CACHE_TTL_SEC = 60
@@ -689,6 +695,97 @@ def _group_list_text(data: dict, page: int = 1) -> str:
     return f"请选择要配置的群：\n第 {page}/{total_pages} 页"
 
 
+def _ai_reply_settings_values(cfg: dict) -> tuple[bool, int, int, int]:
+    """Return safe AI reply settings stored for one group."""
+    try:
+        probability = int(cfg.get("ai_reply_probability", 100))
+    except (TypeError, ValueError):
+        probability = 100
+    try:
+        max_per_hour = int(cfg.get("ai_reply_max_per_hour", 1000))
+    except (TypeError, ValueError):
+        max_per_hour = 1000
+    try:
+        min_interval = int(cfg.get("ai_reply_min_interval_sec", 3))
+    except (TypeError, ValueError):
+        min_interval = 3
+    return (
+        bool(cfg.get("ai_reply_enabled", False)),
+        max(AI_REPLY_PROBABILITY_MIN, min(AI_REPLY_PROBABILITY_MAX, probability)),
+        max(AI_REPLY_MAX_PER_HOUR_MIN, min(AI_REPLY_MAX_PER_HOUR_MAX, max_per_hour)),
+        max(
+            AI_REPLY_MIN_INTERVAL_SEC_MIN,
+            min(AI_REPLY_MIN_INTERVAL_SEC_MAX, min_interval),
+        ),
+    )
+
+
+def _build_ai_reply_settings_text(chat_id_str: str, cfg: dict) -> str:
+    enabled, probability, max_per_hour, min_interval = _ai_reply_settings_values(cfg)
+    return (
+        "🤖 AI 接话设置\n"
+        f"群ID：<code>{chat_id_str}</code>\n\n"
+        f"状态：{'✅ 已开启' if enabled else '🚫 已关闭'}\n"
+        f"回复概率：{probability}%\n"
+        f"每小时最多回复：{max_per_hour} 次\n"
+        f"两次回复最短间隔：{min_interval} 秒"
+    )
+
+
+def _build_ai_reply_settings_keyboard(chat_id_str: str, cfg: dict) -> InlineKeyboardMarkup:
+    enabled, probability, max_per_hour, min_interval = _ai_reply_settings_values(cfg)
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    f"{'✅' if enabled else '🚫'} AI 接话开关",
+                    callback_data=f"{CALLBACK_PREFIX}:ai_reply_toggle:{chat_id_str}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    f"🎲 回复概率：{probability}%",
+                    callback_data=f"{CALLBACK_PREFIX}:ai_reply_probability:{chat_id_str}",
+                ),
+                InlineKeyboardButton(
+                    f"📊 每小时上限：{max_per_hour}",
+                    callback_data=f"{CALLBACK_PREFIX}:ai_reply_hourly_limit:{chat_id_str}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    f"⏱ 最短间隔：{min_interval}s",
+                    callback_data=f"{CALLBACK_PREFIX}:ai_reply_interval:{chat_id_str}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅️ 返回群配置",
+                    callback_data=f"{CALLBACK_PREFIX}:ai_reply_back:{chat_id_str}",
+                )
+            ],
+        ]
+    )
+
+
+async def _open_ai_reply_settings_panel(
+    query, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str, user_id: int
+):
+    chat_id = _parse_chat_id(chat_id_str)
+    if chat_id is None:
+        return await query.answer("群ID无效。", show_alert=True)
+    if not await _can_manage_group(context, user_id, chat_id):
+        return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+    cfg = get_group_whitelist(context).get(chat_id_str, {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    return await query.edit_message_text(
+        _build_ai_reply_settings_text(chat_id_str, cfg),
+        reply_markup=_build_ai_reply_settings_keyboard(chat_id_str, cfg),
+        parse_mode="HTML",
+    )
+
+
 def _build_group_panel_text(
     chat_id: str, cfg: dict, *, bot_is_admin: bool = False
 ) -> str:
@@ -736,6 +833,11 @@ def _build_group_panel_text(
         lines.append(f"曝光度：{int(cfg.get('exposure', 0))}")
     if bool(cfg.get("active_speak_enabled", False)):
         lines.append(f"主动说话频率：每 {interval} 分钟")
+    ai_enabled, ai_probability, ai_max_per_hour, ai_min_interval = _ai_reply_settings_values(cfg)
+    lines.append(
+        f"AI 接话：{'✅ 开启' if ai_enabled else '🚫 关闭'} | 概率 {ai_probability}% | "
+        f"每小时 {ai_max_per_hour} 次 | 间隔 {ai_min_interval}s"
+    )
     if lottery_cfg["enabled"]:
         lines.append(
             f"积分抽奖：单次消耗 {lottery_cfg['cost']} 分 奖品数 {prize_count}"
@@ -808,6 +910,10 @@ def _build_group_panel_keyboard(
             InlineKeyboardButton(
                 text=f"⏱ 主动说话频率：{interval}m",
                 callback_data=f"{CALLBACK_PREFIX}:active_speak_interval:{chat_id}",
+            ),
+            InlineKeyboardButton(
+                "🤖 AI 接话设置",
+                callback_data=f"{CALLBACK_PREFIX}:ai_reply_menu:{chat_id}",
             ),
         ]
     )
@@ -1678,6 +1784,71 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             ),
         )
 
+    if action == "ai_reply_menu" and len(parts) >= 3:
+        await query.answer()
+        return await _open_ai_reply_settings_panel(
+            query, context, parts[2], user_id
+        )
+
+    if action == "ai_reply_toggle" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        cfg = data.get(chat_id_str, {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        cfg["ai_reply_enabled"] = not bool(cfg.get("ai_reply_enabled", False))
+        data[chat_id_str] = cfg
+        save_json(GROUP_LIST_FILE, data)
+        await query.answer("✅ 已更新", show_alert=False)
+        return await query.edit_message_text(
+            _build_ai_reply_settings_text(chat_id_str, cfg),
+            reply_markup=_build_ai_reply_settings_keyboard(chat_id_str, cfg),
+            parse_mode="HTML",
+        )
+
+    if action in {"ai_reply_probability", "ai_reply_hourly_limit", "ai_reply_interval"} and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        stage_map = {
+            "ai_reply_probability": "ai_reply_probability",
+            "ai_reply_hourly_limit": "ai_reply_hourly_limit",
+            "ai_reply_interval": "ai_reply_interval",
+        }
+        prompt_map = {
+            "ai_reply_probability": (
+                f"请输入 AI 回复概率（{AI_REPLY_PROBABILITY_MIN}-{AI_REPLY_PROBABILITY_MAX}）。"
+            ),
+            "ai_reply_hourly_limit": (
+                f"请输入每小时最多回复次数（{AI_REPLY_MAX_PER_HOUR_MIN}-{AI_REPLY_MAX_PER_HOUR_MAX}）。"
+            ),
+            "ai_reply_interval": (
+                f"请输入两次 AI 回复最短间隔秒数（{AI_REPLY_MIN_INTERVAL_SEC_MIN}-{AI_REPLY_MIN_INTERVAL_SEC_MAX}，0 表示不设间隔）。"
+            ),
+        }
+        context.user_data["group_setting_stage"] = stage_map[action]
+        context.user_data["group_setting_chat_id"] = chat_id_str
+        await query.answer()
+        return await query.edit_message_text(
+            prompt_map[action],
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ 返回 AI 接话设置", callback_data=f"{CALLBACK_PREFIX}:ai_reply_menu:{chat_id_str}")]]
+            ),
+        )
+
+    if action == "ai_reply_back" and len(parts) >= 3:
+        context.user_data.pop("group_setting_stage", None)
+        context.user_data.pop("group_setting_chat_id", None)
+        await query.answer()
+        return await _open_group_panel(query, context, parts[2], user_id)
+
     if action == "force_channel" and len(parts) >= 3:
         chat_id_str = parts[2]
         chat_id = _parse_chat_id(chat_id_str)
@@ -2196,6 +2367,9 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
     if stage not in {
         "force_channel",
         "active_speak_interval",
+        "ai_reply_probability",
+        "ai_reply_hourly_limit",
+        "ai_reply_interval",
         "ad_message",
         "ad_text",
         "ad_interval",
@@ -2469,6 +2643,35 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
             await update.message.reply_text(
                 f"✅ 已设置主动说话频率：每 {interval} 分钟"
             )
+        elif stage in {"ai_reply_probability", "ai_reply_hourly_limit", "ai_reply_interval"}:
+            if not text or not text.isdigit():
+                return await update.message.reply_text("❗ 请输入有效的非负整数。")
+            value = int(text)
+            if stage == "ai_reply_probability":
+                if not (AI_REPLY_PROBABILITY_MIN <= value <= AI_REPLY_PROBABILITY_MAX):
+                    return await update.message.reply_text(
+                        f"❗ 回复概率范围：{AI_REPLY_PROBABILITY_MIN}-{AI_REPLY_PROBABILITY_MAX}。"
+                    )
+                cfg["ai_reply_probability"] = value
+                await update.message.reply_text(f"✅ 已设置 AI 回复概率：{value}%")
+            elif stage == "ai_reply_hourly_limit":
+                if not (AI_REPLY_MAX_PER_HOUR_MIN <= value <= AI_REPLY_MAX_PER_HOUR_MAX):
+                    return await update.message.reply_text(
+                        f"❗ 每小时回复上限范围：{AI_REPLY_MAX_PER_HOUR_MIN}-{AI_REPLY_MAX_PER_HOUR_MAX}。"
+                    )
+                cfg["ai_reply_max_per_hour"] = value
+                await update.message.reply_text(f"✅ 已设置每小时最多 AI 回复：{value} 次")
+            else:
+                if not (
+                    AI_REPLY_MIN_INTERVAL_SEC_MIN
+                    <= value
+                    <= AI_REPLY_MIN_INTERVAL_SEC_MAX
+                ):
+                    return await update.message.reply_text(
+                        f"❗ 最短间隔范围：{AI_REPLY_MIN_INTERVAL_SEC_MIN}-{AI_REPLY_MIN_INTERVAL_SEC_MAX} 秒。"
+                    )
+                cfg["ai_reply_min_interval_sec"] = value
+                await update.message.reply_text(f"✅ 已设置 AI 最短回复间隔：{value} 秒")
         elif stage == "talk_points":
             if not text:
                 return await update.message.reply_text("❗ 请输入 3 个数字，例如：1 50 5")

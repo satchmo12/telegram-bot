@@ -3,11 +3,12 @@ import json
 import os
 import re
 import tempfile
-from telegram import Update
+from telegram import ChatPermissions, Update
 import telegram
 from telegram.ext import ContextTypes
 from utils import (
     AD_KEYWORDS_FILE,
+    WARNINGS_FILE,
     delete_later,
     get_bot_path,
     get_group_whitelist,
@@ -39,15 +40,84 @@ ZODIAC = "鼠牛虎兔龙蛇马羊猴鸡狗猪"
 def contains_zodiac_ad(text: str) -> bool:
     if not text:
         return False
+    # 不允许at
+    # if "@" in text:
+    #     return True
 
     count = sum(1 for char in text if char in ZODIAC)
     return count >= 2
+
+def is_advertisement(text: str) -> bool:
+    # 匹配 0~49 的独立数字
+    numbers = re.findall(r'(?<!\d)(?:[0-9]|[1-4][0-9])(?!\d)', text)
+
+    return len(numbers) >= 10
+
+
+
 
 # 配置文件由 utils.load_json 缓存，但旧实现仍会在每条消息上重新清洗、排序
 # 所有群的关键词和白名单。这里按底层缓存对象复用标准化结果。
 _AD_KEYWORDS_CACHE = {}
 _WHITELIST_CACHE = {}
 _LOWER_GROUP_KEYWORDS_CACHE = {}
+AD_WARNING_LIMIT = 3
+
+
+async def _record_ad_warning(update: Update, context: ContextTypes.DEFAULT_TYPE, user) -> tuple[int, bool]:
+    """Persist one ad warning and permanently mute the user on the third one."""
+    chat = update.effective_chat
+    if not chat or not user:
+        return 0, False
+
+    chat_id = str(chat.id)
+    user_id = str(user.id)
+    warnings_path = get_bot_path(context, WARNINGS_FILE)
+    warnings = load_json(warnings_path)
+    if not isinstance(warnings, dict):
+        warnings = {}
+    chat_warnings = warnings.setdefault(chat_id, {})
+    if not isinstance(chat_warnings, dict):
+        chat_warnings = {}
+        warnings[chat_id] = chat_warnings
+
+    try:
+        previous_count = int(chat_warnings.get(user_id, 0) or 0)
+    except (TypeError, ValueError):
+        previous_count = 0
+    count = previous_count + 1
+    chat_warnings[user_id] = count
+    save_json(warnings_path, warnings)
+
+    if count < AD_WARNING_LIMIT:
+        print(f"[广告警告] chat={chat_id} user={user_id} count={count}/{AD_WARNING_LIMIT}")
+        return count, False
+
+    try:
+        # until_date=None means a permanent restriction in the Bot API.
+        await context.bot.restrict_chat_member(
+            chat_id=chat.id,
+            user_id=user.id,
+            permissions=ChatPermissions(can_send_messages=False),
+            until_date=None,
+        )
+    except Exception as exc:
+        print(
+            f"[广告警告] 第 {count} 次命中，但永久禁言失败 "
+            f"chat={chat_id} user={user_id}: {exc}"
+        )
+        return count, False
+
+    try:
+        from group.mute_registry import add_mute
+
+        add_mute(chat_id, user.id, getattr(user, "full_name", ""), source="广告累计3次警告")
+    except Exception as exc:
+        # The Telegram restriction has succeeded; a registry failure must not undo it.
+        print(f"[广告警告] 已永久禁言，但写入禁言列表失败: {exc}")
+
+    print(f"[广告警告] chat={chat_id} user={user_id} count={count}/{AD_WARNING_LIMIT} 已永久禁言")
+    return count, True
 
 
 def _drop_path_caches(path: str):
@@ -381,7 +451,11 @@ async def check_for_ads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> b
     text = ((msg.text or "") + " " + (msg.caption or "")).lower()
     keyword_hit = any(keyword in text for keyword in get_lower_group_ad_keywords(context, chat_id))
     should_delete = bool(
-        keyword_hit or URL_PATTERN.search(text) or TELEGRAM_LINK_PATTERN.search(text) or contains_zodiac_ad(text)
+        keyword_hit
+        or URL_PATTERN.search(text)
+        or TELEGRAM_LINK_PATTERN.search(text)
+        or contains_zodiac_ad(text)
+        or is_advertisement(text)
     )
     if not should_delete:
         return False
@@ -402,6 +476,13 @@ async def check_for_ads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> b
         if "message can't be deleted" in error_text or "message to delete not found" in error_text:
             return True
         print(f"[删除失败] {exc}")
+        return True
+    except Exception as exc:
+        print(f"[删除失败] {exc}")
+        return True
+
+    # Only count a warning after the ad message has actually been recalled.
+    await _record_ad_warning(update, context, user)
     return True
 
 
