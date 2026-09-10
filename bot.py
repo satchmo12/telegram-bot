@@ -44,6 +44,7 @@ from modules import register_all_handlers  # 注册各功能模块
 from dispatcher import message_router  # 最终文本处理路由器
 from channel.telethon_forwarder import start_telethon_forwarder_job
 from channel.telethon_login import _clear_login_state
+from channel.publish_setting import load_publish_config
 from command_router import get_matched_command
 
 from chat.my_bot import cleaned_word
@@ -587,7 +588,6 @@ def _build_start_panel_rows(
             )
         owner_row.extend(
             [
-                InlineKeyboardButton("📢全群广告推送", callback_data="gcfg:global_ad_menu"),
                 InlineKeyboardButton("⚙️投稿配置", callback_data="publish:publishset"),
             ]
         )
@@ -597,33 +597,35 @@ def _build_start_panel_rows(
         rows.append(
             [
                 InlineKeyboardButton("📣克隆频道", callback_data="chcfg:back"),
-                InlineKeyboardButton("📣机器人频道配置", callback_data="chcfg:bot")   
-            ]
-        )
-        
-        rows.append(
-            [
                 InlineKeyboardButton("📱管理协议号(可群发)", callback_data="tlogin:list"),
-                InlineKeyboardButton("📱登录协议号", callback_data="tlogin:login")
+                # InlineKeyboardButton("📣机器人频道配置", callback_data="chcfg:bot")
             ]
         )
         
     if "group" in enabled:
-        rows.append([InlineKeyboardButton("👥群配置", callback_data="gcfg:list")])
-        
-    resource_row = []
-    can_upload_resource = bool(
-        user_id
-        and (int(user_id) == owner_id or is_super_admin(user_id))
-    )
-    if can_upload_resource:
-        resource_row.append(
-            InlineKeyboardButton("上传资源", callback_data="publish:publish")
+        owner_row = []
+        owner_row.extend(
+            [
+                InlineKeyboardButton("👥群配置", callback_data="gcfg:list"),
+                InlineKeyboardButton("📢全群广告推送", callback_data="gcfg:global_ad_menu"),
+            ]
         )
-    resource_row.append(
-        InlineKeyboardButton("我要看片", callback_data="publish:channel_message")
-    )
-    rows.append(resource_row)
+        rows.append(owner_row)
+        
+    # 投稿配置控制公共入口的显示；旧配置会在 load_publish_config 中自动
+    # 补齐开关字段，并默认保持此前两个按钮都显示的行为。
+    publish_config = load_publish_config()
+    resource_row = []
+    if bool(publish_config.get("submission_enabled", True)):
+        resource_row.append(
+            InlineKeyboardButton("我要投稿", callback_data="publish:publish")
+        )
+    if bool(publish_config.get("random_view_enabled", True)):
+        resource_row.append(
+            InlineKeyboardButton("随机查看", callback_data="publish:channel_message")
+        )
+    if resource_row:
+        rows.append(resource_row)
 
     return rows
 
@@ -824,10 +826,11 @@ async def set_bot_commands(app):
     commands.append(BotCommand("help", "命令帮助"))
     if "group" in enabled:
         commands.append(BotCommand("group", "群设置"))
-    if "channel" in enabled:
-        commands.append(BotCommand("channel_config", "频道设置"))
-    if "game_hub" in enabled:
-        commands.append(BotCommand("start_menu", "游戏菜单"))
+
+    # if "channel" in enabled:
+    #     commands.append(BotCommand("channel_config", "频道设置"))
+    # if "game_hub" in enabled:
+    #     commands.append(BotCommand("start_menu", "游戏菜单"))
     await app.bot.set_my_commands(commands)
 
 

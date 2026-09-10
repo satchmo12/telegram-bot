@@ -812,8 +812,8 @@ async def children(update: Update, context: ContextTypes.DEFAULT_TYPE):
         health = c.get("health", 50)
         mood = c.get("mood", 50)
         msg += (
-            f"{i}. {c.get('name', '未命名')}（{gender}，{status}，成长：{growth}，"
-            f"健康：{health}，心情：{mood}，出生：{c.get('birthday', '未知')}，"
+            f"{i}. {c.get('name', '未命名')}（{gender}，{status}，{growth}，"
+            f"健康：{health}，{mood}，出生：{c.get('birthday', '未知')}，"
             f"ID:{short_id}，喂养：{_format_since(last_fed)}）\n"
         )
 

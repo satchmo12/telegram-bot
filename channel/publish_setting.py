@@ -31,17 +31,24 @@ def load_publish_config():
         "ads_enabled": False,
         "ads": [],
         "buttons": [],
+        # Keep existing bots' public buttons visible until an owner changes
+        # these new switches in 投稿配置.
+        "submission_enabled": False,
+        "random_view_enabled": False,
     }
 
-
     data = load_json(PUBLISH_CONFIG_FILE)
-    
-    if not data:
-        data = default
+    if not isinstance(data, dict) or not data:
+        data = default.copy()
         save_json(PUBLISH_CONFIG_FILE, data)
-    elif "buttons" not in data:
-        # Existing bots retain their publish settings and gain an empty button list.
-        data["buttons"] = []
+        return data
+
+    changed = False
+    for key, value in default.items():
+        if key not in data:
+            data[key] = value.copy() if isinstance(value, list) else value
+            changed = True
+    if changed:
         save_json(PUBLISH_CONFIG_FILE, data)
 
     return data
@@ -137,13 +144,25 @@ def _clear_button_input(context: ContextTypes.DEFAULT_TYPE):
 # =========================
 # 键盘
 # =========================
-def publish_setting_keyboard():
+def publish_setting_keyboard(config: dict):
+    submission_enabled = bool(config.get("submission_enabled", True))
+    random_view_enabled = bool(config.get("random_view_enabled", True))
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📢 发布频道", callback_data="publish:channel")],
         [InlineKeyboardButton("📝 审核设置", callback_data="publish:review")],
         [InlineKeyboardButton("📊 每日发布上限", callback_data="publish:limit")],
         [InlineKeyboardButton("📣 广告管理", callback_data="publish:ads")],
         [InlineKeyboardButton("🔘 按钮设置", callback_data="publish:buttons")],
+        [
+            InlineKeyboardButton(
+                f"{'✅' if submission_enabled else '🚫'} 投稿开关",
+                callback_data="publish:toggle_submission",
+            ),
+            InlineKeyboardButton(
+                f"{'✅' if random_view_enabled else '🚫'} 随机查看开关",
+                callback_data="publish:toggle_random_view",
+            ),
+        ],
         [InlineKeyboardButton("⬅️ 返回", callback_data="start:back")]
     ])
 
@@ -218,7 +237,23 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         help_text = "📣 请设置发布的频道"       
         await query.edit_message_text(
             help_text,
-            reply_markup=publish_setting_keyboard()
+            reply_markup=publish_setting_keyboard(config)
+        )
+
+    if action == "toggle_submission":
+        config["submission_enabled"] = not bool(config.get("submission_enabled", True))
+        save_publish_config(config)
+        return await query.edit_message_text(
+            f"投稿开关已{'开启' if config['submission_enabled'] else '关闭'}。",
+            reply_markup=publish_setting_keyboard(config),
+        )
+
+    if action == "toggle_random_view":
+        config["random_view_enabled"] = not bool(config.get("random_view_enabled", True))
+        save_publish_config(config)
+        return await query.edit_message_text(
+            f"随机查看开关已{'开启' if config['random_view_enabled'] else '关闭'}。",
+            reply_markup=publish_setting_keyboard(config),
         )
 
     if action == "channel":
@@ -508,7 +543,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "back":
         return await query.edit_message_text(
             "⚙️ 发布设置",
-            reply_markup=publish_setting_keyboard()
+            reply_markup=publish_setting_keyboard(config)
         )
     
     if action == "publish":

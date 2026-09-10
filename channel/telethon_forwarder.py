@@ -22,6 +22,7 @@ from utils import (
 )
 from channel.channel_forwarder import _is_active_subscription
 from channel.telethon_login import _get_api_creds
+from channel.telethon_ai_reply import get_enabled_sessions, handle_protocol_group_message
 
 try:
     from telethon import TelegramClient, events
@@ -62,6 +63,7 @@ if TYPE_CHECKING:
 SESSION_CLIENTS_BY_BOT: Dict[str, Dict[str, "TelethonClient"]] = {}
 SESSION_RULES_BY_BOT: Dict[str, Dict[str, List[dict]]] = {}
 FORWARD_TASKS: Dict[str, asyncio.Task] = {}
+REFRESH_EVENTS: Dict[str, asyncio.Event] = {}
 DEBUG_FORWARD = False
 HISTORY_REQUESTS_FILE = "data/history_forward_requests.json"
 HISTORY_STATE_FILE = "data/history_forward_state.json"
@@ -809,12 +811,22 @@ def _collect_rules() -> Dict[str, List[dict]]:
     return result
 
 
-async def _ensure_client(bot_name: str, session_name: str, api_id: int, api_hash: str):
+async def _ensure_client(
+    bot_name: str,
+    session_name: str,
+    api_id: int,
+    api_hash: str,
+    *,
+    allow_shared_session: bool = False,
+):
     per_bot_clients = SESSION_CLIENTS_BY_BOT.setdefault(bot_name, {})
     client = per_bot_clients.get(session_name)
     if client:
         return client
-    if is_shared_session_name(session_name):
+    # The shared ``main`` session remains unavailable to forwarding rules,
+    # but it may explicitly opt into protocol AI replies.  It is only allowed
+    # here when _refresh_sessions found an enabled AI group for it.
+    if is_shared_session_name(session_name) and not allow_shared_session:
         return None
     base = get_sessions_dir_by_bot(bot_name, session_name)
     os.makedirs(base, exist_ok=True)
@@ -1084,6 +1096,13 @@ async def _ensure_client(bot_name: str, session_name: str, api_id: int, api_hash
             _save_history_state(state)
 
     @client.on(events.NewMessage)
+    async def _on_group_ai_reply(event):
+        # Configuration is checked again by the handler so turning a group off
+        # takes effect immediately; this listener exists only for sessions with
+        # at least one enabled group.
+        await handle_protocol_group_message(bot_name, session_name, client, event)
+
+    @client.on(events.NewMessage)
     async def _on_group_inline(event):
         if getattr(event, "out", False):
             return
@@ -1177,9 +1196,19 @@ async def _refresh_sessions(app):
             print(f"⚠️ 协议号规则为空[{bot_name}]")
     SESSION_RULES_BY_BOT[bot_name] = rules_by_session
 
-    active_sessions = set(rules_by_session.keys())
+    ai_sessions = get_enabled_sessions(bot_name)
+    active_sessions = set(rules_by_session.keys()) | ai_sessions
     for session_name in active_sessions:
-        await _ensure_client(bot_name, session_name, api_id, api_hash)
+        was_running = session_name in SESSION_CLIENTS_BY_BOT.get(bot_name, {})
+        client = await _ensure_client(
+            bot_name,
+            session_name,
+            api_id,
+            api_hash,
+            allow_shared_session=session_name in ai_sessions,
+        )
+        if client and session_name in ai_sessions and not was_running:
+            print(f"✅ 协议号 AI 群消息监听已启动: session={session_name}")
 
     # 清理不再需要的 session
     per_bot_clients = SESSION_CLIENTS_BY_BOT.setdefault(bot_name, {})
@@ -1381,17 +1410,31 @@ async def _process_history_requests():
     save_json(HISTORY_REQUESTS_FILE, remaining)
 
 
+def request_telethon_refresh(bot_name: str) -> None:
+    """Wake a running protocol-account loop after its settings change."""
+    event = REFRESH_EVENTS.get(str(bot_name or ""))
+    if event is not None:
+        event.set()
+
+
 async def telethon_forwarder_loop(app):
     if TelegramClient is None or events is None:
         print("❗ Telethon 未安装，协议号自动转发未启动。")
         return
+    bot_name = str(app.bot_data.get("name", "") or "")
+    refresh_event = REFRESH_EVENTS.setdefault(bot_name, asyncio.Event())
     while True:
         try:
             await _refresh_sessions(app)
             await _process_history_requests()
         except Exception as e:
             print(f"⚠️ 协议号自动转发刷新失败: {e}")
-        await asyncio.sleep(30)
+        try:
+            await asyncio.wait_for(refresh_event.wait(), timeout=30)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            refresh_event.clear()
 
 
 async def start_telethon_forwarder_job(context):

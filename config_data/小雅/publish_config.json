@@ -1,6 +1,6 @@
 {
     "channel_id": -1003585759564,
-    "review_enabled": false,
+    "review_enabled": true,
     "daily_limit": 0,
     "ads_enabled": false,
     "ads": [],
@@ -10,5 +10,7 @@
             "text": "Raptor加速器",
             "url": "http://skyk.cc"
         }
-    ]
+    ],
+    "submission_enabled": false,
+    "random_view_enabled": false
 }

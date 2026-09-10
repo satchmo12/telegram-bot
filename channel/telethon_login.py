@@ -28,6 +28,11 @@ from telegram.ext import (
     filters,
 )
 from channel.channel_config import start_channel_config_with_source, start_channel_config_new
+from channel.telethon_ai_reply import (
+    get_group_settings as get_protocol_ai_group_settings,
+    remove_session_config as remove_protocol_ai_session_config,
+    set_group_ai_enabled,
+)
 
 HISTORY_RANGE_FILE = os.path.join("data", "history_forward_range.json")
 SUBSCRIPTION_FILE = "config_data/subscriptions.json"
@@ -89,11 +94,10 @@ async def _send_login_prompt(
 
 
 def _empty_sessions_reply_markup(context: ContextTypes.DEFAULT_TYPE):
+    rows = [[InlineKeyboardButton("📱 登录协议号", callback_data=f"{CALLBACK_PREFIX}:login")]]
     if context.user_data.get("start_panel"):
-        return InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ 返回", callback_data="start:back")]]
-        )
-    return None
+        rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
+    return InlineKeyboardMarkup(rows)
 
 
 async def _clear_login_state(uid: str, context: ContextTypes.DEFAULT_TYPE):
@@ -232,13 +236,8 @@ def _can_access_session(user, session_name: str) -> bool:
 
 
 def _can_login(user) -> bool:
-    if not user:
-        return False
-    if is_super_admin(user.id):
-        return True
-    if not is_channel_subscription_required():
-        return True
-    return _is_active_subscription(user)
+    """Temporarily allow every Telegram user to start the protocol login flow."""
+    return bool(user)
 
 
 def _require_active_subscription(user) -> bool:
@@ -324,7 +323,7 @@ def _build_account_menu_keyboard(session_name: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("📢 查看频道", callback_data=f"{CALLBACK_PREFIX}:channels:{session_name}")],
-            [InlineKeyboardButton("👥 查看群组", callback_data=f"{CALLBACK_PREFIX}:groups:{session_name}")],
+            [InlineKeyboardButton("👥 群组管理（AI / 群发）", callback_data=f"{CALLBACK_PREFIX}:groups:{session_name}")],
             [InlineKeyboardButton("➕ 加群", callback_data=f"{CALLBACK_PREFIX}:join:{session_name}")],
             [InlineKeyboardButton("📣 群发消息", callback_data=f"{CALLBACK_PREFIX}:broadcast:{session_name}")],
             [InlineKeyboardButton("🗑 删除协议号", callback_data=f"{CALLBACK_PREFIX}:delete:{session_name}")],
@@ -390,7 +389,8 @@ def _truncate_display_text(text: str, max_length: int = 180) -> str:
 
 
 def _build_session_list_rows(sessions: list[str], include_start_back: bool = False) -> list[list[InlineKeyboardButton]]:
-    rows = [
+    rows = [[InlineKeyboardButton("📱 登录协议号", callback_data=f"{CALLBACK_PREFIX}:login")]]
+    rows.extend([
         [
             InlineKeyboardButton(
                 _truncate_button_text(_get_cached_session_label(session_name), 60),
@@ -398,7 +398,7 @@ def _build_session_list_rows(sessions: list[str], include_start_back: bool = Fal
             )
         ]
         for session_name in sessions
-    ]
+    ])
     rows.append(
         [
             InlineKeyboardButton("🔁 刷新列表", callback_data=f"{CALLBACK_PREFIX}:list"),
@@ -435,12 +435,12 @@ def _build_group_list_page(
             [
                 InlineKeyboardButton(
                     _truncate_button_text(f"{idx}. {group.get('title') or '未命名群组'}"),
-                    callback_data=f"{CALLBACK_PREFIX}:gpage:{session_name}|{page}",
+                    callback_data=f"{CALLBACK_PREFIX}:gmenu:{session_name}|{group_id}",
                 ),
-                InlineKeyboardButton(
-                    "✉️ 发送消息",
-                    callback_data=f"{CALLBACK_PREFIX}:sendgroup:{session_name}|{group_id}",
-                ),
+                # InlineKeyboardButton(
+                #     "✉️ 群发",
+                #     callback_data=f"{CALLBACK_PREFIX}:sendgroup:{session_name}|{group_id}",
+                # ),
             ]
         )
 
@@ -464,10 +464,48 @@ def _build_group_list_page(
         [InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:menu:{session_name}")]
     )
     text = (
-        f"加入的群组（共 {total} 个，第 {page}/{total_pages} 页；点击右侧按钮可单独发送）：\n"
+        f"加入的群组（共 {total} 个，第 {page}/{total_pages} 页；点击群名管理 AI，右侧可群发）：\n"
         + "\n".join(lines)
     )
     return text, InlineKeyboardMarkup(keyboard_rows)
+
+
+def _build_group_manage_text(session_name: str, group: dict, settings: dict) -> str:
+    return (
+        "👥 协议号群组管理\n"
+        f"协议号：{_get_cached_session_label(session_name)}\n"
+        f"群组：{_truncate_display_text(_group_display_name(group))}\n\n"
+        f"AI 回复：{'✅ 已开启' if settings['enabled'] else '🚫 已关闭'}\n"
+        "AI 开关只作用于当前协议号的当前群组。"
+    )
+
+
+def _build_group_manage_keyboard(session_name: str, group_id: int, settings: dict) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    f"{'✅ 关闭' if settings['enabled'] else '🚫 开启'} AI 回复",
+                    callback_data=f"{CALLBACK_PREFIX}:aitoggle:{session_name}|{group_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "✉️ 向本群发送消息",
+                    callback_data=f"{CALLBACK_PREFIX}:sendgroup:{session_name}|{group_id}",
+                )
+            ],
+            [InlineKeyboardButton("⬅️ 返回群组列表", callback_data=f"{CALLBACK_PREFIX}:groups:{session_name}")],
+        ]
+    )
+
+
+async def _get_account_group(context: ContextTypes.DEFAULT_TYPE, uid: str, session_name: str, group_id: int):
+    groups = _GROUP_LIST_CACHE.get((uid, session_name))
+    if groups is None:
+        groups = await _fetch_account_groups(context, session_name)
+        _GROUP_LIST_CACHE[(uid, session_name)] = groups
+    return next((group for group in groups if int(group.get("id", 0)) == int(group_id)), None)
 
 
 def _build_single_group_send_markup(session_name: str) -> InlineKeyboardMarkup:
@@ -522,6 +560,9 @@ async def _delete_session_files(context: ContextTypes.DEFAULT_TYPE, session_name
     if owners.get("sessions", {}).pop(session_name, None) is not None:
         _save_session_owners(owners)
     _SESSION_LABEL_CACHE.pop(session_name, None)
+    remove_protocol_ai_session_config(
+        str(context.application.bot_data.get("name", "") or ""), session_name
+    )
     for cache_key in list(_CHANNEL_LIST_CACHE):
         if cache_key[1] == session_name:
             _CHANNEL_LIST_CACHE.pop(cache_key, None)
@@ -1061,8 +1102,6 @@ async def history_forward_range(update: Update, context: ContextTypes.DEFAULT_TY
 @register_command("查看登录", "查看小号")
 async def list_logged_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not _require_active_subscription(user):
-        return await _plain_reply(update, context, "🚫 订阅已到期，无法查看小号。")
     sessions = _list_session_names(context, user)
     if not sessions:
         return await _plain_reply(
@@ -1229,8 +1268,8 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
 
     if action == "list":
         await _clear_login_state(uid, context)
-        if not _require_active_subscription(query.from_user):
-            return await query.edit_message_text("🚫 订阅已到期，无法查看小号。")
+        # 登录入口位于本面板中，因此任何用户都应能先打开该面板；
+        # 后续具体账号操作仍会逐项校验所有权和订阅权限。
         sessions = _list_session_names(context, query.from_user)
         if not sessions:
             return await query.edit_message_text(
@@ -1340,6 +1379,37 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
             f"将使用全部 {len(sessions)} 个可管理协议号，向各自已加入的群组发送消息。\n\n"
             "请发送要群发的消息：",
             reply_markup=keyboard,
+        )
+
+    if action in {"gmenu", "aitoggle"}:
+        await _clear_login_state(uid, context)
+        try:
+            session_name, group_id_raw = payload.rsplit("|", 1)
+            group_id = int(group_id_raw)
+        except (TypeError, ValueError):
+            return await query.edit_message_text("群组信息无效，请重新查看群组列表。")
+        if not _require_active_subscription(query.from_user):
+            return await query.edit_message_text("🚫 订阅已到期，无法管理群组。")
+        if not _can_access_session(query.from_user, session_name):
+            return await query.edit_message_text("🚫 无权管理该协议号的群组。")
+        group = await _get_account_group(context, uid, session_name, group_id)
+        if not group:
+            return await query.edit_message_text("群组已不存在或协议号不在该群内，请重新查看群组列表。")
+
+        bot_name = str(context.application.bot_data.get("name", "") or "")
+        settings = get_protocol_ai_group_settings(bot_name, session_name, group_id)
+        if action == "aitoggle":
+            settings = set_group_ai_enabled(
+                bot_name, session_name, group_id, not settings["enabled"]
+            )
+            # Do not wait for the 30-second maintenance cycle before a newly
+            # enabled protocol account begins listening (or an unused one stops).
+            from channel.telethon_forwarder import request_telethon_refresh
+
+            request_telethon_refresh(bot_name)
+        return await query.edit_message_text(
+            _build_group_manage_text(session_name, group, settings),
+            reply_markup=_build_group_manage_keyboard(session_name, group_id, settings),
         )
 
     if action == "sendgroup":
