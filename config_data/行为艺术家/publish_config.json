@@ -1,8 +1,11 @@
 {
-    "channel_id": null,
-    "review_enabled": false,
+    "channel_id": -1002934622997,
+    "review_enabled": true,
     "daily_limit": 0,
     "ads_enabled": false,
     "ads": [],
-    "buttons": []
+    "buttons": [],
+    "bottom_buttons_enabled": false,
+    "submission_enabled": true,
+    "random_view_enabled": false
 }

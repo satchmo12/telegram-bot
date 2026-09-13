@@ -5,7 +5,7 @@
     "ads_enabled": false,
     "ads": [],
     "buttons": [],
+    "bottom_buttons_enabled": true,
     "submission_enabled": false,
-    "random_view_enabled": false,
-    "bottom_buttons_enabled": true
+    "random_view_enabled": false
 }

@@ -1,5 +1,6 @@
 import asyncio
 import re
+from copy import copy
 from typing import Optional
 from datetime import datetime
 from telegram import Update, InputMediaPhoto, InputMediaVideo, InputMediaDocument
@@ -180,6 +181,113 @@ def _processed_text_or_original(text: str, rule: dict):
         return text
     return processed
 
+
+def _utf16_length(text: str) -> int:
+    """Telegram Bot API entity offsets are measured in UTF-16 code units."""
+    return len((text or "").encode("utf-16-le")) // 2
+
+
+def _clone_entity(entity, offset: int, length: int):
+    """Keep all entity metadata (URL, custom emoji ID, language, etc.)."""
+    try:
+        cloned = copy(entity)
+        with cloned._unfrozen():
+            cloned.offset = offset
+            cloned.length = length
+        return cloned
+    except Exception:
+        return None
+
+
+def _slice_entities(text: str, entities, start: int, end: int):
+    """Clip entities to ``text[start:end]`` and shift their UTF-16 offsets."""
+    slice_start = _utf16_length(text[:start])
+    slice_end = _utf16_length(text[:end])
+    adjusted = []
+    for entity in entities or []:
+        entity_start = int(getattr(entity, "offset", 0) or 0)
+        entity_end = entity_start + int(getattr(entity, "length", 0) or 0)
+        overlap_start = max(entity_start, slice_start)
+        overlap_end = min(entity_end, slice_end)
+        if overlap_start >= overlap_end:
+            continue
+        cloned = _clone_entity(
+            entity,
+            overlap_start - slice_start,
+            overlap_end - overlap_start,
+        )
+        if cloned is not None:
+            adjusted.append(cloned)
+    return adjusted
+
+
+def _apply_cut_with_entities(text: str, entities, cut_rule):
+    """Apply cut rules while preserving entities in the remaining text.
+
+    A cut rule removes a prefix, suffix, or the region between ``start|end``.
+    For each cut we calculate the removed UTF-16 length and subtract it from
+    every surviving entity offset; intersecting entities are clipped.
+    """
+    if not text or not cut_rule:
+        return text, list(entities or [])
+
+    rules = [cut_rule] if isinstance(cut_rule, str) else [rule for rule in cut_rule or [] if rule]
+    result_text = text
+    result_entities = list(entities or [])
+    for rule in rules:
+        if "|" in rule:
+            start_marker, end_marker = rule.split("|", 1)
+        else:
+            start_marker, end_marker = "", rule
+
+        start = 0
+        end = len(result_text)
+        if start_marker:
+            start_index = result_text.find(start_marker)
+            if start_index >= 0:
+                start = start_index + len(start_marker)
+        if end_marker:
+            end_index = result_text.find(end_marker, start)
+            if end_index >= 0:
+                end = end_index
+
+        if start == 0 and end == len(result_text):
+            continue
+        result_entities = _slice_entities(result_text, result_entities, start, end)
+        result_text = result_text[start:end]
+    return result_text, result_entities
+
+
+def _can_preserve_entities(rule: dict) -> bool:
+    """Cutting can retain entities; arbitrary rewrites cannot safely do so."""
+    return not bool(
+        rule.get("clear_links")
+        or rule.get("replace_words")
+        or str(rule.get("suffix", "") or "").strip()
+    )
+
+
+def _process_text_with_entities(text: str, rule: dict, entities):
+    """Process text and retain its formatting for cut-only transformations."""
+    if text is None:
+        return text, []
+    if _can_preserve_entities(rule):
+        if rule.get("cut_words"):
+            return _apply_cut_with_entities(text, entities, rule.get("cut_words"))
+        return text, list(entities or [])
+
+    processed = _processed_text_or_original(text, rule)
+    if processed == text:
+        return text, list(entities or [])
+    return processed, []
+
+
+def _message_entities(msg):
+    """Return text or caption entities matching the message's visible content."""
+    if getattr(msg, "text", None):
+        return getattr(msg, "entities", None)
+    return getattr(msg, "caption_entities", None)
+
 def _get_media_group_key(msg, rule_idx: int) -> tuple[int, str, int]:
     # media_group_id 在不同 chat 可能重复，组合 chat_id 更稳妥
     # 追加 rule_idx，避免同一消息命中多条规则时任务互相覆盖
@@ -253,6 +361,7 @@ async def _send_single_media(
     msg,
     *,
     caption: Optional[str],
+    caption_entities=None,
     src: str,
 ):
     if msg.photo:
@@ -262,6 +371,7 @@ async def _send_single_media(
                 chat_id=target_id,
                 photo=msg.photo[-1].file_id,
                 caption=caption,
+                caption_entities=caption_entities,
             ),
             kind="图片",
             src=str(src),
@@ -273,6 +383,7 @@ async def _send_single_media(
                 chat_id=target_id,
                 video=msg.video.file_id,
                 caption=caption,
+                caption_entities=caption_entities,
             ),
             kind="视频",
             src=str(src),
@@ -284,6 +395,7 @@ async def _send_single_media(
                 chat_id=target_id,
                 animation=msg.animation.file_id,
                 caption=caption,
+                caption_entities=caption_entities,
             ),
             kind="动图",
             src=str(src),
@@ -295,6 +407,7 @@ async def _send_single_media(
                 chat_id=target_id,
                 document=msg.document.file_id,
                 caption=caption,
+                caption_entities=caption_entities,
             ),
             kind="文件",
             src=str(src),
@@ -302,7 +415,11 @@ async def _send_single_media(
     if caption:
         return await _send_with_retry(
             target_id,
-            lambda: context.bot.send_message(chat_id=target_id, text=caption),
+            lambda: context.bot.send_message(
+                chat_id=target_id,
+                text=caption,
+                entities=caption_entities,
+            ),
             kind="文字",
             src=str(src),
         )
@@ -315,26 +432,51 @@ async def process_media_group(
     """合并发送 MediaGroup"""
     group_msgs = sorted(group_msgs, key=lambda x: x.message_id or 0)
 
-    # 提取文字，只取第一条消息中的 text 或 caption
+    # 提取文字，只取第一条消息中的 text 或 caption。
+    # 未改写正文时携带原始 entities，避免粗体、链接、引用等格式丢失。
     main_text = None
+    main_entities = None
     for msg in group_msgs:
         text = getattr(msg, "text", None) or getattr(msg, "caption", None)
         if text:
-            main_text = _processed_text_or_original(text, rule)
+            main_text, main_entities = _process_text_with_entities(
+                text,
+                rule,
+                _message_entities(msg),
+            )
             break
 
     media_list = []
     media_msgs = []
     for idx, msg in enumerate(group_msgs):
         caption = main_text if idx == 0 and main_text and len(main_text) <= MEDIA_CAPTION_LIMIT else None
+        caption_entities = main_entities if caption else None
         if msg.photo:
-            media_list.append(InputMediaPhoto(media=msg.photo[-1].file_id, caption=caption))
+            media_list.append(
+                InputMediaPhoto(
+                    media=msg.photo[-1].file_id,
+                    caption=caption,
+                    caption_entities=caption_entities,
+                )
+            )
             media_msgs.append(msg)
         elif msg.video:
-            media_list.append(InputMediaVideo(media=msg.video.file_id, caption=caption))
+            media_list.append(
+                InputMediaVideo(
+                    media=msg.video.file_id,
+                    caption=caption,
+                    caption_entities=caption_entities,
+                )
+            )
             media_msgs.append(msg)
         elif msg.document and getattr(msg.document, "mime_type", "") == "image/gif":
-            media_list.append(InputMediaDocument(media=msg.document.file_id, caption=caption))
+            media_list.append(
+                InputMediaDocument(
+                    media=msg.document.file_id,
+                    caption=caption,
+                    caption_entities=caption_entities,
+                )
+            )
             media_msgs.append(msg)
 
     src = _get_source_id_from_msg(group_msgs[0]) if group_msgs else "unknown"
@@ -344,7 +486,11 @@ async def process_media_group(
         if main_text and len(main_text) > MEDIA_CAPTION_LIMIT:
             await _send_with_retry(
                 target_id,
-                lambda: context.bot.send_message(chat_id=target_id, text=main_text),
+                lambda: context.bot.send_message(
+                    chat_id=target_id,
+                    text=main_text,
+                    entities=main_entities,
+                ),
                 kind="MediaGroup 文字",
                 src=str(src),
             )
@@ -354,6 +500,7 @@ async def process_media_group(
                 target_id,
                 media_msgs[0],
                 caption=main_text if main_text and len(main_text) <= MEDIA_CAPTION_LIMIT else None,
+                caption_entities=main_entities if main_text and len(main_text) <= MEDIA_CAPTION_LIMIT else None,
                 src=str(src),
             )
             continue
@@ -505,34 +652,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # === 单条消息处理 ===
         src = _get_source_id_from_msg(msg)
         if msg.photo or msg.video or getattr(msg, "animation", None) or msg.document:
-            caption = _processed_text_or_original(msg.caption or "", rule) if msg.caption else None
+            if msg.caption:
+                caption, caption_entities = _process_text_with_entities(
+                    msg.caption,
+                    rule,
+                    msg.caption_entities,
+                )
+            else:
+                caption, caption_entities = None, None
             for target_id in targets:
                 if caption and len(caption) > MEDIA_CAPTION_LIMIT:
                     await _send_with_retry(
                         target_id,
-                        lambda: context.bot.send_message(chat_id=target_id, text=caption),
+                        lambda: context.bot.send_message(
+                            chat_id=target_id,
+                            text=caption,
+                            entities=caption_entities,
+                        ),
                         kind="媒体文字",
                         src=str(src),
                     )
                     media_caption = None
+                    media_caption_entities = None
                 else:
                     media_caption = caption
+                    media_caption_entities = caption_entities
                 await _send_single_media(
                     context,
                     target_id,
                     msg,
                     caption=media_caption,
+                    caption_entities=media_caption_entities,
                     src=str(src),
                 )
             continue
 
         if msg.text:
-            text = _processed_text_or_original(msg.text, rule)
+            text, entities = _process_text_with_entities(
+                msg.text,
+                rule,
+                msg.entities,
+            )
             if text:
                 for target_id in targets:
                     await _send_with_retry(
                         target_id,
-                        lambda: context.bot.send_message(chat_id=target_id, text=text),
+                        lambda: context.bot.send_message(
+                            chat_id=target_id,
+                            text=text,
+                            entities=entities,
+                        ),
                         kind="文字",
                         src=str(src),
                     )

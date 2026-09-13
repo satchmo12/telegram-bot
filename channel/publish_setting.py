@@ -4,6 +4,7 @@ from urllib.parse import urlparse
 import os
 import random
 import time
+import uuid
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
@@ -14,6 +15,7 @@ PUBLISH_CONFIG_FILE = "config_data/publish_config.json"
 ANON_CHAT_FILE = "data/anon_chat.json"
 USER_MESSAGE_FILE = "data/user_message_file.json"
 BOTTLE_HISTORY_FILE = "data/bottle_history.json"
+PENDING_SUBMISSIONS_FILE = "data/pending_submissions.json"
 
 CALLBACK_PREFIX = "publish"
 BUTTON_TEXT_MAX_LENGTH = 64
@@ -32,7 +34,8 @@ def load_publish_config():
         "ads": [],
         "buttons": [],
         # Keep existing bots' public buttons visible until an owner changes
-        # these new switches in 投稿配置.
+        # this setting in 投稿配置.
+        "bottom_buttons_enabled": True,
         "submission_enabled": False,
         "random_view_enabled": False,
     }
@@ -56,6 +59,177 @@ def load_publish_config():
 
 def save_publish_config(data):
     save_json(PUBLISH_CONFIG_FILE, data)
+
+
+def _load_pending_submissions() -> dict:
+    """Load review queue. JSON storage keeps pending reviews after a restart."""
+    data = load_json(PENDING_SUBMISSIONS_FILE)
+    return data if isinstance(data, dict) else {}
+
+
+def _save_pending_submissions(data: dict) -> None:
+    save_json(PENDING_SUBMISSIONS_FILE, data)
+
+
+def _owner_id(context: ContextTypes.DEFAULT_TYPE):
+    """Read the owner from this app instead of a process-global multi-bot value."""
+    try:
+        return int(context.application.bot_data.get("owner_id"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _review_keyboard(submission_id: str):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "✅ 通过并发布",
+                callback_data=f"publish:review_approve:{submission_id}",
+            ),
+            InlineKeyboardButton(
+                "❌ 拒绝",
+                callback_data=f"publish:review_reject:{submission_id}",
+            ),
+        ]
+    ])
+
+
+def _submission_author_text(msg) -> str:
+    user = getattr(msg, "from_user", None)
+    if not user:
+        return "未知用户"
+    name = " ".join(
+        part for part in [getattr(user, "first_name", ""), getattr(user, "last_name", "")]
+        if part
+    ).strip()
+    username = getattr(user, "username", None)
+    if username:
+        return f"{name or '用户'} (@{username}, ID: {user.id})"
+    return f"{name or '用户'} (ID: {user.id})"
+
+
+def _append_published_submission(msg, published_message_id: int) -> None:
+    """Store a published submission for the existing random-view feature."""
+    user = getattr(msg, "from_user", None)
+    data = _load_cannel_message()
+    data.append({
+        "user_id": getattr(user, "id", None),
+        "user_chat_id": msg.chat_id,
+        "username": getattr(user, "username", None),
+        "user_message_id": msg.message_id,
+        "channel_message_id": published_message_id,
+        "publish_time": int(time.time()),
+    })
+    save_json(USER_MESSAGE_FILE, data)
+
+
+async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, config: dict):
+    """Approve or reject a submission from the owner review message."""
+    parts = query.data.split(":", 2)
+    if len(parts) != 3 or not parts[2]:
+        return await query.answer("审核数据无效。", show_alert=True)
+
+    owner_id = _owner_id(context)
+    if owner_id is None or query.from_user.id != owner_id:
+        return await query.answer("只有机器人所有者可以审核投稿。", show_alert=True)
+
+    action, submission_id = parts[1], parts[2]
+    pending = _load_pending_submissions()
+    submission = pending.get(submission_id)
+    if not isinstance(submission, dict):
+        return await query.answer("该投稿不存在或已清理。", show_alert=True)
+
+    status = submission.get("status", "pending")
+    if status != "pending":
+        status_text = {
+            "approved": "已通过",
+            "rejected": "已拒绝",
+            "publishing": "正在发布中",
+        }.get(status, "已处理")
+        return await query.answer(f"该投稿{status_text}，请勿重复处理。", show_alert=True)
+
+    if action == "review_approve":
+        channel_id = config.get("channel_id")
+        if not channel_id:
+            return await query.answer("未配置发布频道，无法发布。", show_alert=True)
+
+        # Persist a transient state first to prevent two owner clicks from publishing twice.
+        submission["status"] = "publishing"
+        pending[submission_id] = submission
+        _save_pending_submissions(pending)
+
+        try:
+            published = await context.bot.copy_message(
+                chat_id=channel_id,
+                from_chat_id=submission["user_chat_id"],
+                message_id=submission["user_message_id"],
+                reply_markup=publish_buttons_keyboard(config),
+            )
+        except Exception as exc:
+            submission["status"] = "pending"
+            pending[submission_id] = submission
+            _save_pending_submissions(pending)
+            print("审核投稿发布失败:", exc)
+            return await query.answer(
+                "发布失败，请检查频道配置和机器人权限后重试。",
+                show_alert=True,
+            )
+
+        submission["status"] = "approved"
+        submission["reviewed_at"] = int(time.time())
+        submission["channel_message_id"] = published.message_id
+        pending[submission_id] = submission
+        _save_pending_submissions(pending)
+
+        # Keep this compatible with the existing random-view function.
+        data = _load_cannel_message()
+        data.append({
+            "user_id": submission.get("user_id"),
+            "user_chat_id": submission["user_chat_id"],
+            "username": submission.get("username"),
+            "user_message_id": submission["user_message_id"],
+            "channel_message_id": published.message_id,
+            "publish_time": int(time.time()),
+        })
+        save_json(USER_MESSAGE_FILE, data)
+
+        try:
+            await context.bot.send_message(
+                chat_id=submission["user_chat_id"],
+                text="✅ 您的投稿已审核通过，并已发布到频道。",
+            )
+        except Exception as exc:
+            print("投稿通过通知失败:", exc)
+
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception as exc:
+            print("更新审核消息失败:", exc)
+        await query.answer("投稿已通过并发布。")
+        return await query.message.reply_text("✅ 已通过投稿并发布到频道。")
+
+    if action == "review_reject":
+        submission["status"] = "rejected"
+        submission["reviewed_at"] = int(time.time())
+        pending[submission_id] = submission
+        _save_pending_submissions(pending)
+
+        try:
+            await context.bot.send_message(
+                chat_id=submission["user_chat_id"],
+                text="❌ 很抱歉，您的投稿未通过审核。",
+            )
+        except Exception as exc:
+            print("投稿拒绝通知失败:", exc)
+
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception as exc:
+            print("更新审核消息失败:", exc)
+        await query.answer("投稿已拒绝。")
+        return await query.message.reply_text("❌ 已拒绝投稿，已通知投稿人。")
+
+    return await query.answer("未知审核操作。", show_alert=True)
 
 
 def _publish_buttons(config: dict) -> list[dict]:
@@ -86,6 +260,9 @@ def _button_settings_text(config: dict) -> str:
 
 def publish_buttons_keyboard(config: dict):
     """Build the URL keyboard appended to a published submission."""
+    if not bool(config.get("bottom_buttons_enabled", True)):
+        return None
+
     rows = []
     for button in _publish_buttons(config):
         button_text = str(button.get("text", "")).strip()
@@ -147,12 +324,19 @@ def _clear_button_input(context: ContextTypes.DEFAULT_TYPE):
 def publish_setting_keyboard(config: dict):
     submission_enabled = bool(config.get("submission_enabled", True))
     random_view_enabled = bool(config.get("random_view_enabled", True))
+    bottom_buttons_enabled = bool(config.get("bottom_buttons_enabled", True))
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📢 发布频道", callback_data="publish:channel")],
         [InlineKeyboardButton("📝 审核设置", callback_data="publish:review")],
-        [InlineKeyboardButton("📊 每日发布上限", callback_data="publish:limit")],
-        [InlineKeyboardButton("📣 广告管理", callback_data="publish:ads")],
-        [InlineKeyboardButton("🔘 按钮设置", callback_data="publish:buttons")],
+        # [InlineKeyboardButton("📊 每日发布上限", callback_data="publish:limit")],
+        # [InlineKeyboardButton("📣 广告管理", callback_data="publish:ads")],
+        [InlineKeyboardButton("🔘 底部按钮设置", callback_data="publish:buttons")],
+        [
+            InlineKeyboardButton(
+                f"{'✅' if bottom_buttons_enabled else '🚫'} 显示底部按钮",
+                callback_data="publish:toggle_bottom_buttons",
+            )
+        ],
         [
             InlineKeyboardButton(
                 f"{'✅' if submission_enabled else '🚫'} 投稿开关",
@@ -226,12 +410,14 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not query.data.startswith("publish:"):
         return
 
-    await query.answer()
-
     config = load_publish_config()
     channel_id = config.get("channel_id")
-    
     action = query.data.split(":")[1]
+
+    if action in {"review_approve", "review_reject"}:
+        return await _handle_review_callback(query, context, config)
+
+    await query.answer()
     
     if action == "publishset":
         help_text = "📣 请设置发布的频道"       
@@ -256,12 +442,22 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=publish_setting_keyboard(config),
         )
 
+    if action == "toggle_bottom_buttons":
+        config["bottom_buttons_enabled"] = not bool(
+            config.get("bottom_buttons_enabled", True)
+        )
+        save_publish_config(config)
+        return await query.edit_message_text(
+            f"发布底部按钮已{'显示' if config['bottom_buttons_enabled'] else '隐藏'}。",
+            reply_markup=publish_setting_keyboard(config),
+        )
+
     if action == "channel":
         
         text = (
             f"📢 当前频道：\n{channel_id}"
             if channel_id
-            else "📢 当前未设置发布频道"
+            else "📢 当前未设置发布频道。请将频道任意一条消息转发给机器人，获取频道 ID 后输入即可设置。"
         )
 
         return await query.edit_message_text(
@@ -838,18 +1034,65 @@ def create_post_keyboard(enabled: bool):
     return InlineKeyboardMarkup(rows)
 
 
-async def handle_wall_publish(update, context):
+async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("waiting_post"):
         return
-    
+
     msg = update.message
+    if not msg or not msg.from_user:
+        return
+
     config = load_publish_config()
     channel_id = config.get("channel_id")
-    
     if not channel_id:
-        await msg.reply_text("✅ 暂未配置大海地址，感谢参与！")
+        await msg.reply_text("✅ 暂未配置发布频道，感谢参与！")
         return
-    
+
+    owner_id = _owner_id(context)
+    # 机器人所有者自己投稿时直接发布，无需再转发给自己审核。
+    if bool(config.get("review_enabled", False)) and msg.from_user.id != owner_id:
+        if owner_id is None:
+            await msg.reply_text("❌ 未配置机器人所有者，暂时无法提交审核。")
+            return
+
+        submission_id = uuid.uuid4().hex[:16]
+        pending = _load_pending_submissions()
+        pending[submission_id] = {
+            "status": "pending",
+            "user_id": msg.from_user.id,
+            "user_chat_id": msg.chat_id,
+            "username": msg.from_user.username,
+            "user_message_id": msg.message_id,
+            "submitted_at": int(time.time()),
+        }
+        _save_pending_submissions(pending)
+
+        try:
+            # Use forward_message as requested so the owner receives the original submission.
+            await context.bot.forward_message(
+                chat_id=owner_id,
+                from_chat_id=msg.chat_id,
+                message_id=msg.message_id,
+            )
+            await context.bot.send_message(
+                chat_id=owner_id,
+                text=(
+                    "📝 收到新的投稿，请审核。\n"
+                    f"投稿人：{_submission_author_text(msg)}\n"
+                    f"投稿编号：{submission_id}"
+                ),
+                reply_markup=_review_keyboard(submission_id),
+            )
+        except Exception as exc:
+            pending.pop(submission_id, None)
+            _save_pending_submissions(pending)
+            print("转发投稿审核失败:", exc)
+            await msg.reply_text(f"❌ 提交审核失败：{exc}")
+            return
+
+        await msg.reply_text("🕒 投稿已提交，等待管理员审核。")
+        return
+
     try:
         published = await context.bot.copy_message(
             chat_id=channel_id,
@@ -857,28 +1100,11 @@ async def handle_wall_publish(update, context):
             message_id=msg.message_id,
             reply_markup=publish_buttons_keyboard(config),
         )
-        
-        data =  _load_cannel_message()
-        
-        data.append({
-            "user_id": msg.from_user.id,
-            "user_chat_id": msg.chat_id,
-            "username": msg.from_user.username,
-            "user_message_id": msg.message_id,       # 用户原消息ID
-            "channel_message_id": published.message_id,  # 频道消息ID
-            "publish_time": int(time.time())
-        })
-        
-        save_json(USER_MESSAGE_FILE, data)
+        _append_published_submission(msg, published.message_id)
         await msg.reply_text("✅ 发送成功")
-        
-    except Exception as e:
-        print("投稿失败:", e)
-        await msg.reply_text(f"❌ 发送失败：{e}")
-    
-    # context.user_data["waiting_post"] = False
-        
-    # await publish_message(update, context)
+    except Exception as exc:
+        print("投稿失败:", exc)
+        await msg.reply_text(f"❌ 发送失败：{exc}")
    
 # =========================
 # 文本输入处理

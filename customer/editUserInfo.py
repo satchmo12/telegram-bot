@@ -20,6 +20,49 @@ from tool.utils.update_helper import get_message
 
 WAITING_AVATAR = "waiting_avatar"
 WAITING_STORY = "waiting_story"
+BUSINESS_EDIT_STATE_KEY = "business_edit_user_info_state"
+
+
+def _business_edit_state(
+    context: ContextTypes.DEFAULT_TYPE,
+    msg,
+    business_connection_id: str = None,
+    *,
+    create: bool = False,
+):
+    """Get pending edit state by chat, not by effective user.
+
+    Business media updates may not include an ``effective_user``. In that case
+    python-telegram-bot exposes ``context.user_data`` as ``None``, so state for
+    this workflow is stored in the current application's bot_data instead.
+    """
+    state_store = context.application.bot_data.setdefault(BUSINESS_EDIT_STATE_KEY, {})
+    if not isinstance(state_store, dict):
+        state_store = {}
+        context.application.bot_data[BUSINESS_EDIT_STATE_KEY] = state_store
+
+    chat_id = getattr(getattr(msg, "chat", None), "id", None)
+    state_key = str(
+        chat_id if chat_id is not None else business_connection_id or "unknown"
+    )
+    if create:
+        return state_store.setdefault(state_key, {})
+    return state_store.get(state_key)
+
+
+def _clear_business_edit_state(
+    context: ContextTypes.DEFAULT_TYPE,
+    msg,
+    business_connection_id: str = None,
+):
+    state_store = context.application.bot_data.get(BUSINESS_EDIT_STATE_KEY, {})
+    if not isinstance(state_store, dict):
+        return
+    chat_id = getattr(getattr(msg, "chat", None), "id", None)
+    state_key = str(
+        chat_id if chat_id is not None else business_connection_id or "unknown"
+    )
+    state_store.pop(state_key, None)
 
 
 @register_command("发布状态", "修改头像")
@@ -45,7 +88,14 @@ async def handle_business_state(
     # 修改头像
     if text.startswith("修改头像"):
 
-        context.user_data["action"] = WAITING_AVATAR
+        state = _business_edit_state(
+            context,
+            msg,
+            business_connection_id,
+            create=True,
+        )
+        state.clear()
+        state["action"] = WAITING_AVATAR
 
         await msg.reply_text(
             "📷 请发送一张图片作为新的 Business 头像。"
@@ -59,8 +109,15 @@ async def handle_business_state(
 
         caption = text.replace("发布状态", "", 1).strip()
 
-        context.user_data["action"] = WAITING_STORY
-        context.user_data["caption"] = caption
+        state = _business_edit_state(
+            context,
+            msg,
+            business_connection_id,
+            create=True,
+        )
+        state.clear()
+        state["action"] = WAITING_STORY
+        state["caption"] = caption
 
         await msg.reply_text(
             "📷 请发送一张图片或一个视频。"
@@ -145,21 +202,21 @@ async def handle_media(
 ):
 
     msg = update.effective_message
+    if not msg:
+        return
 
-    action = context.user_data.get("action")
+    business_connection_id = get_business_connection_id(msg.chat.id)
+    state = _business_edit_state(context, msg, business_connection_id)
+    action = state.get("action") if isinstance(state, dict) else None
 
     if not action:
         return
-
-    business_connection_id = get_business_connection_id(
-        msg.chat.id
-    )
 
     if not business_connection_id:
         await msg.reply_text(
             "❌ 当前不是 Business 会话"
         )
-        context.user_data.clear()
+        _clear_business_edit_state(context, msg, business_connection_id)
         return
 
 
@@ -218,10 +275,7 @@ async def handle_media(
 
 
             # 优先使用上传图片/视频自带的文字
-            caption = msg.caption or context.user_data.get(
-                "caption",
-                ""
-            )
+            caption = msg.caption or state.get("caption", "")
 
             # 图片
             if msg.photo:
@@ -295,12 +349,12 @@ async def handle_media(
             )
 
 
-        context.user_data.clear()
+        _clear_business_edit_state(context, msg, business_connection_id)
 
 
     except Exception as e:
 
-        context.user_data.clear()
+        _clear_business_edit_state(context, msg, business_connection_id)
 
         await msg.reply_text(
             f"❌ 操作失败：{e}"

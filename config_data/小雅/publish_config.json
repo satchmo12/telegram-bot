@@ -11,6 +11,7 @@
             "url": "http://skyk.cc"
         }
     ],
-    "submission_enabled": false,
-    "random_view_enabled": false
+    "submission_enabled": true,
+    "random_view_enabled": false,
+    "bottom_buttons_enabled": false
 }

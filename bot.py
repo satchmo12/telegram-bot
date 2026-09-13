@@ -598,7 +598,7 @@ def _build_start_panel_rows(
             [
                 InlineKeyboardButton("📣克隆频道", callback_data="chcfg:back"),
                 InlineKeyboardButton("📱管理协议号(可群发)", callback_data="tlogin:list"),
-                # InlineKeyboardButton("📣机器人频道配置", callback_data="chcfg:bot")
+                InlineKeyboardButton("📣机器人频道配置", callback_data="chcfg:bot")
             ]
         )
         
@@ -827,8 +827,8 @@ async def set_bot_commands(app):
     if "group" in enabled:
         commands.append(BotCommand("group", "群设置"))
 
-    # if "channel" in enabled:
-    #     commands.append(BotCommand("channel_config", "频道设置"))
+    if "channel" in enabled:
+        commands.append(BotCommand("channel_config", "频道设置"))
     # if "game_hub" in enabled:
     #     commands.append(BotCommand("start_menu", "游戏菜单"))
     await app.bot.set_my_commands(commands)
