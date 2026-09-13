@@ -13,5 +13,14 @@
     ],
     "submission_enabled": true,
     "random_view_enabled": false,
-    "bottom_buttons_enabled": false
+    "bottom_buttons_enabled": false,
+    "proof_required": true,
+    "reject_reason_required": true,
+    "comment_forward_enabled": true,
+    "forward_channel_id": -1004428338952,
+    "keyword_extract_labels": [
+        "艺名",
+        "联系"
+    ],
+    "continuous_submission_enabled": false
 }

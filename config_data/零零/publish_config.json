@@ -7,5 +7,9 @@
     "buttons": [],
     "bottom_buttons_enabled": true,
     "submission_enabled": false,
-    "random_view_enabled": false
+    "random_view_enabled": false,
+    "proof_required": false,
+    "reject_reason_required": false,
+    "comment_forward_enabled": false,
+    "forward_channel_id": null
 }

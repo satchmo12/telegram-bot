@@ -44,7 +44,7 @@ from modules import register_all_handlers  # 注册各功能模块
 from dispatcher import message_router  # 最终文本处理路由器
 from channel.telethon_forwarder import start_telethon_forwarder_job
 from channel.telethon_login import _clear_login_state
-from channel.publish_setting import load_publish_config
+from channel.publish_setting import handle_comment_start_parameter, load_publish_config
 from command_router import get_matched_command
 
 from chat.my_bot import cleaned_word
@@ -300,8 +300,12 @@ async def block_disabled_group_messages(
 
 async def owner_reply_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bind_runtime_bot_context(context)
-    # 投稿内容不能被私聊双向转发当作“回复用户”的消息处理。
-    if (context.user_data or {}).get(WAITING_POST):
+    # 投稿内容、审核拒绝原因都不能被私聊双向转发当作回复用户的消息处理。
+    if (
+        (context.user_data or {}).get(WAITING_POST)
+        or (context.user_data or {}).get("publish_reject_reason")
+        or (context.user_data or {}).get("publish_keyword_label_input")
+    ):
         return
 
     owner_id = int(context.application.bot_data.get("owner_id", DEFAULT_OWNER_ID))
@@ -321,9 +325,14 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
     
     
     user_data = context.user_data or {}
-    # 投稿由投稿模块处理；不要再走私聊双向转发给主人，否则会重复发送。
-    if user_data.get(WAITING_POST):
-        print("[private_forward_router] 忽略：当前正在投稿")
+    # 投稿及审核拒绝原因由投稿模块处理；不要再走私聊双向转发。
+    if (
+        user_data.get(WAITING_POST)
+        or user_data.get("publish_reject_reason")
+        or user_data.get("publish_keyword_search")
+        or user_data.get("publish_keyword_label_input")
+    ):
+        print("[private_forward_router] 忽略：当前正在投稿、关键词搜索或填写拒绝原因")
         return
 
     if (
@@ -409,6 +418,10 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """兜底 /start：保证未启用 verification 的机器人也能响应。"""
     if not update.message:
         return
+
+    if context.args:
+        if await handle_comment_start_parameter(update, context, context.args[0]):
+            return
 
     bot_name = context.application.bot_data.get("name", "机器人")
     features = sorted(context.application.bot_data.get("enabled_features", []))

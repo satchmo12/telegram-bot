@@ -623,8 +623,12 @@ async def reply_from_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def owner_auto_forward_in_dialog(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    # 投稿中的消息只能由投稿模块处理，不能自动双向发送给当前私聊用户。
-    if (context.user_data or {}).get("waiting_post"):
+    # 投稿内容和审核拒绝原因只能由投稿模块处理，不能自动双向发送。
+    if (
+        (context.user_data or {}).get("waiting_post")
+        or (context.user_data or {}).get("publish_reject_reason")
+        or (context.user_data or {}).get("publish_keyword_label_input")
+    ):
         return
 
     if not update.effective_user or update.effective_user.id != get_owner_id(context):

@@ -3,10 +3,12 @@ from datetime import datetime
 from urllib.parse import urlparse
 import os
 import random
+import re
 import time
 import uuid
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.error import BadRequest, Forbidden
 
 from channel.channel_config import USER_MESSAGE_FILE
 from utils import BOT_USER_FILE, load_json, save_json
@@ -20,6 +22,14 @@ PENDING_SUBMISSIONS_FILE = "data/pending_submissions.json"
 CALLBACK_PREFIX = "publish"
 BUTTON_TEXT_MAX_LENGTH = 64
 MAX_PUBLISH_BUTTONS = 20
+PENDING_PROOF_KEY = "publish_pending_proof_id"
+REJECT_REASON_KEY = "publish_reject_reason"
+COMMENT_TARGET_KEY = "publish_comment_target"
+COMMENT_MAP_FILE = "data/publish_comment_map.json"
+KEYWORD_MAP_FILE = "data/publish_keyword_map.json"
+KEYWORD_INPUT_KEY = "publish_keyword_search"
+KEYWORD_RESULTS_KEY = "publish_keyword_results"
+KEYWORD_LABEL_INPUT_KEY = "publish_keyword_label_input"
 
 # =========================
 # 配置读写
@@ -36,6 +46,18 @@ def load_publish_config():
         # Keep existing bots' public buttons visible until an owner changes
         # this setting in 投稿配置.
         "bottom_buttons_enabled": True,
+        # Require an extra proof message before a non-owner submission is sent
+        # to the reviewer. It only serves as review evidence and is never posted.
+        "proof_required": False,
+        # When enabled, reviewer must type a rejection reason for the submitter.
+        "reject_reason_required": False,
+        # Comments are submitted through review and mirrored to forward_channel_id.
+        "comment_forward_enabled": False,
+        "forward_channel_id": None,
+        # Labels such as 艺名 / 联系方式 used to extract routing keywords.
+        "keyword_extract_labels": [],
+        # Preserve the existing behavior: one 投稿 action can send multiple posts.
+        "continuous_submission_enabled": True,
         "submission_enabled": False,
         "random_view_enabled": False,
     }
@@ -59,6 +81,197 @@ def load_publish_config():
 
 def save_publish_config(data):
     save_json(PUBLISH_CONFIG_FILE, data)
+
+
+def _comment_map_key(channel_id, message_id) -> str:
+    return f"{channel_id}:{message_id}"
+
+
+def _load_comment_map() -> dict:
+    data = load_json(COMMENT_MAP_FILE)
+    return data if isinstance(data, dict) else {}
+
+
+def _save_comment_map(data: dict) -> None:
+    # Keep the mapping bounded; old channel posts no longer need new comments.
+    if len(data) > 3000:
+        oldest = sorted(
+            data.items(),
+            key=lambda item: int((item[1] or {}).get("created_at", 0) or 0),
+        )[: len(data) - 3000]
+        for key, _ in oldest:
+            data.pop(key, None)
+    save_json(COMMENT_MAP_FILE, data)
+
+
+def _as_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _publish_failure_detail(exc: Exception) -> str:
+    """Return an actionable review error without hiding the real failure."""
+    if isinstance(exc, Forbidden):
+        return "机器人在目标频道或讨论组没有发言/发布权限。"
+    if isinstance(exc, BadRequest):
+        raw = str(exc)
+        lower = raw.lower()
+        if "chat not found" in lower:
+            return "频道或讨论组 ID 不正确，或机器人尚未加入目标频道。"
+        if "message to reply not found" in lower:
+            return "未找到主频道帖子的讨论组映射。请使用新发布的主频道帖子评论。"
+        if "not enough rights" in lower or "forbidden" in lower:
+            return "机器人缺少目标频道或讨论组的发言权限。"
+        if "message can't be edited" in lower or "message is not modified" in lower:
+            return "无法移除主频道帖子的底部按钮以启用原生评论。请确认该帖子由机器人发布。"
+        return f"Telegram 返回：{raw[:240]}"
+    return str(exc)[:300] or "未知错误"
+
+
+def _comment_target_from_submission(submission: dict):
+    target = submission.get("comment_target")
+    return target if isinstance(target, dict) else {}
+
+
+def _keyword_labels(config: dict) -> list[str]:
+    labels = config.get("keyword_extract_labels", [])
+    if not isinstance(labels, list):
+        return []
+    result = []
+    for label in labels:
+        value = str(label or "").strip()
+        if value and value not in result:
+            result.append(value[:30])
+    return result
+
+
+def _normalize_routing_keyword(value: str) -> str:
+    value = str(value or "").strip()
+    # Tags are commonly used for stage names, but searches should use the name.
+    if value.startswith("#"):
+        value = value[1:].strip()
+    return value.lower()
+
+
+def _extract_routing_keywords(msg, config: dict) -> list[dict]:
+    text = str(getattr(msg, "text", None) or getattr(msg, "caption", None) or "")
+    if not text:
+        return []
+    result = []
+    for label in _keyword_labels(config):
+        pattern = re.compile(
+            rf"[【\[]\s*{re.escape(label)}\s*[】\]]\s*[：:]?\s*([^\n\r]+)",
+            re.IGNORECASE,
+        )
+        for match in pattern.finditer(text):
+            raw = match.group(1).strip()
+            key = _normalize_routing_keyword(raw)
+            if key and not any(item["key"] == key and item["label"] == label for item in result):
+                result.append({"label": label, "key": key, "raw": raw})
+    return result
+
+
+def _load_keyword_map() -> dict:
+    data = load_json(KEYWORD_MAP_FILE)
+    return data if isinstance(data, dict) else {}
+
+
+def _save_keyword_map(data: dict) -> None:
+    # Keep enough history for routing while avoiding unlimited growth.
+    for key, records in list(data.items()):
+        if not isinstance(records, list):
+            data.pop(key, None)
+            continue
+        data[key] = records[-30:]
+    if len(data) > 3000:
+        for key in list(data)[: len(data) - 3000]:
+            data.pop(key, None)
+    save_json(KEYWORD_MAP_FILE, data)
+
+
+def _register_post_keywords(entries: list[dict], channel_id, message_id) -> None:
+    if not entries:
+        return
+    data = _load_keyword_map()
+    now = int(time.time())
+    for entry in entries:
+        key = entry.get("key")
+        if not key:
+            continue
+        records = data.setdefault(key, [])
+        records[:] = [
+            item for item in records
+            if not (
+                str(item.get("channel_id")) == str(channel_id)
+                and int(item.get("channel_message_id", 0) or 0) == int(message_id)
+                and item.get("label") == entry.get("label")
+            )
+        ]
+        records.append({
+            "label": entry.get("label", ""),
+            "raw": entry.get("raw", key),
+            "channel_id": channel_id,
+            "channel_message_id": message_id,
+            "created_at": now,
+        })
+    _save_keyword_map(data)
+
+
+def _update_keyword_comment_mapping(channel_id, message_id, discussion_chat_id, discussion_message_id) -> None:
+    data = _load_keyword_map()
+    changed = False
+    for records in data.values():
+        if not isinstance(records, list):
+            continue
+        for record in records:
+            if (
+                str(record.get("channel_id")) == str(channel_id)
+                and int(record.get("channel_message_id", 0) or 0) == int(message_id)
+            ):
+                record["discussion_chat_id"] = discussion_chat_id
+                record["discussion_message_id"] = discussion_message_id
+                changed = True
+    if changed:
+        _save_keyword_map(data)
+
+
+def _find_keyword_routes(query: str) -> list[dict]:
+    key = _normalize_routing_keyword(query)
+    if not key:
+        return []
+    data = _load_keyword_map()
+    matches = []
+    for stored_key, records in data.items():
+        if key not in stored_key and stored_key not in key:
+            continue
+        for record in records or []:
+            if isinstance(record, dict) and record.get("discussion_message_id"):
+                matches.append({**record, "key": stored_key})
+    matches.sort(key=lambda item: int(item.get("created_at", 0) or 0), reverse=True)
+    return matches[:10]
+
+
+def _keyword_settings_text(config: dict) -> str:
+    labels = _keyword_labels(config)
+    sample = "【艺名】：#丹丹\n【联系方式】：@dandan"
+    return (
+        "🔑 评论关键词设置\n\n"
+        f"当前提取标签：{'、'.join(labels) if labels else '未设置'}\n\n"
+        "管理员发布到主频道时，机器人会从内容中提取这些标签对应的值，"
+        "并映射到主频道消息 ID 与讨论组评论 ID。\n\n"
+        f"示例：\n{sample}\n"
+        "设置“艺名”可提取丹丹；设置“联系方式”可提取 @dandan。"
+    )
+
+
+def _keyword_settings_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ 设置提取标签", callback_data="publish:keywords_set")],
+        [InlineKeyboardButton("🗑 清空标签", callback_data="publish:keywords_clear")],
+        [InlineKeyboardButton("⬅️ 返回", callback_data="publish:back")],
+    ])
 
 
 def _load_pending_submissions() -> dict:
@@ -108,7 +321,11 @@ def _submission_author_text(msg) -> str:
     return f"{name or '用户'} (ID: {user.id})"
 
 
-def _append_published_submission(msg, published_message_id: int) -> None:
+def _append_published_submission(
+    msg,
+    published_message_id: int,
+    published_channel_id=None,
+) -> None:
     """Store a published submission for the existing random-view feature."""
     user = getattr(msg, "from_user", None)
     data = _load_cannel_message()
@@ -118,13 +335,297 @@ def _append_published_submission(msg, published_message_id: int) -> None:
         "username": getattr(user, "username", None),
         "user_message_id": msg.message_id,
         "channel_message_id": published_message_id,
+        "channel_id": published_channel_id,
         "publish_time": int(time.time()),
     })
     save_json(USER_MESSAGE_FILE, data)
 
 
+def _review_prompt_text(submission: dict) -> str:
+    proof_status = "已上传" if submission.get("proof_message_id") else "未要求"
+    return (
+        "📝 收到新的投稿，请审核。\n"
+        f"投稿人：{submission.get('author', '未知用户')}\n"
+        f"审核凭证：{proof_status}\n"
+        f"投稿编号：{submission.get('id', '未知')}"
+    )
+
+
+def _reject_reason_cancel_keyboard(submission_id: str):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "⬅️ 取消拒绝",
+                callback_data=f"publish:review_reject_cancel:{submission_id}",
+            )
+        ]
+    ])
+
+
+async def _send_submission_for_review(
+    context: ContextTypes.DEFAULT_TYPE,
+    submission_id: str,
+    submission: dict,
+):
+    """Forward the submission and optional proof to owner, then send controls."""
+    owner_id = _owner_id(context)
+    if owner_id is None:
+        raise RuntimeError("未配置机器人所有者")
+
+    await context.bot.forward_message(
+        chat_id=owner_id,
+        from_chat_id=submission["user_chat_id"],
+        message_id=submission["user_message_id"],
+    )
+    if submission.get("proof_message_id"):
+        await context.bot.forward_message(
+            chat_id=owner_id,
+            from_chat_id=submission["proof_chat_id"],
+            message_id=submission["proof_message_id"],
+        )
+
+    await context.bot.send_message(
+        chat_id=owner_id,
+        text=_review_prompt_text({**submission, "id": submission_id}),
+        reply_markup=_review_keyboard(submission_id),
+    )
+
+
+async def _finalize_rejection(
+    context: ContextTypes.DEFAULT_TYPE,
+    submission_id: str,
+    submission: dict,
+    reason: str = "",
+):
+    submission["status"] = "rejected"
+    submission["reviewed_at"] = int(time.time())
+    if reason:
+        submission["reject_reason"] = reason
+
+    pending = _load_pending_submissions()
+    pending[submission_id] = submission
+    _save_pending_submissions(pending)
+
+    notice = "❌ 很抱歉，您的投稿未通过审核。"
+    if reason:
+        notice += f"\n\n审核原因：{reason}"
+    try:
+        await context.bot.send_message(chat_id=submission["user_chat_id"], text=notice)
+    except Exception as exc:
+        print("投稿拒绝通知失败:", exc)
+
+
+async def _capture_comment_source_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    """Map a main-channel post to its linked discussion-group auto-forward."""
+    msg = update.message
+    if not msg or not getattr(msg, "is_automatic_forward", False):
+        return
+
+    sender_chat = getattr(msg, "sender_chat", None)
+    origin = getattr(msg, "forward_origin", None)
+    origin_chat = getattr(origin, "chat", None) if origin else None
+    source_channel_id = getattr(sender_chat, "id", None) or getattr(origin_chat, "id", None)
+    source_message_id = (
+        getattr(origin, "message_id", None)
+        or getattr(msg, "forward_from_message_id", None)
+    )
+    if source_channel_id is None or source_message_id is None:
+        return
+
+    config = load_publish_config()
+    if not bool(config.get("comment_forward_enabled", False)):
+        return
+    if str(source_channel_id) != str(config.get("channel_id")):
+        return
+
+    records = _load_comment_map()
+    records[_comment_map_key(source_channel_id, source_message_id)] = {
+        "discussion_chat_id": msg.chat_id,
+        "discussion_message_id": msg.message_id,
+        "created_at": int(time.time()),
+    }
+    _save_comment_map(records)
+    _update_keyword_comment_mapping(
+        source_channel_id,
+        source_message_id,
+        msg.chat_id,
+        msg.message_id,
+    )
+
+
+async def _start_comment_submission(query, context: ContextTypes.DEFAULT_TYPE, config: dict):
+    parts = query.data.split(":")
+    if len(parts) != 4:
+        return await query.answer("评论数据无效。", show_alert=True)
+    if not bool(config.get("comment_forward_enabled", False)):
+        return await query.answer("评论并转发功能未开启。", show_alert=True)
+
+    channel_id = _as_int(parts[2])
+    message_id = _as_int(parts[3])
+    if channel_id is None or message_id is None:
+        return await query.answer("评论数据无效。", show_alert=True)
+    if str(channel_id) != str(config.get("channel_id")):
+        return await query.answer("该帖子不是当前主频道的帖子。", show_alert=True)
+
+    user = query.from_user
+    context.user_data[COMMENT_TARGET_KEY] = {
+        "channel_id": channel_id,
+        "message_id": message_id,
+    }
+    context.user_data["waiting_post"] = True
+    try:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=(
+                "💬 请发送要评论的内容。\n"
+                "内容会按投稿流程审核；通过后会评论到该帖子下，并发布到转发频道。"
+            ),
+        )
+    except Exception:
+        context.user_data.pop(COMMENT_TARGET_KEY, None)
+        context.user_data["waiting_post"] = False
+        return await query.answer(
+            "请先私聊机器人并发送 /start，再点击评论。",
+            show_alert=True,
+        )
+    return await query.answer("请到与机器人的私聊发送评论内容。", show_alert=True)
+
+
+async def _comment_deep_link(
+    context: ContextTypes.DEFAULT_TYPE,
+    channel_id,
+    message_id,
+):
+    """Create a Telegram start link so the comment button opens the bot directly."""
+    username = str(getattr(context.bot, "username", "") or "").strip().lstrip("@")
+    if not username:
+        try:
+            me = await context.bot.get_me()
+            username = str(getattr(me, "username", "") or "").strip().lstrip("@")
+        except Exception as exc:
+            print("获取机器人用户名失败，评论按钮将使用回调模式:", exc)
+            return None
+    if not username:
+        return None
+    parameter = f"comment_{channel_id}_{message_id}"
+    return f"https://t.me/{username}?start={parameter}"
+
+
+async def handle_comment_start_parameter(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    parameter: str,
+) -> bool:
+    """Start a comment submission from a Telegram deep link parameter."""
+    if not isinstance(parameter, str) or not parameter.startswith("comment_"):
+        return False
+    parts = parameter.split("_", 2)
+    if len(parts) != 3:
+        return False
+    channel_id = _as_int(parts[1])
+    message_id = _as_int(parts[2])
+    config = load_publish_config()
+    if (
+        channel_id is None
+        or message_id is None
+        or not bool(config.get("comment_forward_enabled", False))
+        or str(channel_id) != str(config.get("channel_id"))
+    ):
+        if update.message:
+            await update.message.reply_text("❗ 该评论入口已失效或评论并转发功能未开启。")
+        return True
+
+    context.user_data[COMMENT_TARGET_KEY] = {
+        "channel_id": channel_id,
+        "message_id": message_id,
+    }
+    context.user_data["waiting_post"] = True
+    if update.message:
+        await update.message.reply_text(
+            "💬 请发送要评论的内容。\n"
+            "内容会按投稿流程审核；通过后会评论到该帖子下，并发布到转发频道。"
+        )
+    return True
+
+
+async def _copy_submission_to_channel(
+    context: ContextTypes.DEFAULT_TYPE,
+    submission: dict,
+    target_channel_id,
+    config: dict,
+    *,
+    add_comment_button: bool = False,
+):
+    """Copy original user content to a channel and optionally append comment action."""
+    # The main post cannot have inline markup: Telegram otherwise hides its
+    # native comment thread.
+    published = await context.bot.copy_message(
+        chat_id=target_channel_id,
+        from_chat_id=submission["user_chat_id"],
+        message_id=submission["user_message_id"],
+        reply_markup=None if add_comment_button else publish_buttons_keyboard(config),
+    )
+    if submission.get("keyword_entries"):
+        _register_post_keywords(
+            submission["keyword_entries"],
+            target_channel_id,
+            published.message_id,
+        )
+    if add_comment_button:
+        # 暂时停用“参与讨论请点击下方按钮”辅助消息及其评论按钮。
+        # 主频道正文保持无 InlineKeyboard，避免影响 Telegram 原生评论显示。
+        pass
+    return published
+
+
+async def _publish_comment_and_forward(
+    context: ContextTypes.DEFAULT_TYPE,
+    submission: dict,
+    config: dict,
+):
+    """Post approved content as a linked-discussion comment and mirror it onward."""
+    target = _comment_target_from_submission(submission)
+    main_channel_id = _as_int(target.get("channel_id"))
+    main_message_id = _as_int(target.get("message_id"))
+    forward_channel_id = _as_int(config.get("forward_channel_id"))
+    if main_channel_id is None or main_message_id is None:
+        raise RuntimeError("评论目标无效")
+    if forward_channel_id is None:
+        raise RuntimeError("未设置转发频道")
+
+    mapping = _load_comment_map().get(_comment_map_key(main_channel_id, main_message_id))
+    if not isinstance(mapping, dict):
+        raise RuntimeError(
+            "未找到主频道帖子的讨论组映射。请确认主频道已绑定讨论组，机器人是讨论组管理员。"
+        )
+
+    discussion_chat_id = mapping.get("discussion_chat_id")
+    discussion_message_id = mapping.get("discussion_message_id")
+    if discussion_chat_id is None or discussion_message_id is None:
+        raise RuntimeError("评论讨论组映射无效")
+
+    # Main posts created in comment mode have no inline markup, so this reply
+    # is shown as a native comment below the original channel post.
+
+    await context.bot.copy_message(
+        chat_id=discussion_chat_id,
+        from_chat_id=submission["user_chat_id"],
+        message_id=submission["user_message_id"],
+        reply_to_message_id=discussion_message_id,
+    )
+    return await _copy_submission_to_channel(
+        context,
+        submission,
+        forward_channel_id,
+        config,
+    )
+
+
 async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, config: dict):
-    """Approve or reject a submission from the owner review message."""
+    """Approve, reject, or collect a rejection reason for a submission."""
     parts = query.data.split(":", 2)
     if len(parts) != 3 or not parts[2]:
         return await query.answer("审核数据无效。", show_alert=True)
@@ -142,11 +643,22 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
     status = submission.get("status", "pending")
     if status != "pending":
         status_text = {
+            "awaiting_proof": "仍在等待凭证",
             "approved": "已通过",
             "rejected": "已拒绝",
             "publishing": "正在发布中",
         }.get(status, "已处理")
         return await query.answer(f"该投稿{status_text}，请勿重复处理。", show_alert=True)
+
+    if action == "review_reject_cancel":
+        reject_stage = (context.user_data or {}).get(REJECT_REASON_KEY)
+        if isinstance(reject_stage, dict) and reject_stage.get("submission_id") == submission_id:
+            context.user_data.pop(REJECT_REASON_KEY, None)
+        await query.answer("已取消拒绝")
+        return await query.edit_message_text(
+            _review_prompt_text({**submission, "id": submission_id}),
+            reply_markup=_review_keyboard(submission_id),
+        )
 
     if action == "review_approve":
         channel_id = config.get("channel_id")
@@ -158,22 +670,31 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
         pending[submission_id] = submission
         _save_pending_submissions(pending)
 
+        submission_kind = str(submission.get("submission_kind", "main"))
+        target_channel_id = _as_int(submission.get("target_channel_id")) or channel_id
         try:
-            published = await context.bot.copy_message(
-                chat_id=channel_id,
-                from_chat_id=submission["user_chat_id"],
-                message_id=submission["user_message_id"],
-                reply_markup=publish_buttons_keyboard(config),
-            )
+            # Only original submission content is published; proof is review-only.
+            if submission_kind == "comment":
+                published = await _publish_comment_and_forward(context, submission, config)
+                target_channel_id = _as_int(config.get("forward_channel_id"))
+            else:
+                published = await _copy_submission_to_channel(
+                    context,
+                    submission,
+                    target_channel_id,
+                    config,
+                )
         except Exception as exc:
             submission["status"] = "pending"
             pending[submission_id] = submission
             _save_pending_submissions(pending)
+            detail = _publish_failure_detail(exc)
             print("审核投稿发布失败:", exc)
-            return await query.answer(
-                "发布失败，请检查频道配置和机器人权限后重试。",
-                show_alert=True,
-            )
+            try:
+                await query.message.reply_text(f"❌ 发布失败详情：\n{detail}")
+            except Exception as notify_exc:
+                print("发送发布失败详情失败:", notify_exc)
+            return await query.answer("发布失败，详情已发送。", show_alert=True)
 
         submission["status"] = "approved"
         submission["reviewed_at"] = int(time.time())
@@ -181,7 +702,6 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
         pending[submission_id] = submission
         _save_pending_submissions(pending)
 
-        # Keep this compatible with the existing random-view function.
         data = _load_cannel_message()
         data.append({
             "user_id": submission.get("user_id"),
@@ -189,6 +709,7 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
             "username": submission.get("username"),
             "user_message_id": submission["user_message_id"],
             "channel_message_id": published.message_id,
+            "channel_id": target_channel_id,
             "publish_time": int(time.time()),
         })
         save_json(USER_MESSAGE_FILE, data)
@@ -209,19 +730,21 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
         return await query.message.reply_text("✅ 已通过投稿并发布到频道。")
 
     if action == "review_reject":
-        submission["status"] = "rejected"
-        submission["reviewed_at"] = int(time.time())
-        pending[submission_id] = submission
-        _save_pending_submissions(pending)
-
-        try:
-            await context.bot.send_message(
-                chat_id=submission["user_chat_id"],
-                text="❌ 很抱歉，您的投稿未通过审核。",
+        if bool(config.get("reject_reason_required", False)):
+            review_chat = getattr(getattr(query.message, "chat", None), "id", None)
+            context.user_data[REJECT_REASON_KEY] = {
+                "submission_id": submission_id,
+                "review_chat_id": review_chat,
+                "review_message_id": query.message.message_id,
+            }
+            await query.answer()
+            return await query.edit_message_text(
+                "❌ 请发送拒绝原因。\n\n"
+                "该原因会通知投稿人；发送“取消”可返回审核。",
+                reply_markup=_reject_reason_cancel_keyboard(submission_id),
             )
-        except Exception as exc:
-            print("投稿拒绝通知失败:", exc)
 
+        await _finalize_rejection(context, submission_id, submission)
         try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception as exc:
@@ -258,17 +781,41 @@ def _button_settings_text(config: dict) -> str:
     return "\n".join(lines)
 
 
-def publish_buttons_keyboard(config: dict):
-    """Build the URL keyboard appended to a published submission."""
-    if not bool(config.get("bottom_buttons_enabled", True)):
-        return None
-
+def publish_buttons_keyboard(
+    config: dict,
+    *,
+    comment_channel_id=None,
+    comment_message_id=None,
+    comment_url: str = None,
+):
+    """Build buttons for a published post, including an optional comment action."""
     rows = []
-    for button in _publish_buttons(config):
-        button_text = str(button.get("text", "")).strip()
-        button_url = str(button.get("url", "")).strip()
-        if button_text and button_url:
-            rows.append([InlineKeyboardButton(button_text, url=button_url)])
+    if bool(config.get("bottom_buttons_enabled", True)):
+        for button in _publish_buttons(config):
+            button_text = str(button.get("text", "")).strip()
+            button_url = str(button.get("url", "")).strip()
+            if button_text and button_url:
+                rows.append([InlineKeyboardButton(button_text, url=button_url)])
+
+    # 不展示评论按钮
+    # if (
+    #     bool(config.get("comment_forward_enabled", False))
+    #     and comment_channel_id is not None
+    #     and comment_message_id is not None
+    # ):
+    #     rows.append([
+    #         InlineKeyboardButton(
+    #             "💬 评论",
+    #             url=comment_url,
+    #         )
+    #         if comment_url
+    #         else InlineKeyboardButton(
+    #             "💬 评论",
+    #             callback_data=(
+    #                 f"publish:comment:{comment_channel_id}:{comment_message_id}"
+    #             ),
+    #         )
+    #     ])
     return InlineKeyboardMarkup(rows) if rows else None
 
 
@@ -325,17 +872,42 @@ def publish_setting_keyboard(config: dict):
     submission_enabled = bool(config.get("submission_enabled", True))
     random_view_enabled = bool(config.get("random_view_enabled", True))
     bottom_buttons_enabled = bool(config.get("bottom_buttons_enabled", True))
+    proof_required = bool(config.get("proof_required", False))
+    reject_reason_required = bool(config.get("reject_reason_required", False))
+    comment_forward_enabled = bool(config.get("comment_forward_enabled", False))
+    continuous_submission_enabled = bool(config.get("continuous_submission_enabled", True))
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📢 发布频道", callback_data="publish:channel")],
         [InlineKeyboardButton("📝 审核设置", callback_data="publish:review")],
         # [InlineKeyboardButton("📊 每日发布上限", callback_data="publish:limit")],
         # [InlineKeyboardButton("📣 广告管理", callback_data="publish:ads")],
         [InlineKeyboardButton("🔘 底部按钮设置", callback_data="publish:buttons")],
+        [InlineKeyboardButton("🔑 关键词设置", callback_data="publish:keywords")],
         [
             InlineKeyboardButton(
                 f"{'✅' if bottom_buttons_enabled else '🚫'} 显示底部按钮",
                 callback_data="publish:toggle_bottom_buttons",
             )
+        ],
+        [
+            InlineKeyboardButton(
+                f"{'✅' if proof_required else '🚫'} 审核凭证",
+                callback_data="publish:toggle_proof_required",
+            ),
+            InlineKeyboardButton(
+                f"{'✅' if reject_reason_required else '🚫'} 拒绝原因",
+                callback_data="publish:toggle_reject_reason_required",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                f"{'✅' if comment_forward_enabled else '🚫'} 评论并转发",
+                callback_data="publish:toggle_comment_forward",
+            ),
+            InlineKeyboardButton(
+                "📨 转发频道",
+                callback_data="publish:forward_channel",
+            ),
         ],
         [
             InlineKeyboardButton(
@@ -346,6 +918,12 @@ def publish_setting_keyboard(config: dict):
                 f"{'✅' if random_view_enabled else '🚫'} 随机查看开关",
                 callback_data="publish:toggle_random_view",
             ),
+        ],
+        [
+            InlineKeyboardButton(
+                f"{'✅' if continuous_submission_enabled else '🚫'} 连续投稿",
+                callback_data="publish:toggle_continuous_submission",
+            )
         ],
         [InlineKeyboardButton("⬅️ 返回", callback_data="start:back")]
     ])
@@ -414,8 +992,32 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     channel_id = config.get("channel_id")
     action = query.data.split(":")[1]
 
-    if action in {"review_approve", "review_reject"}:
+    if action in {"review_approve", "review_reject", "review_reject_cancel"}:
         return await _handle_review_callback(query, context, config)
+
+    if action == "comment":
+        return await _start_comment_submission(query, context, config)
+
+    if action == "keyword_pick":
+        results = (context.user_data or {}).get(KEYWORD_RESULTS_KEY, [])
+        try:
+            result_index = int(query.data.split(":", 2)[2])
+            route = results[result_index]
+        except (ValueError, IndexError, TypeError):
+            return await query.answer("关键词结果已失效，请重新搜索。", show_alert=True)
+        context.user_data.pop(KEYWORD_RESULTS_KEY, None)
+        context.user_data.pop(KEYWORD_INPUT_KEY, None)
+        context.user_data[COMMENT_TARGET_KEY] = {
+            "channel_id": route["channel_id"],
+            "message_id": route["channel_message_id"],
+        }
+        context.user_data["waiting_post"] = True
+        await query.answer()
+        return await query.edit_message_text(
+            f"✅ 已选择 {route.get('label', '关键词')}：{route.get('raw', route.get('key'))}。\n"
+            "请发送投稿内容，审核通过后会评论到对应帖子下，并发布到转发频道。",
+            reply_markup=create_post_keyboard(context.user_data.get("post_no_name", True)),
+        )
 
     await query.answer()
     
@@ -431,6 +1033,17 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_publish_config(config)
         return await query.edit_message_text(
             f"投稿开关已{'开启' if config['submission_enabled'] else '关闭'}。",
+            reply_markup=publish_setting_keyboard(config),
+        )
+
+    if action == "toggle_continuous_submission":
+        config["continuous_submission_enabled"] = not bool(
+            config.get("continuous_submission_enabled", True)
+        )
+        save_publish_config(config)
+        mode_text = "一次投稿完成后可继续发送" if config["continuous_submission_enabled"] else "一次投稿完成后自动结束"
+        return await query.edit_message_text(
+            f"连续投稿已{'开启' if config['continuous_submission_enabled'] else '关闭'}。\n{mode_text}",
             reply_markup=publish_setting_keyboard(config),
         )
 
@@ -450,6 +1063,72 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.edit_message_text(
             f"发布底部按钮已{'显示' if config['bottom_buttons_enabled'] else '隐藏'}。",
             reply_markup=publish_setting_keyboard(config),
+        )
+
+    if action == "toggle_proof_required":
+        config["proof_required"] = not bool(config.get("proof_required", False))
+        save_publish_config(config)
+        return await query.edit_message_text(
+            f"审核凭证已{'开启' if config['proof_required'] else '关闭'}。"
+            "开启后，普通投稿人需上传凭证才会提交审核。",
+            reply_markup=publish_setting_keyboard(config),
+        )
+
+    if action == "toggle_reject_reason_required":
+        config["reject_reason_required"] = not bool(
+            config.get("reject_reason_required", False)
+        )
+        save_publish_config(config)
+        return await query.edit_message_text(
+            f"拒绝原因已{'开启' if config['reject_reason_required'] else '关闭'}。"
+            "开启后，审核人拒绝投稿时需要填写原因。",
+            reply_markup=publish_setting_keyboard(config),
+        )
+
+    if action == "toggle_comment_forward":
+        config["comment_forward_enabled"] = not bool(
+            config.get("comment_forward_enabled", False)
+        )
+        save_publish_config(config)
+        return await query.edit_message_text(
+            f"评论并转发已{'开启' if config['comment_forward_enabled'] else '关闭'}。"
+            "开启后，管理员发布到主频道的帖子会显示评论按钮。",
+            reply_markup=publish_setting_keyboard(config),
+        )
+
+    if action == "keywords":
+        return await query.edit_message_text(
+            _keyword_settings_text(config),
+            reply_markup=_keyword_settings_keyboard(),
+        )
+
+    if action == "keywords_set":
+        context.user_data[KEYWORD_LABEL_INPUT_KEY] = True
+        return await query.edit_message_text(
+            "请输入需要提取的字段标签，多个用逗号或换行分隔。\n"
+            "例如：艺名, 联系方式",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ 返回", callback_data="publish:keywords")]
+            ]),
+        )
+
+    if action == "keywords_clear":
+        config["keyword_extract_labels"] = []
+        save_publish_config(config)
+        return await query.edit_message_text(
+            "✅ 已清空关键词提取标签。\n\n" + _keyword_settings_text(config),
+            reply_markup=_keyword_settings_keyboard(),
+        )
+
+    if action == "forward_channel":
+        context.user_data["waiting_forward_channel_id"] = True
+        target = config.get("forward_channel_id")
+        return await query.edit_message_text(
+            f"📨 当前转发频道：{target if target else '未设置'}\n\n"
+            "请输入转发频道 ID，例如：-1001234567890",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ 返回", callback_data="publish:back")]
+            ]),
         )
 
     if action == "channel":
@@ -743,7 +1422,22 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     if action == "publish":
-        # 发布
+        owner_id = _owner_id(context)
+        if (
+            bool(config.get("comment_forward_enabled", False))
+            and query.from_user.id != owner_id
+            and not isinstance(context.user_data.get(COMMENT_TARGET_KEY), dict)
+        ):
+            if not _keyword_labels(config):
+                return await query.edit_message_text(
+                    "❗ 当前未配置关键词提取标签，请联系管理员在投稿设置中配置。"
+                )
+            context.user_data[KEYWORD_INPUT_KEY] = True
+            context.user_data["waiting_post"] = False
+            return await query.edit_message_text(
+                "🔎 请输入要查询的关键词（例如：@×××或名字）。\n"
+                "找到对应帖子后，再发送投稿内容。"
+            )
         await publish_message(update, context)
         
     if action == "channel_message":
@@ -789,8 +1483,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_bottle(
             context,
             user_id,
-            channel_id,
-            post
+            post.get("channel_id") or channel_id,
+            post,
         )
 
     if action == "global_ad_toggle":
@@ -827,44 +1521,36 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 已浏览历史里还有下一条
         if index < len(history) - 1:
-
             index += 1
-
             user_info["index"] = index
-
             _save_bottle_history(history_data)
-
             message_id = history[index]
-
+            post = next(
+                (item for item in posts if item.get("channel_message_id") == message_id),
+                None,
+            )
         else:
-
             available_posts = [
                 p for p in posts
                 if p["user_id"] != user_id
                 and p["channel_message_id"] not in history
             ]
-
             if not available_posts:
                 await query.message.reply_text("没有更多资源了")
                 return
 
             post = random.choice(available_posts)
-
             history.append(post["channel_message_id"])
-
             user_info["index"] = len(history) - 1
-
             _save_bottle_history(history_data)
-
             message_id = post["channel_message_id"]
 
         await query.message.delete()
-
         await context.bot.copy_message(
             chat_id=user_id,
-            from_chat_id=channel_id,
+            from_chat_id=(post or {}).get("channel_id") or channel_id,
             message_id=message_id,
-            reply_markup=query.message.reply_markup
+            reply_markup=query.message.reply_markup,
         )
 
     if action == "bottle_prev":
@@ -893,14 +1579,17 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _save_bottle_history(history_data)
 
         message_id = user_info["history"][index]
+        post = next(
+            (item for item in _load_cannel_message() if item.get("channel_message_id") == message_id),
+            None,
+        )
 
         await query.message.delete()
-
         await context.bot.copy_message(
             chat_id=user_id,
-            from_chat_id=channel_id,
+            from_chat_id=(post or {}).get("channel_id") or channel_id,
             message_id=message_id,
-            reply_markup=query.message.reply_markup
+            reply_markup=query.message.reply_markup,
         )
     
     if action == "add_friend":
@@ -1034,6 +1723,15 @@ def create_post_keyboard(enabled: bool):
     return InlineKeyboardMarkup(rows)
 
 
+def _finish_submission_if_needed(context: ContextTypes.DEFAULT_TYPE, config: dict) -> None:
+    """End the current submission session when continuous submission is off."""
+    if bool(config.get("continuous_submission_enabled", True)):
+        return
+    context.user_data["waiting_post"] = False
+    context.user_data.pop(PENDING_PROOF_KEY, None)
+    context.user_data.pop(COMMENT_TARGET_KEY, None)
+
+
 async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("waiting_post"):
         return
@@ -1043,46 +1741,98 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     config = load_publish_config()
-    channel_id = config.get("channel_id")
-    if not channel_id:
+    main_channel_id = _as_int(config.get("channel_id"))
+    if main_channel_id is None:
         await msg.reply_text("✅ 暂未配置发布频道，感谢参与！")
         return
 
+    # The next user message is the proof for an already saved submission.
+    proof_submission_id = context.user_data.get(PENDING_PROOF_KEY)
+    if proof_submission_id:
+        pending = _load_pending_submissions()
+        submission = pending.get(proof_submission_id)
+        if not isinstance(submission, dict) or submission.get("status") != "awaiting_proof":
+            context.user_data.pop(PENDING_PROOF_KEY, None)
+            return await msg.reply_text("❗ 未找到待上传凭证的投稿，请重新发起投稿。")
+
+        submission["proof_chat_id"] = msg.chat_id
+        submission["proof_message_id"] = msg.message_id
+        submission["proof_uploaded_at"] = int(time.time())
+        submission["status"] = "pending"
+        pending[proof_submission_id] = submission
+        _save_pending_submissions(pending)
+        try:
+            await _send_submission_for_review(context, proof_submission_id, submission)
+        except Exception as exc:
+            submission.pop("proof_chat_id", None)
+            submission.pop("proof_message_id", None)
+            submission.pop("proof_uploaded_at", None)
+            submission["status"] = "awaiting_proof"
+            pending[proof_submission_id] = submission
+            _save_pending_submissions(pending)
+            print("转发投稿及凭证审核失败:", exc)
+            await msg.reply_text(f"❌ 提交审核失败：{exc}")
+            return
+
+        context.user_data.pop(PENDING_PROOF_KEY, None)
+        _finish_submission_if_needed(context, config)
+        await msg.reply_text("🕒 凭证已收到，投稿已提交，等待管理员审核。")
+        return
+
     owner_id = _owner_id(context)
-    # 机器人所有者自己投稿时直接发布，无需再转发给自己审核。
-    if bool(config.get("review_enabled", False)) and msg.from_user.id != owner_id:
+    is_owner_submission = msg.from_user.id == owner_id
+    comment_target = context.user_data.pop(COMMENT_TARGET_KEY, None)
+    comment_target = comment_target if isinstance(comment_target, dict) else None
+    comment_forward_enabled = bool(config.get("comment_forward_enabled", False))
+
+    submission_kind = "main"
+    target_channel_id = main_channel_id
+    if comment_forward_enabled and comment_target:
+        submission_kind = "comment"
+    elif comment_forward_enabled and not is_owner_submission:
+        submission_kind = "forward"
+        target_channel_id = _as_int(config.get("forward_channel_id"))
+        if target_channel_id is None:
+            await msg.reply_text("❌ 未设置转发频道，暂时无法提交投稿。")
+            return
+
+    # Non-owner submissions use review when it is enabled.
+    if bool(config.get("review_enabled", False)) and not is_owner_submission:
         if owner_id is None:
             await msg.reply_text("❌ 未配置机器人所有者，暂时无法提交审核。")
             return
 
         submission_id = uuid.uuid4().hex[:16]
-        pending = _load_pending_submissions()
-        pending[submission_id] = {
+        submission = {
             "status": "pending",
             "user_id": msg.from_user.id,
             "user_chat_id": msg.chat_id,
             "username": msg.from_user.username,
+            "author": _submission_author_text(msg),
             "user_message_id": msg.message_id,
             "submitted_at": int(time.time()),
+            "submission_kind": submission_kind,
+            "target_channel_id": target_channel_id,
         }
-        _save_pending_submissions(pending)
+        if comment_target:
+            submission["comment_target"] = comment_target
 
+        pending = _load_pending_submissions()
+        if bool(config.get("proof_required", False)):
+            submission["status"] = "awaiting_proof"
+            pending[submission_id] = submission
+            _save_pending_submissions(pending)
+            context.user_data[PENDING_PROOF_KEY] = submission_id
+            await msg.reply_text(
+                "📎 请继续上传审核凭证。\n"
+                "支持文字、图片、视频、文件等；凭证仅供审核，不会发布到频道。"
+            )
+            return
+
+        pending[submission_id] = submission
+        _save_pending_submissions(pending)
         try:
-            # Use forward_message as requested so the owner receives the original submission.
-            await context.bot.forward_message(
-                chat_id=owner_id,
-                from_chat_id=msg.chat_id,
-                message_id=msg.message_id,
-            )
-            await context.bot.send_message(
-                chat_id=owner_id,
-                text=(
-                    "📝 收到新的投稿，请审核。\n"
-                    f"投稿人：{_submission_author_text(msg)}\n"
-                    f"投稿编号：{submission_id}"
-                ),
-                reply_markup=_review_keyboard(submission_id),
-            )
+            await _send_submission_for_review(context, submission_id, submission)
         except Exception as exc:
             pending.pop(submission_id, None)
             _save_pending_submissions(pending)
@@ -1090,34 +1840,186 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(f"❌ 提交审核失败：{exc}")
             return
 
+        _finish_submission_if_needed(context, config)
         await msg.reply_text("🕒 投稿已提交，等待管理员审核。")
         return
 
+    # Owner's normal post stays in main channel and receives a comment button.
+    submission = {
+        "user_chat_id": msg.chat_id,
+        "user_message_id": msg.message_id,
+        "keyword_entries": (
+            _extract_routing_keywords(msg, config)
+            if comment_forward_enabled and is_owner_submission and submission_kind == "main"
+            else []
+        ),
+    }
     try:
-        published = await context.bot.copy_message(
-            chat_id=channel_id,
-            from_chat_id=msg.chat_id,
-            message_id=msg.message_id,
-            reply_markup=publish_buttons_keyboard(config),
-        )
-        _append_published_submission(msg, published.message_id)
+        if submission_kind == "comment":
+            published = await _publish_comment_and_forward(context, {
+                **submission,
+                "comment_target": comment_target,
+            }, config)
+            target_channel_id = _as_int(config.get("forward_channel_id"))
+        else:
+            published = await _copy_submission_to_channel(
+                context,
+                submission,
+                target_channel_id,
+                config,
+                add_comment_button=(
+                    comment_forward_enabled
+                    and is_owner_submission
+                    and submission_kind == "main"
+                ),
+            )
+        _append_published_submission(msg, published.message_id, target_channel_id)
+        _finish_submission_if_needed(context, config)
         await msg.reply_text("✅ 发送成功")
     except Exception as exc:
         print("投稿失败:", exc)
         await msg.reply_text(f"❌ 发送失败：{exc}")
-   
+
 # =========================
 # 文本输入处理
 # =========================
 
+async def _handle_keyword_search_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not (context.user_data or {}).get(KEYWORD_INPUT_KEY):
+        return False
+    msg = update.message
+    if not msg or not msg.text:
+        if msg:
+            await msg.reply_text("❗ 请发送文字关键词。")
+        return True
+
+    query = msg.text.strip()
+    if query in {"取消", "返回"}:
+        context.user_data.pop(KEYWORD_INPUT_KEY, None)
+        await msg.reply_text("✅ 已取消关键词搜索。")
+        return True
+    routes = _find_keyword_routes(query)
+    if not routes:
+        await msg.reply_text(
+            "❗ 未找到可评论的对应帖子。请检查关键词，或等待管理员发布带关键词的新帖子后重试。"
+        )
+        return True
+
+    if len(routes) == 1:
+        route = routes[0]
+        context.user_data.pop(KEYWORD_INPUT_KEY, None)
+        context.user_data[COMMENT_TARGET_KEY] = {
+            "channel_id": route["channel_id"],
+            "message_id": route["channel_message_id"],
+        }
+        context.user_data["waiting_post"] = True
+        return await msg.reply_text(
+            f"✅ 已匹配 {route.get('label', '关键词')}：{route.get('raw', route.get('key'))}。\n"
+            "请继续发送投稿内容，审核通过后会评论到对应帖子下，并发布到转发频道。",
+            reply_markup=create_post_keyboard(context.user_data.get("post_no_name", True)),
+        )
+
+    context.user_data[KEYWORD_RESULTS_KEY] = routes
+    rows = []
+    for index, route in enumerate(routes):
+        label = str(route.get("label", "关键词"))[:12]
+        value = str(route.get("raw", route.get("key", "")))[:30]
+        rows.append([
+            InlineKeyboardButton(
+                f"{label}：{value}",
+                callback_data=f"publish:keyword_pick:{index}",
+            )
+        ])
+    return await msg.reply_text("找到多个对应帖子，请选择：", reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def _handle_reject_reason_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    stage = (context.user_data or {}).get(REJECT_REASON_KEY)
+    if not isinstance(stage, dict):
+        return False
+
+    msg = update.message
+    if not msg:
+        return True
+    if not msg.text:
+        await msg.reply_text("❗ 请发送文字形式的拒绝原因，或发送“取消”。")
+        return True
+
+    submission_id = stage.get("submission_id")
+    text = msg.text.strip()
+    if text in {"取消", "返回"}:
+        context.user_data.pop(REJECT_REASON_KEY, None)
+        pending = _load_pending_submissions()
+        submission = pending.get(submission_id)
+        try:
+            if isinstance(submission, dict) and stage.get("review_chat_id"):
+                await context.bot.edit_message_text(
+                    chat_id=stage["review_chat_id"],
+                    message_id=stage["review_message_id"],
+                    text=_review_prompt_text({**submission, "id": submission_id}),
+                    reply_markup=_review_keyboard(submission_id),
+                )
+        except Exception as exc:
+            print("恢复审核消息失败:", exc)
+        await msg.reply_text("✅ 已取消拒绝，投稿仍可继续审核。")
+        return True
+
+    if not text:
+        await msg.reply_text("❗ 拒绝原因不能为空。")
+        return True
+    if len(text) > 3000:
+        await msg.reply_text("❗ 拒绝原因不能超过 3000 个字符。")
+        return True
+
+    pending = _load_pending_submissions()
+    submission = pending.get(submission_id)
+    if not isinstance(submission, dict) or submission.get("status") != "pending":
+        context.user_data.pop(REJECT_REASON_KEY, None)
+        await msg.reply_text("❗ 该投稿已处理或不存在。")
+        return True
+
+    await _finalize_rejection(context, submission_id, submission, text)
+    context.user_data.pop(REJECT_REASON_KEY, None)
+    try:
+        if stage.get("review_chat_id"):
+            await context.bot.edit_message_text(
+                chat_id=stage["review_chat_id"],
+                message_id=stage["review_message_id"],
+                text="❌ 投稿已拒绝，已通知投稿人。",
+            )
+    except Exception as exc:
+        print("更新审核拒绝消息失败:", exc)
+    await msg.reply_text("❌ 已拒绝投稿，已通知投稿人拒绝原因。")
+    return True
+
 async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    
+    if await _handle_keyword_search_input(update, context):
+        return
+    if await _handle_reject_reason_input(update, context):
+        return
+
     await handle_wall_publish(update, context)
 
     if not update.message.text:
         return
     
     config = load_publish_config()
+
+    if context.user_data.get(KEYWORD_LABEL_INPUT_KEY):
+        labels = [
+            value.strip()[:30]
+            for value in re.split(r"[,，\n]+", update.message.text or "")
+            if value.strip()
+        ]
+        if not labels:
+            return await update.message.reply_text("❗ 请至少输入一个标签，例如：艺名")
+        context.user_data.pop(KEYWORD_LABEL_INPUT_KEY, None)
+        config["keyword_extract_labels"] = list(dict.fromkeys(labels))[:20]
+        save_publish_config(config)
+        return await update.message.reply_text(
+            "✅ 关键词提取标签已保存。\n\n" + _keyword_settings_text(config),
+            reply_markup=_keyword_settings_keyboard(),
+        )
 
     button_input = context.user_data.get("publish_button_input")
     if isinstance(button_input, dict):
@@ -1173,6 +2075,21 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 result_text + "\n\n" + _button_settings_text(config),
                 reply_markup=publish_button_settings_keyboard(config),
             )
+
+    if context.user_data.get("waiting_forward_channel_id"):
+        context.user_data["waiting_forward_channel_id"] = False
+        try:
+            forward_channel_id = int(update.message.text.strip())
+        except (TypeError, ValueError):
+            return await update.message.reply_text(
+                "❗ 频道 ID 格式错误，例如：-1001234567890"
+            )
+        config["forward_channel_id"] = forward_channel_id
+        save_publish_config(config)
+        return await update.message.reply_text(
+            f"✅ 已保存转发频道：{forward_channel_id}",
+            reply_markup=publish_setting_keyboard(config),
+        )
 
     if context.user_data.get("waiting_channel_id"):
         context.user_data["waiting_channel_id"] = False
@@ -1322,5 +2239,19 @@ def _load_cannel_message() -> list:
 # =========================
 
 def register_publish_setting_handlers(app):
-    app.add_handler( CallbackQueryHandler( _handle_callback, pattern=r"^publish:.+"))
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (~filters.COMMAND) & ~filters.UpdateType.BUSINESS_MESSAGE ,_handle_text_input), group=10)
+    app.add_handler(CallbackQueryHandler(_handle_callback, pattern=r"^publish:.+"))
+    # Linked discussion groups receive main-channel posts as automatic forwards.
+    # Keep the correspondence so approved user comments can reply below the post.
+    app.add_handler(
+        MessageHandler(filters.ChatType.GROUPS, _capture_comment_source_message),
+        group=10,
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE
+            & (~filters.COMMAND)
+            & ~filters.UpdateType.BUSINESS_MESSAGE,
+            _handle_text_input,
+        ),
+        group=10,
+    )

@@ -7,5 +7,11 @@
     "buttons": [],
     "submission_enabled": false,
     "random_view_enabled": false,
-    "bottom_buttons_enabled": true
+    "bottom_buttons_enabled": true,
+    "proof_required": false,
+    "reject_reason_required": false,
+    "comment_forward_enabled": false,
+    "forward_channel_id": null,
+    "keyword_extract_labels": [],
+    "continuous_submission_enabled": true
 }
