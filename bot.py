@@ -300,6 +300,10 @@ async def block_disabled_group_messages(
 
 async def owner_reply_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bind_runtime_bot_context(context)
+    # 投稿内容不能被私聊双向转发当作“回复用户”的消息处理。
+    if (context.user_data or {}).get(WAITING_POST):
+        return
+
     owner_id = int(context.application.bot_data.get("owner_id", DEFAULT_OWNER_ID))
     if not update.effective_user or update.effective_user.id != owner_id:
         return
@@ -316,11 +320,18 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
     chat = update.effective_chat
     
     
+    user_data = context.user_data or {}
+    # 投稿由投稿模块处理；不要再走私聊双向转发给主人，否则会重复发送。
+    if user_data.get(WAITING_POST):
+        print("[private_forward_router] 忽略：当前正在投稿")
+        return
+
     if (
         str(context.application.bot_data.get("name", "")).strip() == MASTER_BOT_NAME
         and (
-            isinstance(context.user_data.get(PRIVATE_FORWARD_SELF_SERVICE_STAGE_KEY), dict)
-            or isinstance(context.user_data.get(MULTI_BOT_STAGE_KEY), dict) or context.user_data.get(WAITING_POST) or context.user_data.get(REPLY_BOTTLE)
+            isinstance(user_data.get(PRIVATE_FORWARD_SELF_SERVICE_STAGE_KEY), dict)
+            or isinstance(user_data.get(MULTI_BOT_STAGE_KEY), dict)
+            or user_data.get(REPLY_BOTTLE)
         )
     ):
         print("[private_forward_router] 忽略：主机器人当前处于自助/多机器人输入阶段")

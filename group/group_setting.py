@@ -2794,6 +2794,14 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
             )
             raise ApplicationHandlerStop
 
+        # 保存广告推送项后回到广告推送设置，不要跳回整个群设置面板。
+        if stage in {"ad_message", "ad_text", "ad_interval", "ad_times", "ad_mode"}:
+            await update.message.reply_text(
+                _build_ad_push_settings_text(chat_id_str, cfg),
+                reply_markup=_build_ad_push_settings_keyboard(chat_id_str, cfg),
+            )
+            raise ApplicationHandlerStop
+
     list_page = int(context.user_data.get("group_setting_list_page", 1) or 1)
     user = update.effective_user
     panel_user_id = user.id if user else 0

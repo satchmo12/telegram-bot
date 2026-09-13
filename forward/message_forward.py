@@ -623,6 +623,10 @@ async def reply_from_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def owner_auto_forward_in_dialog(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
+    # 投稿中的消息只能由投稿模块处理，不能自动双向发送给当前私聊用户。
+    if (context.user_data or {}).get("waiting_post"):
+        return
+
     if not update.effective_user or update.effective_user.id != get_owner_id(context):
         return
     if not update.effective_chat or update.effective_chat.type != "private":
@@ -633,7 +637,7 @@ async def owner_auto_forward_in_dialog(
         matched = get_matched_command(update.message.text)
         if matched:
             return
-    if context.user_data.get(SEND_USER_STAGE_KEY) == "typing":
+    if (context.user_data or {}).get(SEND_USER_STAGE_KEY) == "typing":
         return
 
     state = _get_owner_runtime_state(context)
