@@ -46,6 +46,7 @@ from channel.telethon_forwarder import start_telethon_forwarder_job
 from channel.telethon_login import _clear_login_state
 from channel.publish_setting import handle_comment_start_parameter, load_publish_config
 from command_router import get_matched_command
+from admin_permissions import has_admin_permission, is_owner_or_super_admin
 
 from chat.my_bot import cleaned_word
 from chat.gemini_chat import handle_gemini_ai
@@ -305,11 +306,13 @@ async def owner_reply_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
         (context.user_data or {}).get(WAITING_POST)
         or (context.user_data or {}).get("publish_reject_reason")
         or (context.user_data or {}).get("publish_keyword_label_input")
+        or (context.user_data or {}).get("delegated_admin_add_stage")
     ):
         return
 
-    owner_id = int(context.application.bot_data.get("owner_id", DEFAULT_OWNER_ID))
-    if not update.effective_user or update.effective_user.id != owner_id:
+    if not update.effective_user or not has_admin_permission(
+        context, update.effective_user.id, "private_forward"
+    ):
         return
     if update.message and update.message.text:
         matched = get_matched_command(update.message.text)
@@ -414,6 +417,18 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
     # await forward_to_owner(update, context)
 
 
+def _clear_submission_draft(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Cancel an unfinished user submission when returning to the start menu."""
+    for key in (
+        "waiting_post",
+        "publish_keyword_search",
+        "publish_keyword_results",
+        "publish_comment_target",
+        "publish_pending_proof_id",
+    ):
+        context.user_data.pop(key, None)
+
+
 async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """兜底 /start：保证未启用 verification 的机器人也能响应。"""
     if not update.message:
@@ -422,6 +437,9 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         if await handle_comment_start_parameter(update, context, context.args[0]):
             return
+
+    # A normal /start is also an explicit exit from an unfinished submission.
+    _clear_submission_draft(context)
 
     bot_name = context.application.bot_data.get("name", "机器人")
     features = sorted(context.application.bot_data.get("enabled_features", []))
@@ -456,11 +474,12 @@ async def start_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     panel = context.user_data.get("start_panel", {})
     bot_name = panel.get("bot_name", context.application.bot_data.get("name", "机器人"))
-    # 推出编辑模式
-    context.user_data["waiting_post"] = False
     action = query.data.split(":", 1)[1]
     if action != "back":
         return
+    # 返回首页时必须同时清理已选择的关键词/评论目标；否则下一次点击
+    # 「我要投稿」会误用上次的目标，跳过关键词输入。
+    _clear_submission_draft(context)
     user_id = update.effective_user.id if update.effective_user else None
     keyboard_rows = _build_start_panel_rows(context, user_id)
     keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
@@ -477,7 +496,19 @@ def _build_help_text(context: ContextTypes.DEFAULT_TYPE, user_id: Optional[int] 
     bot_name = str(context.application.bot_data.get("name", "机器人")).strip() or "机器人"
     is_master = bot_name == MASTER_BOT_NAME
     can_manage_private_forward = bool(
-        user_id and (is_super_admin(user_id) or is_bot_owner(user_id))
+        user_id and has_admin_permission(context, int(user_id), "private_forward")
+    )
+    can_manage_group_config = bool(
+        user_id and has_admin_permission(context, int(user_id), "group_config")
+    )
+    can_manage_channel_config = bool(
+        user_id and any(
+            has_admin_permission(context, int(user_id), permission)
+            for permission in ("channel_config", "telethon_manage", "bot_channel_config")
+        )
+    )
+    can_manage_group_config = can_manage_group_config or bool(
+        user_id and has_admin_permission(context, int(user_id), "global_ad_config")
     )
     lines = [
         f"📖 {bot_name} 命令帮助",
@@ -488,7 +519,7 @@ def _build_help_text(context: ContextTypes.DEFAULT_TYPE, user_id: Optional[int] 
         "/features 查看当前机器人启用功能",
     ]
 
-    if "group" in enabled:
+    if "group" in enabled and can_manage_group_config:
         lines.extend(
             [
                 "",
@@ -503,7 +534,7 @@ def _build_help_text(context: ContextTypes.DEFAULT_TYPE, user_id: Optional[int] 
             ]
         )
 
-    if "channel" in enabled:
+    if "channel" in enabled and can_manage_channel_config:
         lines.extend(
             [
                 "",
@@ -516,7 +547,7 @@ def _build_help_text(context: ContextTypes.DEFAULT_TYPE, user_id: Optional[int] 
             ]
         )
 
-    if "private_forward" in enabled:
+    if "private_forward" in enabled and (not user_id or can_manage_private_forward):
         lines.extend(
             [
                 "",
@@ -597,9 +628,10 @@ def _build_start_panel_rows(
     custom_menu_buttons = publish_config.get("custom_menu_buttons", {})
     if not isinstance(custom_menu_buttons, dict):
         custom_menu_buttons = {}
-    is_bot_admin_viewer = bool(
-        user_id and (int(user_id) == owner_id or is_super_admin(int(user_id)))
-    )
+    is_bot_admin_viewer = bool(user_id and is_owner_or_super_admin(context, int(user_id)))
+
+    def can_use(permission: str) -> bool:
+        return bool(user_id and has_admin_permission(context, int(user_id), permission))
 
     def show_custom_button(key: str) -> bool:
         # Visibility settings apply only to ordinary users. The bot owner and
@@ -615,26 +647,21 @@ def _build_start_panel_rows(
             ]
         )
         
-    if user_id and int(user_id) == owner_id or is_super_admin(int(user_id)):
+    if is_bot_admin_viewer or any(
+        can_use(permission) for permission in ("submission_config", "private_forward")
+    ):
         owner_row = []
         # 私聊面板依赖 private_forward 的消息和回调处理器；未开启时不显示，
         # 避免克隆机器人出现“按钮可点但没有反应”的假入口。
-        if "private_forward" in enabled:
-            owner_row.append(
-                InlineKeyboardButton("💬私聊面板", callback_data="pfmode:open:1")
-            )
-        owner_row.extend(
-            [
-                InlineKeyboardButton("⚙️投稿配置", callback_data="publish:publishset"),
-            ]
-        )
-        # 用户按钮展示设置放在最外层，只向当前机器人所有者显示。
-        owner_row.append(
-            InlineKeyboardButton(
-                "🧩自定义按钮",
-                callback_data="publish:custom_buttons",
-            )
-        )
+        if "private_forward" in enabled and can_use("private_forward"):
+            owner_row.append(InlineKeyboardButton("💬私聊面板", callback_data="pfmode:open:1"))
+        if can_use("submission_config"):
+            owner_row.append(InlineKeyboardButton("⚙️投稿配置", callback_data="publish:publishset"))
+        # 自定义用户入口属于投稿配置权限；多管理员本身仅所有者/超级管理员可管理。
+        if can_use("submission_config"):
+            owner_row.append(InlineKeyboardButton("🧩自定义按钮", callback_data="publish:custom_buttons"))
+        if is_bot_admin_viewer:
+            owner_row.append(InlineKeyboardButton("👥多管理员", callback_data="adm:panel"))
         
         # owner_row.append(
         #         InlineKeyboardButton(
@@ -643,24 +670,25 @@ def _build_start_panel_rows(
         #         )
         #     )
         
-        rows.append(owner_row)
+        if owner_row:
+            rows.append(owner_row)
    
     if "channel" in enabled:
         channel_row = []
-        if show_custom_button("channel_clone"):
+        if can_use("channel_config") and show_custom_button("channel_clone"):
             channel_row.append(InlineKeyboardButton("📣克隆频道", callback_data="chcfg:back"))
-        if show_custom_button("telethon_manage"):
+        if can_use("telethon_manage") and show_custom_button("telethon_manage"):
             channel_row.append(InlineKeyboardButton("📱管理协议号(可群发)", callback_data="tlogin:list"))
-        if show_custom_button("bot_channel_config"):
+        if can_use("bot_channel_config") and show_custom_button("bot_channel_config"):
             channel_row.append(InlineKeyboardButton("📣机器人频道配置", callback_data="chcfg:bot"))
         if channel_row:
             rows.append(channel_row)
         
     if "group" in enabled:
         group_row = []
-        if show_custom_button("group_config"):
+        if can_use("group_config") and show_custom_button("group_config"):
             group_row.append(InlineKeyboardButton("👥群配置", callback_data="gcfg:list"))
-        if show_custom_button("global_ad_config"):
+        if can_use("global_ad_config") and show_custom_button("global_ad_config"):
             group_row.append(InlineKeyboardButton("📢全群广告推送", callback_data="gcfg:global_ad_menu"))
         if group_row:
             rows.append(group_row)

@@ -49,6 +49,8 @@ from group.talk_lottery_settings import (
 )
 from game.talk_lottery_core import list_prizes as list_talk_lottery_prizes
 from info.economy import clean_point
+from admin_permissions import has_admin_permission
+
 from utils import (
     GROUP_LIST_FILE,
     get_group_whitelist,
@@ -1029,7 +1031,9 @@ def _build_group_panel_keyboard_for_user(
 async def _can_manage_group(
     context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int
 ) -> bool:
-    if is_super_admin(user_id):
+    # Delegated group-config administrators may manage every group linked to
+    # this bot. Normal users still need native Telegram administrator rights.
+    if has_admin_permission(context, user_id, "group_config"):
         return True
 
     cache = context.application.bot_data.setdefault("group_manage_cache", {})
@@ -1106,7 +1110,7 @@ async def _show_group_picker(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user = update.effective_user
     user_id = user.id if user else 0
     data = await _visible_group_data_for_user(context, user_id, data)
-    include_global_ad = _is_current_bot_owner(context, user_id)
+    include_global_ad = has_admin_permission(context, user_id, "global_ad_config")
     if not data and not include_global_ad:
         return await safe_reply(update, context, "暂无可配置的群记录。")
     page = 1
@@ -1219,7 +1223,7 @@ async def group_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id if user else 0
     data = get_group_whitelist(context)
     data = await _visible_group_data_for_user(context, user_id, data)
-    include_global_ad = _is_current_bot_owner(context, user_id)
+    include_global_ad = has_admin_permission(context, user_id, "global_ad_config")
     if not data and not include_global_ad:
         add_group_url = _add_group_url(context)
         reply_markup = (
@@ -1519,11 +1523,13 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
     data = get_group_whitelist(context)
 
     if action == "global_ad_menu":
+        if not has_admin_permission(context, user_id, "global_ad_config"):
+            return await query.answer("你没有全群广告推送权限。", show_alert=True)
         return await _open_global_ad_push_settings_panel(query, context)
 
     if action == "global_ad_toggle":
-        if not _is_current_bot_owner(context, user_id):
-            return await query.answer("只有机器人所有者可以设置。", show_alert=True)
+        if not has_admin_permission(context, user_id, "global_ad_config"):
+            return await query.answer("你没有全群广告推送权限。", show_alert=True)
         cfg = _get_global_ad_push_config()
         cfg["enabled"] = not bool(cfg.get("enabled", False))
         _save_global_ad_push_config(cfg)
@@ -1543,8 +1549,8 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         "global_ad_mode",
         "global_ad_excludes",
     }:
-        if not _is_current_bot_owner(context, user_id):
-            return await query.answer("只有机器人所有者可以设置。", show_alert=True)
+        if not has_admin_permission(context, user_id, "global_ad_config"):
+            return await query.answer("你没有全群广告推送权限。", show_alert=True)
         stage_map = {
             "global_ad_text": "global_ad_text",
             "global_ad_message": "global_ad_message",
@@ -1607,7 +1613,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             visible_data,
             page,
             add_group_url=_add_group_url(context),
-            include_global_ad=_is_current_bot_owner(context, user_id),
+            include_global_ad=has_admin_permission(context, user_id, "global_ad_config"),
         )
         if not keyboard.inline_keyboard:
             return await query.edit_message_text("暂无可配置的群记录。")
@@ -1656,7 +1662,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             visible_data,
             page,
             add_group_url=_add_group_url(context),
-            include_global_ad=_is_current_bot_owner(context, user_id),
+            include_global_ad=has_admin_permission(context, user_id, "global_ad_config"),
         )
         if not keyboard.inline_keyboard:
             return await query.edit_message_text("已退出该群，暂无可配置的群记录。")

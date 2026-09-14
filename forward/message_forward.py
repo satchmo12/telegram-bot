@@ -13,6 +13,7 @@ import asyncio
 
 
 from command_router import get_matched_command, register_command
+from admin_permissions import get_delegated_admin_ids, has_admin_permission
 from tool.utils.update_helper import get_message
 from utils import (
     BOT_OWNER_ID,
@@ -65,13 +66,20 @@ PRIVATE_CONFIG_COMMANDS = {
 
 
 def _get_owner_runtime_state(context: ContextTypes.DEFAULT_TYPE) -> dict:
-    owner_id = int(get_owner_id(context))
-    owner_store = context.application.user_data[owner_id]
-    state = owner_store.get(PRIVATE_DIALOG_STATE_KEY)
+    """Return the current operator's dialog state (owner or delegated admin)."""
+    state = context.user_data.get(PRIVATE_DIALOG_STATE_KEY)
     if not isinstance(state, dict):
         state = {}
-        owner_store[PRIVATE_DIALOG_STATE_KEY] = state
+        context.user_data[PRIVATE_DIALOG_STATE_KEY] = state
     return state
+
+
+def _can_manage_private_forward(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    return has_admin_permission(context, user_id, "private_forward")
+
+
+def _forward_map_key(chat_id: int, message_id: int) -> str:
+    return f"{chat_id}:{message_id}"
 
 
 def _sorted_private_users(user_data: dict) -> list[tuple[str, dict]]:
@@ -299,7 +307,10 @@ def _resolve_target_uid(
     if update.message and update.message.reply_to_message:
         reply_msg_id = update.message.reply_to_message.message_id
         forward_map = load_forward_map()
-        uid = forward_map.get(str(reply_msg_id))
+        reply_chat_id = getattr(getattr(update, "effective_chat", None), "id", 0)
+        uid = forward_map.get(_forward_map_key(reply_chat_id, reply_msg_id))
+        if not uid:  # compatibility with mappings created before multi-admin support
+            uid = forward_map.get(str(reply_msg_id))
         if uid:
             return str(uid)
     if context.args:
@@ -486,9 +497,9 @@ async def forward_to_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"chat_id={getattr(getattr(update, 'effective_chat', None), 'id', None)} "
         f"type={'text' if getattr(update.message, 'text', None) else 'media'}"
     )
-    if user.id == owner_id:
-        print("[private_forward] 忽略：消息来自 owner 自己")
-        return  # 管理员自己发的消息不转发
+    if _can_manage_private_forward(context, user.id):
+        print("[private_forward] 忽略：消息来自私聊转发管理员")
+        return  # 管理员自己的消息不转发
 
     user_data = _load_user_data()
     uid = str(user.id)
@@ -506,32 +517,27 @@ async def forward_to_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
             print(f"[private_forward] 忽略：命中私聊配置命令 cmd={matched}")
             return
 
-    try:
-        safe_name = escape(user.full_name or str(user.id))
-        await context.bot.send_message(
-            chat_id=owner_id,
-            text=f'来自 <a href="tg://user?id={user.id}">{safe_name}</a> 的消息：',
-            parse_mode="HTML",
-        )
-        print(f"[private_forward] 已发送提示消息给主人 owner_id={owner_id}")
-    except Exception as e:
-        print(f"[private_forward] 提示消息发送失败，但继续转发正文: {e}")
-
-    try:
-        # 转发消息到管理员
-        sent = await safe_forward_media(context.bot, owner_id, update.message)
-        print(
-            f"[private_forward] 已转发给主人 owner_id={owner_id} "
-            f"owner_msg_id={getattr(sent, 'message_id', None)} uid={uid}"
-        )
-    except Exception as e:
-        print(f"❌ 转发消息失败: {e}")
+    # Owner always receives the message; delegated private-forward operators
+    # receive the same message and can reply to it independently.
+    recipient_ids = {int(owner_id), *get_delegated_admin_ids(context, "private_forward")}
+    forward_map = load_forward_map()
+    successful = 0
+    safe_name = escape(user.full_name or str(user.id))
+    for recipient_id in recipient_ids:
+        try:
+            await context.bot.send_message(
+                chat_id=recipient_id,
+                text=f'来自 <a href="tg://user?id={user.id}">{safe_name}</a> 的消息：',
+                parse_mode="HTML",
+            )
+            sent = await safe_forward_media(context.bot, recipient_id, update.message)
+            forward_map[_forward_map_key(recipient_id, sent.message_id)] = user.id
+            successful += 1
+        except Exception as exc:
+            print(f"[private_forward] 转发给管理员失败 admin_id={recipient_id}: {exc}")
+    if not successful:
         await safe_reply(update, context, "⚠️ 转发消息失败，请稍后重试。")
         return
-
-    # 记录原用户 ID 以供管理员回复时查找
-    forward_map = load_forward_map()
-    forward_map[str(sent.message_id)] = user.id
     save_forward_map(forward_map)
 
     users = user_data
@@ -545,10 +551,6 @@ async def forward_to_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     _save_user_data(users)
 
-    state = _get_owner_runtime_state(context)
-    state["enabled"] = True
-    state["current_uid"] = uid
-    state["page"] = 1
     try:
         # await show_private_dialog_panel_to_owner(
         #     context,
@@ -571,11 +573,12 @@ async def forward_to_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         )
 
-        await context.bot.send_message(
-            chat_id=owner_id,
-            text=f"📩 收到来自 {users[uid].get('name') or uid} 的新私聊",
-            reply_markup=keyboard,
-        )
+        for recipient_id in recipient_ids:
+            await context.bot.send_message(
+                chat_id=recipient_id,
+                text=f"📩 收到来自 {users[uid].get('name') or uid} 的新私聊",
+                reply_markup=keyboard,
+            )
     except Exception as e:
         print(f"[private_forward] 面板发送失败，但正文已转发: {e}")
 
@@ -584,7 +587,7 @@ async def forward_to_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # 管理员回复转发消息 → 自动回原用户
 async def reply_from_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != get_owner_id(context):
+    if not update.effective_user or not _can_manage_private_forward(context, update.effective_user.id):
         return
     
     msg = get_message(update)
@@ -604,7 +607,8 @@ async def reply_from_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reply_msg_id = update.message.reply_to_message.message_id
     forward_map = load_forward_map()
-    target_user_id = forward_map.get(str(reply_msg_id))
+    reply_chat_id = getattr(getattr(update, "effective_chat", None), "id", 0)
+    target_user_id = forward_map.get(_forward_map_key(reply_chat_id, reply_msg_id)) or forward_map.get(str(reply_msg_id))
 
     if not target_user_id:
         # await safe_reply(update, context,"找不到对应用户，可能消息过期或未记录。")
@@ -628,10 +632,11 @@ async def owner_auto_forward_in_dialog(
         (context.user_data or {}).get("waiting_post")
         or (context.user_data or {}).get("publish_reject_reason")
         or (context.user_data or {}).get("publish_keyword_label_input")
+        or (context.user_data or {}).get("delegated_admin_add_stage")
     ):
         return
 
-    if not update.effective_user or update.effective_user.id != get_owner_id(context):
+    if not update.effective_user or not _can_manage_private_forward(context, update.effective_user.id):
         return
     if not update.effective_chat or update.effective_chat.type != "private":
         return
@@ -670,8 +675,8 @@ async def owner_auto_forward_in_dialog(
 
 @register_command("双向模式", "私聊模式", "私聊面板")
 async def cmd_private_dialog_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != get_owner_id(context):
-        return await safe_reply(update, context, "⚠️ 仅管理员可用")
+    if not update.effective_user or not _can_manage_private_forward(context, update.effective_user.id):
+        return await safe_reply(update, context, "⚠️ 你没有私聊转发权限")
 
     user_data = _load_user_data()
     if not user_data:
@@ -696,8 +701,8 @@ async def handle_private_dialog_callback(
         return
 
     await query.answer()
-    if not update.effective_user or update.effective_user.id != get_owner_id(context):
-        return await query.edit_message_text("⚠️ 仅机器人所有者可操作该面板")
+    if not update.effective_user or not _can_manage_private_forward(context, update.effective_user.id):
+        return await query.edit_message_text("⚠️ 你没有私聊转发权限")
 
     if not update.effective_chat or update.effective_chat.type != "private":
         return await query.edit_message_text("⚠️ 请在私聊里使用该面板")
@@ -899,8 +904,8 @@ async def handle_private_dialog_callback(
 
 @register_command("广播")
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != get_owner_id(context) and not is_super_admin(update.effective_user.id):
-        return await safe_reply(update, context, "⚠️ 仅管理员可用")
+    if not update.effective_user or not _can_manage_private_forward(context, update.effective_user.id):
+        return await safe_reply(update, context, "⚠️ 你没有私聊转发权限")
 
     if not update.message.reply_to_message:
         return await safe_reply(update, context, "📌 请【回复】你要广播的内容")
@@ -919,8 +924,8 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @register_command("用户广播")
 async def cmd_user_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != get_owner_id(context):
-        return await safe_reply(update, context, "⚠️ 仅管理员可用")
+    if not update.effective_user or not _can_manage_private_forward(context, update.effective_user.id):
+        return await safe_reply(update, context, "⚠️ 你没有私聊转发权限")
 
     if not update.message.reply_to_message:
         return await safe_reply(update, context, "📌 请回复要发送的消息")
@@ -972,8 +977,8 @@ async def cmd_user_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 @register_command( "拉黑")
 async def cmd_blacklist_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != get_owner_id(context):
-        return await safe_reply(update, context, "⚠️ 仅管理员可用")
+    if not update.effective_user or not _can_manage_private_forward(context, update.effective_user.id):
+        return await safe_reply(update, context, "⚠️ 你没有私聊转发权限")
 
     uid = _resolve_target_uid(update, context)
     if not uid:
@@ -995,8 +1000,8 @@ async def cmd_blacklist_user(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 @register_command( "取消拉黑")
 async def cmd_unblacklist_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != get_owner_id(context):
-        return await safe_reply(update, context, "⚠️ 仅管理员可用")
+    if not update.effective_user or not _can_manage_private_forward(context, update.effective_user.id):
+        return await safe_reply(update, context, "⚠️ 你没有私聊转发权限")
 
     uid = _resolve_target_uid(update, context)
     if not uid:
@@ -1014,7 +1019,7 @@ async def cmd_unblacklist_user(update: Update, context: ContextTypes.DEFAULT_TYP
 
 @register_command("导出用户")
 async def cmd_export_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != get_owner_id(context):
+    if not update.effective_user or not _can_manage_private_forward(context, update.effective_user.id):
         return
 
     user_data = load_json(BOT_USER_FILE) or {}
@@ -1200,7 +1205,7 @@ def render_msg(m):
 
 @register_command("广播模式")
 async def cmd_broadcast_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != get_owner_id(context) and not is_super_admin(update.effective_user.id):
+    if not update.effective_user or not _can_manage_private_forward(context, update.effective_user.id):
         return
 
     args = context.args

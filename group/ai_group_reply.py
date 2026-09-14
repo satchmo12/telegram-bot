@@ -142,12 +142,6 @@ def can_reply(chat_id: int, settings: dict) -> bool:
         elapsed = now - last_time
         remaining = min_interval - elapsed
 
-        print(
-            f"[AI][CHECK] 群 {chat_id} "
-            f"距离上次回复 {elapsed:.1f}s，"
-            f"冷却要求 {min_interval}s"
-        )
-
         if elapsed < min_interval:
             print(
                 f"[AI][SKIP] 群 {chat_id} 还在冷却，"
@@ -170,7 +164,6 @@ def can_reply(chat_id: int, settings: dict) -> bool:
         )
         return False
 
-    print(f"[AI][CHECK] 群 {chat_id} 通过 can_reply()")
     return True
 
 
@@ -486,13 +479,7 @@ async def ai_group_reply_handler(
     # ========================================================
 
     ai_settings = get_ai_reply_settings(context, chat_id)
-    print(
-        f"[AI][CONFIG] 群 {chat_id} "
-        f"enabled={ai_settings['enabled']} "
-        f"probability={ai_settings['probability_percent']}% "
-        f"hourly_limit={ai_settings['max_replies_per_hour']} "
-        f"cooldown={ai_settings['min_interval_sec']}s"
-    )
+
     if not ai_settings["enabled"]:
         print(f"[AI][SKIP] 群 {chat_id} 没有开启 AI 接话")
         return
@@ -514,10 +501,6 @@ async def ai_group_reply_handler(
 
     raw_text = message.text
 
-    print(
-        f"[AI][MESSAGE] message_id={message.message_id} "
-        f"text={raw_text!r}"
-    )
 
     if not raw_text:
         print("[AI][SKIP] message.text 为空")
@@ -553,9 +536,7 @@ async def ai_group_reply_handler(
         text=text,
     )
 
-    print(
-        f"[AI][HISTORY] 已缓存消息：{text!r}"
-    )
+
 
     # ========================================================
     # 冷却检查
@@ -581,10 +562,7 @@ async def ai_group_reply_handler(
     random_value = random.random()
 
     reply_probability = ai_settings["probability_percent"] / 100
-    print(
-        f"[AI][PROBABILITY] random={random_value:.4f} "
-        f"threshold={reply_probability:.2f} ({ai_settings['probability_percent']}%)"
-    )
+
 
     if random_value > reply_probability:
         print(
@@ -593,9 +571,6 @@ async def ai_group_reply_handler(
         )
         return
 
-    print(
-        f"[AI][START] 开始处理群 {chat_id} 的 AI 回复"
-    )
 
     processing_chats.add(chat_id)
 
@@ -637,10 +612,6 @@ async def ai_group_reply_handler(
         # ----------------------------------------------------
         # 发送前再次检查冷却
         # ----------------------------------------------------
-
-        print(
-            "[AI][CHECK] 等待结束，发送前再次检查冷却"
-        )
 
         # AI 请求期间管理员可能关闭了功能或修改了限额，因此发送前重新读取群配置。
         send_settings = get_ai_reply_settings(context, chat_id)

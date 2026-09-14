@@ -1,4 +1,5 @@
 from customer.customer_qa import register_customer_qa_handlers
+from admin_permissions import register_admin_permission_handlers
 from customer.editUserInfo import register_customer_edit_handlers
 from forward.message_forward import register_message_forward_handlers
 from game.virus_game_handler import register_virus_handlers
@@ -12,6 +13,7 @@ from registries.group_registry import register_group_handlers
 from registries.simulation_registry import register_simulation_handlers
 
 def register_all_handlers(app):
+    register_admin_permission_handlers(app)
     register_multi_bot_manager_handlers(app)
     register_economy_handlers_group(app)
     register_entertainment_handlers(app)

@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Optional
 
 from command_router import register_command
+from admin_permissions import has_admin_permission
 from channel.access_control import is_channel_subscription_required
 from utils import (
     SHARED_SESSION_NAME,
@@ -225,25 +226,25 @@ def _is_session_owner(user, session_name: str) -> bool:
     )
 
 
-def _can_access_session(user, session_name: str) -> bool:
+def _can_access_session(context: ContextTypes.DEFAULT_TYPE, user, session_name: str) -> bool:
     if not user:
         return False
-    if is_super_admin(user.id):
+    if has_admin_permission(context, user.id, "telethon_manage"):
         return True
     if not is_channel_subscription_required():
         return _is_session_owner(user, session_name)
     return _is_active_subscription(user) and _is_session_owner(user, session_name)
 
 
-def _can_login(user) -> bool:
-    """Temporarily allow every Telegram user to start the protocol login flow."""
+def _can_login(context: ContextTypes.DEFAULT_TYPE, user) -> bool:
+    """Any user can start their own flow; channel admins can manage all sessions."""
     return bool(user)
 
 
-def _require_active_subscription(user) -> bool:
+def _require_active_subscription(context: ContextTypes.DEFAULT_TYPE, user) -> bool:
     if not user:
         return False
-    if is_super_admin(user.id):
+    if has_admin_permission(context, user.id, "telethon_manage"):
         return True
     if not is_channel_subscription_required():
         return True
@@ -303,7 +304,7 @@ def _list_session_names(context: ContextTypes.DEFAULT_TYPE, user=None) -> list[s
         if os.path.exists(main_path):
             names.add(SHARED_SESSION_NAME)
     names = sorted(names)
-    if not user or (user and is_super_admin(user.id)):
+    if not user or (user and has_admin_permission(context, user.id, "telethon_manage")):
         return names
     # 仅返回该用户自己添加的账号
     return [n for n in names if _is_session_owner(user, n)]
@@ -731,7 +732,7 @@ async def _handle_broadcast_message(
         sessions = [session_name] if session_name else []
 
     for session_name in sessions:
-        if not _can_access_session(user, session_name):
+        if not _can_access_session(context, user, session_name):
             continue
         if mode == "group":
             group_ids = [state.get("group_id")]
@@ -761,7 +762,7 @@ async def _handle_broadcast_message(
 
 
 async def _start_login_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _can_login(update.effective_user):
+    if not _can_login(context, update.effective_user):
         return await _plain_reply(update, context, "🚫 仅高级管理员或订阅会员可登录小号。")
 
     api_id, api_hash = _get_api_creds()
@@ -808,7 +809,7 @@ async def handle_telethon_login_text(update: Update, context: ContextTypes.DEFAU
         if not join_state and not broadcast_state:
             return False
 
-    if not _can_login(update.effective_user):
+    if not _can_login(context, update.effective_user):
         await _clear_login_state(uid, context)
         _JOIN_STATE.pop(uid, None)
         _BROADCAST_STATE.pop(uid, None)
@@ -868,11 +869,11 @@ async def handle_telethon_login_text(update: Update, context: ContextTypes.DEFAU
             _JOIN_STATE.pop(uid, None)
             await _plain_reply(update, context, "加群状态异常，请重新选择小号。")
             return True
-        if not _require_active_subscription(update.effective_user):
+        if not _require_active_subscription(context, update.effective_user):
             _JOIN_STATE.pop(uid, None)
             await _plain_reply(update, context, "🚫 订阅已到期，无法操作该账号。")
             return True
-        if not _can_access_session(update.effective_user, session_name):
+        if not _can_access_session(context, update.effective_user, session_name):
             _JOIN_STATE.pop(uid, None)
             await _plain_reply(update, context, "🚫 无权使用该账号。")
             return True
@@ -1288,7 +1289,7 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
 
     if action == "refresh":
         await _clear_login_state(uid, context)
-        if not _require_active_subscription(query.from_user):
+        if not _require_active_subscription(context, query.from_user):
             return await query.edit_message_text("🚫 订阅已到期，无法查看小号。")
         sessions = _list_session_names(context, query.from_user)
         if not sessions:
@@ -1328,9 +1329,9 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
         session_name = payload
         if not session_name:
             return await query.edit_message_text("账号无效。")
-        if not _require_active_subscription(query.from_user):
+        if not _require_active_subscription(context, query.from_user):
             return await query.edit_message_text("🚫 订阅已到期，无法查看小号。")
-        if not _can_access_session(query.from_user, session_name):
+        if not _can_access_session(context, query.from_user, session_name):
             return await query.edit_message_text("🚫 无权查看该账号。")
         label = _get_cached_session_label(session_name)
         keyboard = _build_account_menu_keyboard(session_name)
@@ -1348,9 +1349,9 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
         session_name = payload
         if not session_name:
             return await query.edit_message_text("账号无效。")
-        if not _require_active_subscription(query.from_user):
+        if not _require_active_subscription(context, query.from_user):
             return await query.edit_message_text("🚫 订阅已到期，无法群发。")
-        if not _can_access_session(query.from_user, session_name):
+        if not _can_access_session(context, query.from_user, session_name):
             return await query.edit_message_text("🚫 无权使用该账号群发。")
         _BROADCAST_STATE[uid] = {"mode": "session", "session": session_name}
         keyboard = InlineKeyboardMarkup(
@@ -1363,7 +1364,7 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
 
     if action == "broadcast_all":
         await _clear_login_state(uid, context)
-        if not _require_active_subscription(query.from_user):
+        if not _require_active_subscription(context, query.from_user):
             return await query.edit_message_text("🚫 订阅已到期，无法群发。")
         sessions = _list_session_names(context, query.from_user)
         if not sessions:
@@ -1388,9 +1389,9 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
             group_id = int(group_id_raw)
         except (TypeError, ValueError):
             return await query.edit_message_text("群组信息无效，请重新查看群组列表。")
-        if not _require_active_subscription(query.from_user):
+        if not _require_active_subscription(context, query.from_user):
             return await query.edit_message_text("🚫 订阅已到期，无法管理群组。")
-        if not _can_access_session(query.from_user, session_name):
+        if not _can_access_session(context, query.from_user, session_name):
             return await query.edit_message_text("🚫 无权管理该协议号的群组。")
         group = await _get_account_group(context, uid, session_name, group_id)
         if not group:
@@ -1419,9 +1420,9 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
             group_id = int(group_id_raw)
         except (TypeError, ValueError):
             return await query.edit_message_text("群组信息无效，请重新查看群组列表。")
-        if not _require_active_subscription(query.from_user):
+        if not _require_active_subscription(context, query.from_user):
             return await query.edit_message_text("🚫 订阅已到期，无法发送消息。")
-        if not _can_access_session(query.from_user, session_name):
+        if not _can_access_session(context, query.from_user, session_name):
             return await query.edit_message_text("🚫 无权使用该协议号发送消息。")
         groups = await _fetch_account_groups(context, session_name)
         if group_id not in {group.get("id") for group in groups}:
@@ -1469,7 +1470,7 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
             return await query.edit_message_text("账号无效。")
         if is_shared_session_name(session_name):
             return await query.edit_message_text("🚫 共享主协议号不能在这里删除。")
-        if not _can_access_session(query.from_user, session_name):
+        if not _can_access_session(context, query.from_user, session_name):
             return await query.edit_message_text("🚫 无权删除该协议号。")
         label = _get_cached_session_label(session_name)
         keyboard = InlineKeyboardMarkup(
@@ -1494,7 +1495,7 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
         session_name = payload
         if not session_name or is_shared_session_name(session_name):
             return await query.edit_message_text("🚫 该协议号不能删除。")
-        if not _can_access_session(query.from_user, session_name):
+        if not _can_access_session(context, query.from_user, session_name):
             return await query.edit_message_text("🚫 无权删除该协议号。")
         if not await _delete_session_files(context, session_name):
             return await query.edit_message_text("删除失败：未找到本地协议号文件。")
@@ -1515,9 +1516,9 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
         session_name = payload
         if not session_name:
             return await query.edit_message_text("账号无效。")
-        if not _require_active_subscription(query.from_user):
+        if not _require_active_subscription(context, query.from_user):
             return await query.edit_message_text("🚫 订阅已到期，无法查看小号。")
-        if not _can_access_session(query.from_user, session_name):
+        if not _can_access_session(context, query.from_user, session_name):
             return await query.edit_message_text("🚫 无权查看该账号。")
         channels = await _fetch_account_channels(context, session_name)
         if not channels:
@@ -1550,9 +1551,9 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
         session_name = payload
         if not session_name:
             return await query.edit_message_text("账号无效。")
-        if not _require_active_subscription(query.from_user):
+        if not _require_active_subscription(context, query.from_user):
             return await query.edit_message_text("🚫 订阅已到期，无法查看小号。")
-        if not _can_access_session(query.from_user, session_name):
+        if not _can_access_session(context, query.from_user, session_name):
             return await query.edit_message_text("🚫 无权查看该账号。")
         groups = await _fetch_account_groups(context, session_name)
         if not groups:
@@ -1571,9 +1572,9 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
             page = int(page_raw)
         except (TypeError, ValueError):
             return await query.edit_message_text("群组分页信息无效，请重新查看群组列表。")
-        if not _require_active_subscription(query.from_user):
+        if not _require_active_subscription(context, query.from_user):
             return await query.edit_message_text("🚫 订阅已到期，无法查看小号。")
-        if not _can_access_session(query.from_user, session_name):
+        if not _can_access_session(context, query.from_user, session_name):
             return await query.edit_message_text("🚫 无权查看该账号。")
         groups = _GROUP_LIST_CACHE.get((uid, session_name))
         if not groups:
@@ -1592,9 +1593,9 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
         session_name = payload
         if not session_name:
             return await query.edit_message_text("账号无效。")
-        if not _require_active_subscription(query.from_user):
+        if not _require_active_subscription(context, query.from_user):
             return await query.edit_message_text("🚫 订阅已到期，无法查看小号。")
-        if not _can_access_session(query.from_user, session_name):
+        if not _can_access_session(context, query.from_user, session_name):
             return await query.edit_message_text("🚫 无权查看该账号。")
         _JOIN_STATE[uid] = {"session": session_name}
         return await query.edit_message_text(
@@ -1605,9 +1606,9 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
     if action == "cfg_new":
         await _clear_login_state(uid, context)
         session_name = payload
-        if not _require_active_subscription(query.from_user):
+        if not _require_active_subscription(context, query.from_user):
             return await query.edit_message_text("🚫 订阅已到期，无法配置规则。")
-        if not _can_access_session(query.from_user, session_name):
+        if not _can_access_session(context, query.from_user, session_name):
             return await query.edit_message_text("🚫 无权查看该账号。")
         text, keyboard = start_channel_config_new(context, query.from_user, session_name=session_name)
         if not text:

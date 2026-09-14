@@ -12,6 +12,7 @@ from telegram.error import BadRequest, Forbidden
 
 from channel.channel_config import USER_MESSAGE_FILE
 from utils import BOT_USER_FILE, _can_manage, is_super_admin, load_json, save_json
+from admin_permissions import get_delegated_admin_ids, has_admin_permission
 
 PUBLISH_CONFIG_FILE = "config_data/publish_config.json"
 ANON_CHAT_FILE = "data/anon_chat.json"
@@ -421,11 +422,22 @@ async def _send_submission_for_review(
             message_id=submission["proof_message_id"],
         )
 
-    await context.bot.send_message(
-        chat_id=owner_id,
-        text=_review_prompt_text({**submission, "id": submission_id}),
-        reply_markup=_review_keyboard(submission_id),
-    )
+    # Send review work to the owner and every delegated reviewer. Each recipient
+    # gets independent controls; the persisted submission state prevents duplicate publishing.
+    reviewer_ids = {int(owner_id), *get_delegated_admin_ids(context, "submission_review")}
+    prompt = _review_prompt_text({**submission, "id": submission_id})
+    failures = []
+    for reviewer_id in reviewer_ids:
+        try:
+            await context.bot.send_message(
+                chat_id=reviewer_id,
+                text=prompt,
+                reply_markup=_review_keyboard(submission_id),
+            )
+        except Exception as exc:
+            failures.append(str(exc))
+    if len(failures) == len(reviewer_ids):
+        raise RuntimeError("所有审核管理员均无法接收审核通知，请先让管理员私聊机器人。")
 
 
 async def _finalize_rejection(
@@ -667,9 +679,8 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
     if len(parts) != 3 or not parts[2]:
         return await query.answer("审核数据无效。", show_alert=True)
 
-    owner_id = _owner_id(context)
-    if owner_id is None or query.from_user.id != owner_id:
-        return await query.answer("只有机器人所有者可以审核投稿。", show_alert=True)
+    if not has_admin_permission(context, query.from_user.id, "submission_review"):
+        return await query.answer("你没有稿件审核权限。", show_alert=True)
 
     action, submission_id = parts[1], parts[2]
     pending = _load_pending_submissions()
@@ -1110,6 +1121,14 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ),
         )
 
+    # All remaining actions below are publishing configuration actions.  Do not
+    # rely on the hidden start-menu button: callbacks can be forged manually.
+    public_actions = {"publish", "channel_message", "bottle_prev", "bottle_next", "accept_friend", "reject_friend", "back"}
+    if action not in public_actions and not has_admin_permission(
+        context, query.from_user.id, "submission_config"
+    ):
+        return await query.answer("你没有投稿配置权限。", show_alert=True)
+
     await query.answer()
     
     if action == "publishset":
@@ -1139,12 +1158,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     if action == "custom_buttons":
-        owner_id = _owner_id(context)
-        if not _can_manage(update, context):
-            return await query.answer(
-                "只有机器人所有者或超级管理员可以设置。",
-                show_alert=True
-            )
+        if not has_admin_permission(context, query.from_user.id, "submission_config"):
+            return await query.answer("你没有投稿配置权限。", show_alert=True)
         
         return await query.edit_message_text(
             _custom_user_buttons_text(config),
@@ -1152,12 +1167,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     if action == "custom_toggle":
-        owner_id = _owner_id(context)
-        if not _can_manage(update, context):
-            return await query.answer(
-                "只有机器人所有者或超级管理员可以设置。",
-                show_alert=True
-            )
+        if not has_admin_permission(context, query.from_user.id, "submission_config"):
+            return await query.answer("你没有投稿配置权限。", show_alert=True)
             
         key = query.data.split(":", 2)[2] if len(query.data.split(":", 2)) == 3 else ""
         if not key:
@@ -1904,7 +1915,10 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     owner_id = _owner_id(context)
-    is_owner_submission = msg.from_user.id == owner_id
+    is_owner_submission = bool(
+        msg.from_user.id == owner_id
+        or has_admin_permission(context, msg.from_user.id, "submission_config")
+    )
     comment_target = context.user_data.pop(COMMENT_TARGET_KEY, None)
     comment_target = comment_target if isinstance(comment_target, dict) else None
     comment_forward_enabled = bool(config.get("comment_forward_enabled", False))
@@ -1933,6 +1947,7 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
             "user_chat_id": msg.chat_id,
             "username": msg.from_user.username,
             "author": _submission_author_text(msg),
+            "preview": _message_preview(msg),
             "user_message_id": msg.message_id,
             "submitted_at": int(time.time()),
             "submission_kind": submission_kind,
@@ -1972,6 +1987,8 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
     submission = {
         "user_chat_id": msg.chat_id,
         "user_message_id": msg.message_id,
+        "author": _submission_author_short(msg),
+        "preview": _message_preview(msg),
         "keyword_entries": (
             _extract_routing_keywords(msg, config)
             if comment_forward_enabled and is_owner_submission and submission_kind == "main"
@@ -2073,6 +2090,11 @@ async def _handle_reject_reason_input(update: Update, context: ContextTypes.DEFA
     msg = update.message
     if not msg:
         return True
+    if not update.effective_user or not has_admin_permission(
+        context, update.effective_user.id, "submission_review"
+    ):
+        context.user_data.pop(REJECT_REASON_KEY, None)
+        return False
     if not msg.text:
         await msg.reply_text("❗ 请发送文字形式的拒绝原因，或发送“取消”。")
         return True
@@ -2375,8 +2397,14 @@ def register_publish_setting_handlers(app):
     # Linked discussion groups receive main-channel posts as automatic forwards.
     # Keep the correspondence so approved user comments can reply below the post.
     app.add_handler(
-        MessageHandler(filters.ChatType.GROUPS, _capture_comment_source_message),
-        group=10,
+        MessageHandler(
+            filters.ChatType.GROUPS
+            & (filters.UpdateType.MESSAGE | filters.UpdateType.EDITED_MESSAGE),
+            _capture_comment_source_message,
+        ),
+        # Must run before general group handlers that may stop processing an
+        # automatic forward. Runtime context is already bound in group -1000.
+        group=-940,
     )
     app.add_handler(
         MessageHandler(

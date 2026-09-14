@@ -9,6 +9,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from command_router import register_command
+from admin_permissions import has_admin_permission
 from channel.access_control import (
     is_channel_subscription_required,
     set_channel_subscription_required,
@@ -257,7 +258,7 @@ def _list_accessible_sessions(context: ContextTypes.DEFAULT_TYPE, user) -> list[
         if raw:
             names.append(raw)
     names = sorted(names)
-    if not user or is_super_admin(user.id):
+    if not user or has_admin_permission(context, user.id, "channel_config"):
         return [n for n in names if not is_shared_session_name(n)]
     return [n for n in names if _is_session_owner(user, n) and not is_shared_session_name(n)]
 
@@ -351,9 +352,23 @@ async def _channel_config_entry_core(
     *,
     config_file: Optional[str] = None,
 ):
-    context.user_data["channel_config_file"] = config_file or FORWARD_USER_CONFIG_FILE
-    if not _require_access(update):
-        return await _plain_reply(update, context, "🚫 仅高级管理员或订阅会员可使用该功能。")
+    selected_file = config_file or FORWARD_USER_CONFIG_FILE
+    # The bot-wide forwarding rules are an administrator capability. Personal
+    # subscriber rules retain their existing subscription-based access.
+    if selected_file == FORWARD_USER_CONFIG_BOT_FILE and not has_admin_permission(
+        context, update.effective_user.id if update.effective_user else 0, "bot_channel_config"
+    ):
+        return await _plain_reply(update, context, "🚫 你没有频道配置权限。")
+    context.user_data["channel_config_file"] = selected_file
+    selected_permission = (
+        "bot_channel_config"
+        if selected_file == FORWARD_USER_CONFIG_BOT_FILE
+        else "channel_config"
+    )
+    if not _require_access(update) and not has_admin_permission(
+        context, update.effective_user.id if update.effective_user else 0, selected_permission
+    ):
+        return await _plain_reply(update, context, "🚫 仅高级管理员、订阅会员或已授权管理员可使用该功能。")
 
     ok = await _ensure_private(update, context)
     if ok is not True:
@@ -1094,8 +1109,12 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
 
-    if not _require_access(update):
-        return await query.edit_message_text("🚫 仅高级管理员或订阅会员可使用该功能。")
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not _require_access(update) and not any(
+        has_admin_permission(context, user_id, permission)
+        for permission in ("channel_config", "bot_channel_config")
+    ):
+        return await query.edit_message_text("🚫 仅高级管理员、订阅会员或已授权频道管理员可使用该功能。")
 
     _record_bot_user(update.effective_user)
 
@@ -1128,6 +1147,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     if action == "bot":
+        if not has_admin_permission(context, user_id, "bot_channel_config"):
+            return await query.edit_message_text("🚫 你没有机器人频道配置权限。")
         context.user_data["channel_config_file"] = FORWARD_USER_CONFIG_BOT_FILE
         context.user_data.pop("channel_config_default_session", None)
         context.user_data.pop("channel_config_session_select", None)
