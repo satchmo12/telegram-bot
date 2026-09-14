@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from datetime import datetime
+import asyncio
 from urllib.parse import urlparse
 import os
 import random
@@ -7,10 +8,11 @@ import re
 import time
 import uuid
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, TypeHandler, filters
 from telegram.error import BadRequest, Forbidden
 
 from channel.channel_config import USER_MESSAGE_FILE
+from channel.discussion_mapping import resolve_discussion_message
 from utils import BOT_USER_FILE, _can_manage, is_super_admin, load_json, save_json
 from admin_permissions import get_delegated_admin_ids, has_admin_permission
 
@@ -468,41 +470,37 @@ async def _capture_comment_source_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    """Map a main-channel post to its linked discussion-group auto-forward."""
-    msg = update.message
-    if not msg or not getattr(msg, "is_automatic_forward", False):
+    """Capture linked-discussion copies when Telegram sends the Bot API update."""
+    msg = update.effective_message
+    if not msg:
         return
-
     sender_chat = getattr(msg, "sender_chat", None)
     origin = getattr(msg, "forward_origin", None)
     origin_chat = getattr(origin, "chat", None) if origin else None
-    source_channel_id = getattr(sender_chat, "id", None) or getattr(origin_chat, "id", None)
-    source_message_id = (
+    legacy_forward_chat = getattr(msg, "forward_from_chat", None)
+    channel_id = (
+        getattr(sender_chat, "id", None)
+        or getattr(origin_chat, "id", None)
+        or getattr(legacy_forward_chat, "id", None)
+    )
+    channel_message_id = (
         getattr(origin, "message_id", None)
         or getattr(msg, "forward_from_message_id", None)
     )
-    if source_channel_id is None or source_message_id is None:
+    if channel_id is None or channel_message_id is None:
         return
-
     config = load_publish_config()
-    if not bool(config.get("comment_forward_enabled", False)):
+    if not bool(config.get("comment_forward_enabled", False)) or str(channel_id) != str(config.get("channel_id")):
         return
-    if str(source_channel_id) != str(config.get("channel_id")):
-        return
-
     records = _load_comment_map()
-    records[_comment_map_key(source_channel_id, source_message_id)] = {
+    records[_comment_map_key(channel_id, channel_message_id)] = {
         "discussion_chat_id": msg.chat_id,
         "discussion_message_id": msg.message_id,
         "created_at": int(time.time()),
     }
     _save_comment_map(records)
-    _update_keyword_comment_mapping(
-        source_channel_id,
-        source_message_id,
-        msg.chat_id,
-        msg.message_id,
-    )
+    _update_keyword_comment_mapping(channel_id, channel_message_id, msg.chat_id, msg.message_id)
+    print(f"✅ 已通过 Bot API 写入 discussion 映射 {channel_id}/{channel_message_id} -> {msg.chat_id}/{msg.message_id}")
 
 
 async def _start_comment_submission(query, context: ContextTypes.DEFAULT_TYPE, config: dict):
@@ -600,6 +598,47 @@ async def handle_comment_start_parameter(
     return True
 
 
+async def _resolve_discussion_mapping_in_background(
+    context: ContextTypes.DEFAULT_TYPE, channel_id: int, message_id: int
+) -> None:
+    """Give Bot API a short chance, then use Telethon only as a fallback."""
+    await asyncio.sleep(1.5)
+    key = _comment_map_key(channel_id, message_id)
+    if _load_comment_map().get(key):
+        return
+    mapping = await resolve_discussion_message(context, channel_id, message_id)
+    if not mapping:
+        return
+    discussion_chat_id, discussion_message_id = mapping
+    records = _load_comment_map()
+    records[key] = {
+        "discussion_chat_id": discussion_chat_id,
+        "discussion_message_id": discussion_message_id,
+        "created_at": int(time.time()),
+    }
+    _save_comment_map(records)
+    _update_keyword_comment_mapping(
+        channel_id, message_id, discussion_chat_id, discussion_message_id
+    )
+    print(
+        "✅ 已通过协议号补齐 discussion 映射 "
+        f"{channel_id}/{message_id} -> {discussion_chat_id}/{discussion_message_id}"
+    )
+
+
+def _schedule_discussion_mapping(
+    context: ContextTypes.DEFAULT_TYPE, channel_id, message_id
+) -> None:
+    try:
+        channel_id, message_id = int(channel_id), int(message_id)
+    except (TypeError, ValueError):
+        return
+    context.application.create_task(
+        _resolve_discussion_mapping_in_background(context, channel_id, message_id),
+        name=f"discussion-map:{channel_id}:{message_id}",
+    )
+
+
 async def _copy_submission_to_channel(
     context: ContextTypes.DEFAULT_TYPE,
     submission: dict,
@@ -624,6 +663,10 @@ async def _copy_submission_to_channel(
             published.message_id,
         )
     if add_comment_button:
+        # Publishing must stay fast. Bot API mapping is immediate when its
+        # automatic-forward update arrives; otherwise the protocol lookup runs
+        # in the background and never blocks the success response.
+        _schedule_discussion_mapping(context, target_channel_id, published.message_id)
         # 暂时停用“参与讨论请点击下方按钮”辅助消息及其评论按钮。
         # 主频道正文保持无 InlineKeyboard，避免影响 Telegram 原生评论显示。
         pass
@@ -1947,7 +1990,6 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
             "user_chat_id": msg.chat_id,
             "username": msg.from_user.username,
             "author": _submission_author_text(msg),
-            "preview": _message_preview(msg),
             "user_message_id": msg.message_id,
             "submitted_at": int(time.time()),
             "submission_kind": submission_kind,
@@ -1987,8 +2029,6 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
     submission = {
         "user_chat_id": msg.chat_id,
         "user_message_id": msg.message_id,
-        "author": _submission_author_short(msg),
-        "preview": _message_preview(msg),
         "keyword_entries": (
             _extract_routing_keywords(msg, config)
             if comment_forward_enabled and is_owner_submission and submission_kind == "main"
@@ -2396,14 +2436,13 @@ def register_publish_setting_handlers(app):
     app.add_handler(CallbackQueryHandler(_handle_callback, pattern=r"^publish:.+"))
     # Linked discussion groups receive main-channel posts as automatic forwards.
     # Keep the correspondence so approved user comments can reply below the post.
+    # Use TypeHandler instead of MessageHandler: Telegram can deliver a linked
+    # discussion copy as message, edited_message, channel_post or
+    # edited_channel_post. MessageHandler filters may skip one of those shapes.
+    # The callback returns immediately for all unrelated updates.
     app.add_handler(
-        MessageHandler(
-            filters.ChatType.GROUPS
-            & (filters.UpdateType.MESSAGE | filters.UpdateType.EDITED_MESSAGE),
-            _capture_comment_source_message,
-        ),
-        # Must run before general group handlers that may stop processing an
-        # automatic forward. Runtime context is already bound in group -1000.
+        TypeHandler(Update, _capture_comment_source_message),
+        # Must run before generic group handlers that may stop processing.
         group=-940,
     )
     app.add_handler(

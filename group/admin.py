@@ -360,38 +360,40 @@ async def unmute_user_by_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_reply(update, context, f"❌ 操作失败：{e}")
 
 @group_enabled_only
-@register_command("删除")
+@register_command("删除", "撤广告")
 async def delete_replied_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
+    """Delete a replied message; 「撤广告」is the ad-moderation alias."""
+    if not update.message or not update.effective_chat:
         return
     if not await is_admin(update, context):
-        return
+        return await safe_reply(update, context, "🚫 仅群管理员可以删除广告消息。")
     if not update.message.reply_to_message:
-        return
-        return await safe_reply(update, context, "⚠️ 请回复要删除的那条消息。")
+        return await safe_reply(update, context, "⚠️ 请回复需要撤除的广告消息后发送“撤广告”。")
 
-    # 机器人需要有删除消息权限
     try:
         bot_member = await context.bot.get_chat_member(
             update.effective_chat.id, context.bot.id
         )
-        can_delete = bool(getattr(bot_member, "can_delete_messages", False))
-        if not can_delete:
-            return
+        if not bool(getattr(bot_member, "can_delete_messages", False)):
             return await safe_reply(
-                update, context, "⚠️ 我没有删除消息权限，请给机器人管理员的“删除消息”权限。"
+                update, context, "⚠️ 机器人没有“删除消息”管理员权限，无法撤广告。"
             )
-    except Exception:
-        return await safe_reply(update, context, "⚠️ 无法获取机器人权限信息。")
+    except Exception as exc:
+        return await safe_reply(update, context, f"⚠️ 无法确认机器人删除权限：{exc}")
 
     try:
         await context.bot.delete_message(
             chat_id=update.effective_chat.id,
             message_id=update.message.reply_to_message.message_id,
         )
-        # await safe_reply(update, context, "✅ 已删除该消息。")
-    except Exception as e:
-        await safe_reply(update, context, f"❌ 删除失败：{e}")
+        # Also remove the command itself when Telegram allows it, keeping the
+        # group clean without turning a successful deletion into a failure.
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+    except Exception as exc:
+        return await safe_reply(update, context, f"❌ 撤广告失败：{exc}")
 
 
 @group_enabled_only
