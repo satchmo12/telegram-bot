@@ -98,10 +98,6 @@ async def _process_new_members(
     if not members:
         return
 
-    print(
-        f"[入群事件] source={source} chat={chat_id} "
-        f"members={','.join(str(member.id) for member in members)}"
-    )
     group_config = get_group_whitelist(context).get(chat_id, {})
     welcome_msg_template = str(
         group_config.get("welcome_message") or "欢迎 {name} 🎉"

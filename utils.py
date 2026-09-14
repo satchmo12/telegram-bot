@@ -603,6 +603,41 @@ def is_super_admin(user_id):
     return int(user_id) in SUPER_ADMINS
 
 
+def _owner_id(context: ContextTypes.DEFAULT_TYPE):
+    """Read the owner from this app instead of a process-global multi-bot value."""
+    try:
+        return int(context.application.bot_data.get("owner_id"))
+    except (TypeError, ValueError):
+        return None
+    
+# 判断是否可以操作
+def _can_manage(update, context) -> bool:
+    """判断当前用户是否有机器人管理权限"""
+    user = update.effective_user
+    if not user:
+        return False
+
+    user_id = user.id
+    owner_id = _owner_id(context)
+
+    try:
+        owner_id = int(owner_id)
+    except (TypeError, ValueError):
+        owner_id = None
+
+    # 机器人所有者
+    if owner_id is not None and user_id == owner_id:
+        return True
+
+    # 超级管理员
+    if is_super_admin(user_id):
+        return True
+    
+    # 机器人所有者设置的管理员
+    
+
+    return False
+
 def is_bot_owner(user_id):
     return int(user_id) == get_runtime_owner_id()
 

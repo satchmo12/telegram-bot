@@ -22,5 +22,13 @@
         "艺名",
         "联系"
     ],
-    "continuous_submission_enabled": false
+    "continuous_submission_enabled": false,
+    "custom_bot_button_visible": true,
+    "custom_menu_buttons": {
+        "channel_clone": false,
+        "telethon_manage": false,
+        "bot_channel_config": false,
+        "group_config": false,
+        "global_ad_config": false
+    }
 }

@@ -11,7 +11,7 @@ from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, fil
 from telegram.error import BadRequest, Forbidden
 
 from channel.channel_config import USER_MESSAGE_FILE
-from utils import BOT_USER_FILE, load_json, save_json
+from utils import BOT_USER_FILE, _can_manage, is_super_admin, load_json, save_json
 
 PUBLISH_CONFIG_FILE = "config_data/publish_config.json"
 ANON_CHAT_FILE = "data/anon_chat.json"
@@ -58,6 +58,14 @@ def load_publish_config():
         "keyword_extract_labels": [],
         # Preserve the existing behavior: one 投稿 action can send multiple posts.
         "continuous_submission_enabled": True,
+        # Visibility of normal start-panel buttons controlled by the owner.
+        "custom_menu_buttons": {
+            "channel_clone": True,
+            "telethon_manage": True,
+            "bot_channel_config": True,
+            "group_config": True,
+            "global_ad_config": True,
+        },
         "submission_enabled": False,
         "random_view_enabled": False,
     }
@@ -71,7 +79,7 @@ def load_publish_config():
     changed = False
     for key, value in default.items():
         if key not in data:
-            data[key] = value.copy() if isinstance(value, list) else value
+            data[key] = value.copy() if isinstance(value, (list, dict)) else value
             changed = True
     if changed:
         save_json(PUBLISH_CONFIG_FILE, data)
@@ -162,7 +170,7 @@ def _extract_routing_keywords(msg, config: dict) -> list[dict]:
     result = []
     for label in _keyword_labels(config):
         pattern = re.compile(
-            rf"[【\[]\s*{re.escape(label)}\s*[】\]]\s*[：:]?\s*([^\n\r]+)",
+            rf"{re.escape(label)}[：:]?\s*([^\n\r]+)",
             re.IGNORECASE,
         )
         for match in pattern.finditer(text):
@@ -251,6 +259,35 @@ def _find_keyword_routes(query: str) -> list[dict]:
                 matches.append({**record, "key": stored_key})
     matches.sort(key=lambda item: int(item.get("created_at", 0) or 0), reverse=True)
     return matches[:10]
+
+
+def _fallback_channel_message_link(channel_id, message_id):
+    channel = str(channel_id or "")
+    if channel.startswith("-100") and str(message_id).isdigit():
+        return f"https://t.me/c/{channel[4:]}/{message_id}"
+    return None
+
+
+async def _route_message_link(context: ContextTypes.DEFAULT_TYPE, route: dict):
+    """Build a public link when possible, otherwise use Telegram's private link."""
+    channel_id = route.get("channel_id")
+    message_id = route.get("channel_message_id")
+    try:
+        chat = await context.bot.get_chat(channel_id)
+        username = str(getattr(chat, "username", "") or "").strip().lstrip("@")
+        if username and message_id:
+            return f"https://t.me/{username}/{message_id}"
+    except Exception:
+        pass
+    return _fallback_channel_message_link(channel_id, message_id)
+
+
+def _keyword_route_keyboard(route: dict, link: str, enabled: bool):
+    rows = []
+    if link:
+        rows.append([InlineKeyboardButton("🔗 查看对应消息", url=link)])
+    rows.extend(create_post_keyboard(enabled).inline_keyboard)
+    return InlineKeyboardMarkup(rows)
 
 
 def _keyword_settings_text(config: dict) -> str:
@@ -865,12 +902,71 @@ def _clear_button_input(context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("publish_button_input", None)
 
 
+CUSTOM_USER_MENU_OPTIONS = (
+    ("submission", "📝 我要投稿"),
+    ("random_view", "🎲 随机查看"),
+    ("channel_clone", "📣 克隆频道"),
+    ("telethon_manage", "📱 管理协议号"),
+    ("bot_channel_config", "📣 机器人配置"),
+    ("group_config", "👥 群配置"),
+    ("global_ad_config", "📢 全群广告配置"),
+)
+
+
+def _custom_button_visible(config: dict, key: str) -> bool:
+    if key == "submission":
+        return bool(config.get("submission_enabled", True))
+    if key == "random_view":
+        return bool(config.get("random_view_enabled", True))
+    values = config.get("custom_menu_buttons", {})
+    return bool(values.get(key, True)) if isinstance(values, dict) else True
+
+
+def _set_custom_button_visible(config: dict, key: str, visible: bool) -> bool:
+    if key == "submission":
+        config["submission_enabled"] = visible
+        return True
+    if key == "random_view":
+        config["random_view_enabled"] = visible
+        return True
+    if key not in {item[0] for item in CUSTOM_USER_MENU_OPTIONS}:
+        return False
+    values = config.get("custom_menu_buttons")
+    if not isinstance(values, dict):
+        values = {}
+        config["custom_menu_buttons"] = values
+    values[key] = visible
+    return True
+
+
+def _custom_user_buttons_text(config: dict) -> str:
+    lines = [
+        "🧩 用户按钮显示设置",
+        "",
+        "以下规则只限制普通用户；机器人所有者和高级管理员始终显示全部按钮：",
+    ]
+    for key, label in CUSTOM_USER_MENU_OPTIONS:
+        lines.append(f"{'✅' if _custom_button_visible(config, key) else '🚫'} {label}")
+    return "\n".join(lines)
+
+
+def _custom_user_buttons_keyboard(config: dict):
+    rows = []
+    for key, label in CUSTOM_USER_MENU_OPTIONS:
+        rows.append([
+            InlineKeyboardButton(
+                f"{'✅' if _custom_button_visible(config, key) else '🚫'} {label}",
+                callback_data=f"publish:custom_toggle:{key}",
+            )
+        ])
+    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
+    return InlineKeyboardMarkup(rows)
+
+
 # =========================
 # 键盘
 # =========================
 def publish_setting_keyboard(config: dict):
-    submission_enabled = bool(config.get("submission_enabled", True))
-    random_view_enabled = bool(config.get("random_view_enabled", True))
     bottom_buttons_enabled = bool(config.get("bottom_buttons_enabled", True))
     proof_required = bool(config.get("proof_required", False))
     reject_reason_required = bool(config.get("reject_reason_required", False))
@@ -907,16 +1003,6 @@ def publish_setting_keyboard(config: dict):
             InlineKeyboardButton(
                 "📨 转发频道",
                 callback_data="publish:forward_channel",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                f"{'✅' if submission_enabled else '🚫'} 投稿开关",
-                callback_data="publish:toggle_submission",
-            ),
-            InlineKeyboardButton(
-                f"{'✅' if random_view_enabled else '🚫'} 随机查看开关",
-                callback_data="publish:toggle_random_view",
             ),
         ],
         [
@@ -1012,11 +1098,16 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "message_id": route["channel_message_id"],
         }
         context.user_data["waiting_post"] = True
+        link = await _route_message_link(context, route)
         await query.answer()
         return await query.edit_message_text(
             f"✅ 已选择 {route.get('label', '关键词')}：{route.get('raw', route.get('key'))}。\n"
             "请发送投稿内容，审核通过后会评论到对应帖子下，并发布到转发频道。",
-            reply_markup=create_post_keyboard(context.user_data.get("post_no_name", True)),
+            reply_markup=_keyword_route_keyboard(
+                route,
+                link,
+                context.user_data.get("post_no_name", True),
+            ),
         )
 
     await query.answer()
@@ -1045,6 +1136,39 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.edit_message_text(
             f"连续投稿已{'开启' if config['continuous_submission_enabled'] else '关闭'}。\n{mode_text}",
             reply_markup=publish_setting_keyboard(config),
+        )
+
+    if action == "custom_buttons":
+        owner_id = _owner_id(context)
+        if not _can_manage(update, context):
+            return await query.answer(
+                "只有机器人所有者或超级管理员可以设置。",
+                show_alert=True
+            )
+        
+        return await query.edit_message_text(
+            _custom_user_buttons_text(config),
+            reply_markup=_custom_user_buttons_keyboard(config),
+        )
+
+    if action == "custom_toggle":
+        owner_id = _owner_id(context)
+        if not _can_manage(update, context):
+            return await query.answer(
+                "只有机器人所有者或超级管理员可以设置。",
+                show_alert=True
+            )
+            
+        key = query.data.split(":", 2)[2] if len(query.data.split(":", 2)) == 3 else ""
+        if not key:
+            return await query.answer("按钮配置无效。", show_alert=True)
+        current = _custom_button_visible(config, key)
+        if not _set_custom_button_visible(config, key, not current):
+            return await query.answer("按钮配置无效。", show_alert=True)
+        save_publish_config(config)
+        return await query.edit_message_text(
+            _custom_user_buttons_text(config),
+            reply_markup=_custom_user_buttons_keyboard(config),
         )
 
     if action == "toggle_random_view":
@@ -1913,10 +2037,15 @@ async def _handle_keyword_search_input(update: Update, context: ContextTypes.DEF
             "message_id": route["channel_message_id"],
         }
         context.user_data["waiting_post"] = True
+        link = await _route_message_link(context, route)
         return await msg.reply_text(
             f"✅ 已匹配 {route.get('label', '关键词')}：{route.get('raw', route.get('key'))}。\n"
             "请继续发送投稿内容，审核通过后会评论到对应帖子下，并发布到转发频道。",
-            reply_markup=create_post_keyboard(context.user_data.get("post_no_name", True)),
+            reply_markup=_keyword_route_keyboard(
+                route,
+                link,
+                context.user_data.get("post_no_name", True),
+            ),
         )
 
     context.user_data[KEYWORD_RESULTS_KEY] = routes
@@ -1926,10 +2055,13 @@ async def _handle_keyword_search_input(update: Update, context: ContextTypes.DEF
         value = str(route.get("raw", route.get("key", "")))[:30]
         rows.append([
             InlineKeyboardButton(
-                f"{label}：{value}",
+                f"选择 {label}：{value}",
                 callback_data=f"publish:keyword_pick:{index}",
             )
         ])
+        link = await _route_message_link(context, route)
+        if link:
+            rows.append([InlineKeyboardButton(f"🔗 查看 {value}", url=link)])
     return await msg.reply_text("找到多个对应帖子，请选择：", reply_markup=InlineKeyboardMarkup(rows))
 
 

@@ -11,5 +11,7 @@
     "proof_required": false,
     "reject_reason_required": false,
     "comment_forward_enabled": false,
-    "forward_channel_id": null
+    "forward_channel_id": null,
+    "keyword_extract_labels": [],
+    "continuous_submission_enabled": true
 }

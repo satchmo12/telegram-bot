@@ -5,11 +5,23 @@
     "ads_enabled": false,
     "ads": [],
     "buttons": [],
-    "bottom_buttons_enabled": false,
+    "bottom_buttons_enabled": true,
     "submission_enabled": true,
     "random_view_enabled": false,
     "proof_required": true,
     "reject_reason_required": true,
     "comment_forward_enabled": true,
-    "forward_channel_id": -1004406338659
+    "forward_channel_id": -1004406338659,
+    "keyword_extract_labels": [
+        "艺名",
+        "联系"
+    ],
+    "continuous_submission_enabled": false,
+    "custom_menu_buttons": {
+        "channel_clone": false,
+        "telethon_manage": false,
+        "bot_channel_config": false,
+        "group_config": false,
+        "global_ad_config": false
+    }
 }

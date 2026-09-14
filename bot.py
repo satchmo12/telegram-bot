@@ -593,6 +593,19 @@ def _build_start_panel_rows(
     enabled = context.application.bot_data.get("enabled_features") or set(ALL_FEATURES)
     bot_name = str(context.application.bot_data.get("name", "")).strip()
     owner_id = int(context.application.bot_data.get("owner_id", DEFAULT_OWNER_ID))
+    publish_config = load_publish_config()
+    custom_menu_buttons = publish_config.get("custom_menu_buttons", {})
+    if not isinstance(custom_menu_buttons, dict):
+        custom_menu_buttons = {}
+    is_bot_admin_viewer = bool(
+        user_id and (int(user_id) == owner_id or is_super_admin(int(user_id)))
+    )
+
+    def show_custom_button(key: str) -> bool:
+        # Visibility settings apply only to ordinary users. The bot owner and
+        # super administrators always retain every management entry.
+        return is_bot_admin_viewer or bool(custom_menu_buttons.get(key, True))
+
     rows: list[list[InlineKeyboardButton]] = []
     if bot_name == MASTER_BOT_NAME:
         rows.append(
@@ -602,7 +615,7 @@ def _build_start_panel_rows(
             ]
         )
         
-    if user_id and int(user_id) == owner_id:
+    if user_id and int(user_id) == owner_id or is_super_admin(int(user_id)):
         owner_row = []
         # 私聊面板依赖 private_forward 的消息和回调处理器；未开启时不显示，
         # 避免克隆机器人出现“按钮可点但没有反应”的假入口。
@@ -615,36 +628,51 @@ def _build_start_panel_rows(
                 InlineKeyboardButton("⚙️投稿配置", callback_data="publish:publishset"),
             ]
         )
+        # 用户按钮展示设置放在最外层，只向当前机器人所有者显示。
+        owner_row.append(
+            InlineKeyboardButton(
+                "🧩自定义按钮",
+                callback_data="publish:custom_buttons",
+            )
+        )
+        
+        # owner_row.append(
+        #         InlineKeyboardButton(
+        #             "🧩多管理员",
+        #             callback_data="publish:custom_buttons",
+        #         )
+        #     )
+        
         rows.append(owner_row)
    
     if "channel" in enabled:
-        rows.append(
-            [
-                InlineKeyboardButton("📣克隆频道", callback_data="chcfg:back"),
-                InlineKeyboardButton("📱管理协议号(可群发)", callback_data="tlogin:list"),
-                InlineKeyboardButton("📣机器人频道配置", callback_data="chcfg:bot")
-            ]
-        )
+        channel_row = []
+        if show_custom_button("channel_clone"):
+            channel_row.append(InlineKeyboardButton("📣克隆频道", callback_data="chcfg:back"))
+        if show_custom_button("telethon_manage"):
+            channel_row.append(InlineKeyboardButton("📱管理协议号(可群发)", callback_data="tlogin:list"))
+        if show_custom_button("bot_channel_config"):
+            channel_row.append(InlineKeyboardButton("📣机器人频道配置", callback_data="chcfg:bot"))
+        if channel_row:
+            rows.append(channel_row)
         
     if "group" in enabled:
-        owner_row = []
-        owner_row.extend(
-            [
-                InlineKeyboardButton("👥群配置", callback_data="gcfg:list"),
-                InlineKeyboardButton("📢全群广告推送", callback_data="gcfg:global_ad_menu"),
-            ]
-        )
-        rows.append(owner_row)
+        group_row = []
+        if show_custom_button("group_config"):
+            group_row.append(InlineKeyboardButton("👥群配置", callback_data="gcfg:list"))
+        if show_custom_button("global_ad_config"):
+            group_row.append(InlineKeyboardButton("📢全群广告推送", callback_data="gcfg:global_ad_menu"))
+        if group_row:
+            rows.append(group_row)
         
     # 投稿配置控制公共入口的显示；旧配置会在 load_publish_config 中自动
     # 补齐开关字段，并默认保持此前两个按钮都显示的行为。
-    publish_config = load_publish_config()
     resource_row = []
-    if bool(publish_config.get("submission_enabled", True)):
+    if is_bot_admin_viewer or bool(publish_config.get("submission_enabled", True)):
         resource_row.append(
             InlineKeyboardButton("我要投稿", callback_data="publish:publish")
         )
-    if bool(publish_config.get("random_view_enabled", True)):
+    if is_bot_admin_viewer or bool(publish_config.get("random_view_enabled", True)):
         resource_row.append(
             InlineKeyboardButton("随机查看", callback_data="publish:channel_message")
         )
@@ -655,6 +683,11 @@ def _build_start_panel_rows(
 
 def _build_start_welcome_text(bot_name: str) -> str:
     safe_name = html.escape(str(bot_name or "机器人"))
+    
+    
+    # welcome_message = get_config("start_welcome_message")
+
+
     if str(bot_name or "").strip() == MASTER_BOT_NAME:
         return f"👏 欢迎使用 {safe_name}\n 能帮你便捷安全地管理频道和群组，是TG上领先的管理的机器人之一\n➡️请赋予我频道/群组管理员权限！"
     # "用户名出售 @woaini555  @e6web @fj618 @iabc6 @iabc7 @chihe2 @bcifa @bcifb @bciff\n"
@@ -665,6 +698,7 @@ def _build_start_welcome_text(bot_name: str) -> str:
         )
     else:
         master_label = html.escape(MASTER_BOT_NAME)
+        
     return f"👏欢迎使用 {safe_name} 克隆自 {master_label}\n 能帮你便捷安全地管理频道和群组，是TG上领先的管理的机器人之一\n➡️请赋予我频道/群组管理员权限！"
 
 
@@ -847,12 +881,13 @@ async def set_bot_commands(app):
 
     # 普通用户命令：只显示当前机器人确实启用的功能
     commands.append(BotCommand("start", "功能简介"))
-    commands.append(BotCommand("help", "命令帮助"))
-    if "group" in enabled:
-        commands.append(BotCommand("group", "群设置"))
+    
+    # commands.append(BotCommand("help", "命令帮助"))
+    # if "group" in enabled:
+    #     commands.append(BotCommand("group", "群设置"))
 
-    if "channel" in enabled:
-        commands.append(BotCommand("channel_config", "频道设置"))
+    # if "channel" in enabled:
+    #     commands.append(BotCommand("channel_config", "频道设置"))
     # if "game_hub" in enabled:
     #     commands.append(BotCommand("start_menu", "游戏菜单"))
     await app.bot.set_my_commands(commands)
@@ -1005,89 +1040,6 @@ async def post_init_setup(app):
 
 
 configure_runtime_hooks(create_app, post_init_setup)
-
-
-async def guest_bot_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-    # --------------------------------------------------------
-    # 获取 Guest Message
-    # --------------------------------------------------------
-
-    guest_message = (
-        update.api_kwargs or {}
-    ).get("guest_message")
-
-    if not guest_message:
-        print("ℹ️ 不是 Guest Message，忽略", flush=True)
-        return
-
-    # --------------------------------------------------------
-    # 获取 query_id
-    # --------------------------------------------------------
-
-    query_id = guest_message.get(
-        "guest_query_id"
-    )
-
-    if not query_id:
-        print("❌ Guest Message 没有 guest_query_id", flush=True)
-        return
-
-    # --------------------------------------------------------
-    # 获取用户信息
-    # --------------------------------------------------------
-
-    user = guest_message.get("from", {})
-
-    user_id = user.get("id")
-    username = user.get("username")
-    first_name = user.get("first_name") or "用户"
-
-    text = guest_message.get("text") or ""
-
-    chat = guest_message.get("chat", {})
-
-
-    # --------------------------------------------------------
-    # 回复内容
-    # --------------------------------------------------------
-
-    reply_text = (
-        f"🤖 你好，{first_name}！\n\n"
-         f"我是 {text}。\n"
-        "这里是测试数据。"
-    )
-
-    # --------------------------------------------------------
-    # Guest Bot 回复
-    # --------------------------------------------------------
-
-    # try:
-
-    #     await send_guest_reply(
-    #         query_id=query_id,
-    #         text=reply_text,
-    #     )
-
-    # except Exception as e:
-
-    #     print(
-    #         "\n❌ Guest Bot 回复失败",
-    #         flush=True,
-    #     )
-
-    #     print(
-    #         f"   类型: {type(e).__name__}",
-    #         flush=True,
-    #     )
-
-    #     print(
-    #         f"   错误: {e}",
-    #         flush=True,
-    #     )
-
 
 
 async def main():
