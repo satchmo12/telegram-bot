@@ -454,7 +454,6 @@ async def ai_group_reply_handler(
 
 
     if not message or not chat:
-        print("[AI][SKIP] 没有 message 或 chat")
         return
 
 
@@ -489,10 +488,6 @@ async def ai_group_reply_handler(
     # ========================================================
 
     if user and user.is_bot:
-        print(
-            f"[AI][SKIP] 发送者是机器人："
-            f"{user.id} @{user.username}"
-        )
         return
 
     # ========================================================
@@ -503,25 +498,17 @@ async def ai_group_reply_handler(
 
 
     if not raw_text:
-        print("[AI][SKIP] message.text 为空")
         return
 
     text_value = raw_text.strip()
 
     if not text_value:
-        print("[AI][SKIP] 消息去掉空格后为空")
         return
 
     if text_value.startswith("/"):
-        print(
-            f"[AI][SKIP] Telegram 命令：{text_value}"
-        )
         return
 
     if len(text_value) > 500:
-        print(
-            f"[AI][SKIP] 消息长度 {len(text_value)} > 500"
-        )
         return
 
     text = text_value
@@ -565,10 +552,6 @@ async def ai_group_reply_handler(
 
 
     if random_value > reply_probability:
-        print(
-            f"[AI][SKIP] 概率未命中："
-            f"{random_value:.4f} > {reply_probability:.2f}"
-        )
         return
 
 

@@ -6,13 +6,12 @@ import random
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, User
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 from command_router import FEATURE_FRIENDS, feature_required, register_command
-from info.economy import ensure_user_exists
+from info.economy import ensure_user_exists, get_user_data
 from telegram.helpers import mention_html
 from datetime import datetime
 from utils import (
     ACTIONS_FILE,
     COOLDOWN_FILE,
-    INFO_FILE,
     group_allowed,
     is_super_admin,
     safe_reply,
@@ -256,8 +255,7 @@ async def apply_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     ensure_user_exists(chat_id, user_id, buyer.full_name)
 
-    userData = load_json(INFO_FILE)
-    user_info = userData.get(chat_id, {}).get("users", {}).get(user_id)
+    user_info = get_user_data(chat_id, user_id)
 
     result = apply_action_effects(chat_id, user_id, user_info, text, target_id)
     if result:

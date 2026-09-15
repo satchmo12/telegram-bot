@@ -6,7 +6,8 @@ from telegram.ext import CommandHandler, ContextTypes
 from telegram.helpers import mention_html
 
 from command_router import FEATURE_FRIENDS, feature_required, register_command
-from utils import INFO_FILE, load_json, save_json, group_allowed, safe_reply
+from utils import group_allowed, safe_reply
+from info.storage import iter_group_infos, load_group_info, save_group_info
 from info.economy import change_balance, get_balance
 
 
@@ -21,8 +22,8 @@ async def hire_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     user_id = str(user.id)
 
-    data = load_json(INFO_FILE)
-    user_data = data.setdefault(chat_id, {}).setdefault("users", {}).setdefault(user_id, {})
+    data = load_group_info(chat_id)
+    user_data = data.setdefault("users", {}).setdefault(user_id, {})
 
     if user_data.get("guard", {}).get("hired"):
         return await safe_reply(update, context,  "🛡 你已经雇佣了保镖！")
@@ -37,7 +38,7 @@ async def hire_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "last_paid": datetime.now().strftime("%Y-%m-%d")
     }
 
-    save_json(INFO_FILE, data)
+    save_group_info(chat_id, data)
     await safe_reply(update, context,  f"✅ 你已成功雇佣保镖，当前等级：1，已支付首日工资{GUARD_COST_PER_DAY}金币 。")
 
 
@@ -48,8 +49,8 @@ async def upgrade_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     user_id = str(user.id)
 
-    data = load_json(INFO_FILE)
-    user_data = data.setdefault(chat_id, {}).setdefault("users", {}).setdefault(user_id, {})
+    data = load_group_info(chat_id)
+    user_data = data.setdefault("users", {}).setdefault(user_id, {})
     guard = user_data.get("guard", {})
 
     if not guard.get("hired"):
@@ -67,7 +68,7 @@ async def upgrade_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_data["balance"] -= cost
     guard["level"] += 1
-    save_json(INFO_FILE, data)
+    save_group_info(chat_id, data)
 
     await safe_reply(update, context,  f"🛡 保镖升级成功，当前等级：{guard['level']}，已扣除 {cost} 金币。")
 
@@ -79,8 +80,8 @@ async def my_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     user_id = str(user.id)
 
-    data = load_json(INFO_FILE)
-    user_data = data.get(chat_id, {}).get("users", {}).get(user_id, {})
+    data = load_group_info(chat_id)
+    user_data = data.get("users", {}).get(user_id, {})
     guard = user_data.get("guard", {})
 
     if not guard.get("hired"):
@@ -98,15 +99,15 @@ async def fire_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     user_id = str(user.id)
 
-    data = load_json(INFO_FILE)
-    user_data = data.get(chat_id, {}).get("users", {}).get(user_id, {})
+    data = load_group_info(chat_id)
+    user_data = data.get("users", {}).get(user_id, {})
     guard = user_data.get("guard")
 
     if not guard or not guard.get("hired"):
         return await safe_reply(update, context, "🛡 你当前没有雇佣任何保镖。")
 
     guard["hired"] = False
-    save_json(INFO_FILE, data)
+    save_group_info(chat_id, data)
 
     await safe_reply(
         update,
@@ -117,22 +118,21 @@ async def fire_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
 # 每日定时扣工资（可接入 JobQueue 调用）
 def charge_guard_fees():
-    data = load_json(INFO_FILE)
     now = datetime.now().strftime("%Y-%m-%d")
-
-    for chat_id, group_data in data.items():
-        for user_id, user_data in group_data.get("users", {}).items():
+    for chat_id, group_data in iter_group_infos():
+        changed = False
+        for user_data in group_data.get("users", {}).values():
             guard = user_data.get("guard")
-            if guard and guard.get("hired"):
-                last_paid = guard.get("last_paid")
-                if last_paid != now:
-                    if user_data.get("balance", 0) >= GUARD_COST_PER_DAY:
-                        user_data["balance"] -= GUARD_COST_PER_DAY
-                        guard["last_paid"] = now
-                    else:
-                        guard["hired"] = False  # 解雇保镖
-    save_json(INFO_FILE, data)
-    
+            if guard and guard.get("hired") and guard.get("last_paid") != now:
+                if user_data.get("balance", 0) >= GUARD_COST_PER_DAY:
+                    user_data["balance"] -= GUARD_COST_PER_DAY
+                    guard["last_paid"] = now
+                else:
+                    guard["hired"] = False
+                changed = True
+        if changed:
+            save_group_info(chat_id, group_data)
+
 def register_guard_handlers(app):
     app.add_handler(CommandHandler("hire_guard", hire_guard))
     app.add_handler(CommandHandler("upgrade_guard", upgrade_guard))

@@ -631,6 +631,7 @@ async def owner_auto_forward_in_dialog(
     if (
         (context.user_data or {}).get("waiting_post")
         or (context.user_data or {}).get("publish_reject_reason")
+        or (context.user_data or {}).get("publish_keyword_search")
         or (context.user_data or {}).get("publish_keyword_label_input")
         or (context.user_data or {}).get("delegated_admin_add_stage")
     ):

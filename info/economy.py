@@ -13,8 +13,9 @@ from tool.pagination_helper import (
     generic_pagination_callback,
     send_paginated_list,
 )
+from info.storage import iter_group_infos, load_group_info, save_group_info
+
 from utils import (
-    INFO_FILE,
     can_use_command,
     get_group_whitelist,
     is_bot_owner,
@@ -70,9 +71,9 @@ def get_richest_users(chat_id: str):
 
 
 def ensure_user_exists(chat_id, user_id, username=None):
-    data = load_json(INFO_FILE)
     chat_id, user_id = str(chat_id), str(user_id)
-    users = data.setdefault(chat_id, {}).setdefault("users", {})
+    chat = load_group_info(chat_id)
+    users = chat.setdefault("users", {})
 
     changed = False
     if user_id not in users:
@@ -87,31 +88,25 @@ def ensure_user_exists(chat_id, user_id, username=None):
         changed = True
 
     if changed:
-        save_json(INFO_FILE, data)
+        save_group_info(chat_id, chat)
 
 
 def get_user_data(chat_id, user_id):
-    data = load_json(INFO_FILE)
-    return (
-        data.get(str(chat_id), {})
-        .get("users", {})
-        .get(str(user_id), DEFAULT_USER_DATA.copy())
-    )
+    chat = load_group_info(chat_id)
+    return chat.get("users", {}).get(str(user_id), DEFAULT_USER_DATA.copy())
 
 
 def save_user_data(chat_id, user_id, user_data):
-    data = load_json(INFO_FILE)
-    chat = data.setdefault(str(chat_id), {})
-    users = chat.setdefault("users", {})
-    users[str(user_id)] = user_data
-    save_json(INFO_FILE, data)
+    chat = load_group_info(chat_id)
+    chat.setdefault("users", {})[str(user_id)] = user_data
+    save_group_info(chat_id, chat)
 
 
 # ---------------- 用户信息查询 ---------------- #
 
 
 def get_all_users(chat_id):
-    return load_json(INFO_FILE).get(str(chat_id), {}).get("users", {})
+    return load_group_info(chat_id).get("users", {})
 
 
 def get_balance(chat_id, user_id):
@@ -162,19 +157,16 @@ def change_points(chat_id, user_id, amount):
 
 
 def give_daily_stamina_to_all():
-    data = load_json(INFO_FILE)
-    for chat_id, chat_info in data.items():
+    for chat_id, chat_info in iter_group_infos():
         users = chat_info.get("users", {})
-        for user_id, user_data in users.items():
+        changed = False
+        for user_data in users.values():
             user_data["stamina"] = min(100, user_data.get("stamina", 100) + 20)
             user_data["charm"] = min(100, user_data.get("charm", 60) + 2)
             user_data["hunger"] = min(100, user_data.get("hunger", 100) - 10)
-
-            if user_data["hunger"] < 20 and user_data["mood"] < 40:
-                # 生病状态 需要就医
-                pass
-
-    save_json(INFO_FILE, data)
+            changed = True
+        if changed:
+            save_group_info(chat_id, chat_info)
     print(f"✅ [{datetime.now():%Y-%m-%d %H:%M:%S}] 所有用户体力已恢复 20")
 
 
@@ -459,23 +451,13 @@ async def add_info_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def clean_point(chat_id: str):
-    data = load_json(INFO_FILE)
-
-    chat = data.get(str(chat_id))
-    if not chat:
-        return False, "该群不存在"
-
+    chat = load_group_info(chat_id)
     users = chat.get("users", {})
     if not users:
         return False, "没有用户数据"
-
-    # 🔥 清空所有用户积分
-    for user_id in users:
-        users[user_id]["points"] = 0
-
-    # ✅ 写回
-    save_json(INFO_FILE, data)
-
+    for user_data in users.values():
+        user_data["points"] = 0
+    save_group_info(chat_id, chat)
     return True, "✅ 所有用户积分已清零"
 
 

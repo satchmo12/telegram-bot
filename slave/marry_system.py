@@ -10,7 +10,8 @@ from telegram.ext import CommandHandler, ContextTypes
 from telegram.helpers import mention_html
 
 from command_router import FEATURE_FRIENDS, feature_required, register_command
-from info.economy import INFO_FILE, ensure_user_exists, get_balance, change_balance, get_nickname
+from info.economy import ensure_user_exists, get_balance, change_balance, get_nickname
+from info.storage import load_group_info, save_group_info
 from slave.status_warnings import (
     LOVER_MARRIED_WARNINGS,
     LOVER_SPONSORED_WARNINGS,
@@ -402,9 +403,9 @@ async def marry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_user_exists(chat_id, user_id, user.full_name)
     ensure_user_exists(chat_id, lover_id, lover.full_name)
 
-    userData = load_json(INFO_FILE)
-    user_info = userData.get(chat_id, {}).get("users", {}).get(user_id)
-    lover_data = userData.get(chat_id, {}).get("users", {}).get(lover_id)
+    userData = load_group_info(chat_id)
+    user_info = userData.get("users", {}).get(user_id)
+    lover_data = userData.get("users", {}).get(lover_id)
 
     if user_info is None or lover_data is None:
         return await safe_reply(update, context, "未找到用户数据，请稍后重试。")
@@ -474,11 +475,11 @@ async def accept(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _save_marry_data(context, data)
 
             # 更新金币系统的状态
-            userData = load_json(INFO_FILE)
-            users = userData.setdefault(chat_id, {}).setdefault("users", {})
+            userData = load_group_info(chat_id)
+            users = userData.setdefault("users", {})
             users[user_id]["relationship_status"] = "已婚"
             users[uid]["relationship_status"] = "已婚"
-            save_json(INFO_FILE, userData)
+            save_group_info(chat_id, userData)
 
             mention1 = _mention_or_name(uid, "你", is_silent)
             mention2 = _user_ref(user, is_silent)
@@ -543,11 +544,11 @@ async def divorce(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         _save_marry_data(context, data)
 
-        userData = load_json(INFO_FILE)
-        users = userData.setdefault(chat_id, {}).setdefault("users", {})
+        userData = load_group_info(chat_id)
+        users = userData.setdefault("users", {})
         users[user_id]["relationship_status"] = "单身"
         users[uid]["relationship_status"] = "单身"
-        save_json(INFO_FILE, userData)
+        save_group_info(chat_id, userData)
 
         await safe_reply(
             update,
@@ -569,8 +570,8 @@ async def exes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = _load_marry_data(context)
     group = data.get(chat_id, {})
     ex_list = group.get(user_id, {}).get("exes", [])
-    userData = load_json(INFO_FILE)
-    users = userData.setdefault(chat_id, {}).setdefault("users", {})
+    userData = load_group_info(chat_id)
+    users = userData.setdefault("users", {})
 
     if not ex_list:
         return await safe_reply(update, context, "你目前还没有前任～")

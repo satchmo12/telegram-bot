@@ -4,6 +4,10 @@
         "ls2174": {
             "expires_at": "2099-12-31",
             "username": "ls2174"
+        },
+        "iwoai": {
+            "expires_at": "2026-12-31",
+            "username": "iwoai"
         }
     }
 }

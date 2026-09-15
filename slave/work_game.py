@@ -3,7 +3,7 @@ from datetime import datetime
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
 from command_router import FEATURE_FRIENDS, feature_required, register_command
-from info.economy import INFO_FILE, get_user_data, save_user_data
+from info.economy import get_user_data, save_user_data
 from slave.cooldown import is_on_cooldown
 from slave.luck_helper import calculate_success
 from slave.status_warnings import (

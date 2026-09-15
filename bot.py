@@ -44,6 +44,8 @@ from modules import register_all_handlers  # 注册各功能模块
 from dispatcher import message_router  # 最终文本处理路由器
 from channel.telethon_forwarder import start_telethon_forwarder_job
 from channel.telethon_login import _clear_login_state
+from info.storage import ensure_info_migrated
+from channel.channel_config import is_active_subscription
 from channel.publish_setting import handle_comment_start_parameter, handle_report_start_parameter, load_publish_config
 from command_router import get_matched_command
 from admin_permissions import has_admin_permission, is_owner_or_super_admin
@@ -417,6 +419,45 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
     # await forward_to_owner(update, context)
 
 
+START_WELCOME_FILE = "config_data/start_welcome.json"
+START_WELCOME_EDIT_KEY = "start_welcome_editing"
+
+
+def _load_start_welcome_config() -> dict:
+    data = load_json(START_WELCOME_FILE)
+    return data if isinstance(data, dict) else {}
+
+
+def _can_configure_start_welcome(context: ContextTypes.DEFAULT_TYPE, user) -> bool:
+    if not user:
+        return False
+    try:
+        is_owner = int(user.id) == int(context.application.bot_data.get("owner_id"))
+    except (TypeError, ValueError):
+        is_owner = False
+    # This setting is intentionally stricter than ordinary admin settings.
+    return bool(is_owner and is_active_subscription(user))
+
+
+def _welcome_template_text(bot_name: str) -> str:
+    safe_name = html.escape(str(bot_name or "机器人"))
+    configured = str(_load_start_welcome_config().get("text") or "").strip()
+    if configured:
+        # Custom content is plain text to avoid broken HTML from arbitrary input.
+        return html.escape(configured).replace("{bot_name}", safe_name)
+
+    if str(bot_name or "").strip() == MASTER_BOT_NAME:
+        return f"👏 欢迎使用 {safe_name}\n 能帮你便捷安全地管理频道和群组，是TG上领先的管理的机器人之一\n➡️请赋予我频道/群组管理员权限！"
+
+    if MASTER_BOT_USERNAME:
+        master_label = (
+            f'<a href="https://t.me/{html.escape(MASTER_BOT_USERNAME, quote=True)}">{html.escape(MASTER_BOT_NAME)}</a>'
+        )
+    else:
+        master_label = html.escape(MASTER_BOT_NAME)
+    return f"👏欢迎使用 {safe_name} 克隆自 {master_label}\n 能帮你便捷安全地管理频道和群组，是TG上领先的管理的机器人之一\n➡️请赋予我频道/群组管理员权限！"
+
+
 def _clear_submission_draft(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Cancel an unfinished user submission when returning to the start menu."""
     for key in (
@@ -451,7 +492,7 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "feature_text": feature_text,
     }
     user_id = update.effective_user.id if update.effective_user else None
-    keyboard_rows = _build_start_panel_rows(context, user_id)
+    keyboard_rows = _build_start_panel_rows(context, user_id, update.effective_user)
     keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
 
 
@@ -483,7 +524,7 @@ async def start_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     # 「我要投稿」会误用上次的目标，跳过关键词输入。
     _clear_submission_draft(context)
     user_id = update.effective_user.id if update.effective_user else None
-    keyboard_rows = _build_start_panel_rows(context, user_id)
+    keyboard_rows = _build_start_panel_rows(context, user_id, update.effective_user)
     keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
     return await query.edit_message_text(
         _build_start_welcome_text(bot_name),
@@ -621,7 +662,9 @@ async def features_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _build_start_panel_rows(
-    context: ContextTypes.DEFAULT_TYPE, user_id: Optional[int] = None
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: Optional[int] = None,
+    user=None,
 ) -> list[list[InlineKeyboardButton]]:
     enabled = context.application.bot_data.get("enabled_features") or set(ALL_FEATURES)
     bot_name = str(context.application.bot_data.get("name", "")).strip()
@@ -631,6 +674,7 @@ def _build_start_panel_rows(
     if not isinstance(custom_menu_buttons, dict):
         custom_menu_buttons = {}
     is_bot_admin_viewer = bool(user_id and is_owner_or_super_admin(context, int(user_id)))
+    can_config_welcome = _can_configure_start_welcome(context, user)
 
     def can_use(permission: str) -> bool:
         return bool(user_id and has_admin_permission(context, int(user_id), permission))
@@ -664,6 +708,8 @@ def _build_start_panel_rows(
             owner_row.append(InlineKeyboardButton("🧩自定义按钮", callback_data="publish:custom_buttons"))
         if is_bot_admin_viewer:
             owner_row.append(InlineKeyboardButton("👥多管理员", callback_data="adm:panel"))
+        if can_config_welcome:
+            owner_row.append(InlineKeyboardButton("✏️欢迎词", callback_data="welcome:edit"))
         if owner_row:
             rows.append(owner_row)
 
@@ -704,24 +750,86 @@ def _build_start_panel_rows(
     return rows
 
 def _build_start_welcome_text(bot_name: str) -> str:
-    safe_name = html.escape(str(bot_name or "机器人"))
+    return _welcome_template_text(bot_name)
 
 
-    # welcome_message = get_config("start_welcome_message")
-
-
-    if str(bot_name or "").strip() == MASTER_BOT_NAME:
-        return f"👏 欢迎使用 {safe_name}\n 能帮你便捷安全地管理频道和群组，是TG上领先的管理的机器人之一\n➡️请赋予我频道/群组管理员权限！"
-    # "用户名出售 @woaini555  @e6web @fj618 @iabc6 @iabc7 @chihe2 @bcifa @bcifb @bciff\n"
-
-    if MASTER_BOT_USERNAME:
-        master_label = (
-            f'<a href="https://t.me/{html.escape(MASTER_BOT_USERNAME, quote=True)}">{html.escape(MASTER_BOT_NAME)}</a>'
+async def start_welcome_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.data or not query.data.startswith("welcome:"):
+        return
+    if not update.effective_chat or update.effective_chat.type != "private":
+        return await query.answer("请在私聊中配置欢迎词。", show_alert=True)
+    if not _can_configure_start_welcome(context, update.effective_user):
+        return await query.answer("仅机器人所有者且订阅有效时可以配置欢迎词。", show_alert=True)
+    action = query.data.split(":", 1)[1]
+    if action == "cancel":
+        context.user_data.pop(START_WELCOME_EDIT_KEY, None)
+        await query.answer("已取消当前欢迎词输入。")
+        bot_name = context.application.bot_data.get("name", "机器人")
+        user_id = update.effective_user.id if update.effective_user else None
+        keyboard_rows = _build_start_panel_rows(context, user_id, update.effective_user)
+        keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
+        return await query.edit_message_text(
+            _build_start_welcome_text(bot_name),
+            reply_markup=keyboard,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
         )
-    else:
-        master_label = html.escape(MASTER_BOT_NAME)
+    if action == "reset":
+        save_json(START_WELCOME_FILE, {})
+        context.user_data.pop(START_WELCOME_EDIT_KEY, None)
+        await query.answer("已恢复默认欢迎词。")
+        bot_name = context.application.bot_data.get("name", "机器人")
+        return await query.edit_message_text(
+            _build_start_welcome_text(bot_name),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ 返回首页", callback_data="start:back")]]),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    context.user_data[START_WELCOME_EDIT_KEY] = True
+    current = str(_load_start_welcome_config().get("text") or "").strip() or "（当前使用默认欢迎词）"
+    await query.answer()
+    return await query.edit_message_text(
+        "✏️ <b>配置欢迎词</b>\n\n"
+        "请直接发送新的欢迎词。支持使用 <code>{bot_name}</code> 自动代入机器人名称。\n"
+        "发送“取消”放弃本次修改。\n\n"
+        f"当前自定义内容：\n<code>{html.escape(current)}</code>",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("♻️ 恢复默认", callback_data="welcome:reset")],
+            [InlineKeyboardButton("⬅️ 返回并取消输入", callback_data="welcome:cancel")],
+        ]),
+        parse_mode="HTML",
+    )
 
-    return f"👏欢迎使用 {safe_name} 克隆自 {master_label}\n 能帮你便捷安全地管理频道和群组，是TG上领先的管理的机器人之一\n➡️请赋予我频道/群组管理员权限！"
+
+async def start_welcome_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get(START_WELCOME_EDIT_KEY):
+        return
+    if not _can_configure_start_welcome(context, update.effective_user):
+        context.user_data.pop(START_WELCOME_EDIT_KEY, None)
+        return
+    if not update.message or not update.message.text:
+        return
+    text = update.message.text.strip()
+    if text in {"取消", "返回"}:
+        context.user_data.pop(START_WELCOME_EDIT_KEY, None)
+        await update.message.reply_text("已取消欢迎词修改。")
+        raise ApplicationHandlerStop
+    if not text:
+        await update.message.reply_text("欢迎词不能为空，请重新发送。")
+        raise ApplicationHandlerStop
+    if len(text) > 3500:
+        await update.message.reply_text("欢迎词不能超过 3500 个字符，请重新发送。")
+        raise ApplicationHandlerStop
+    save_json(START_WELCOME_FILE, {"text": text})
+    context.user_data.pop(START_WELCOME_EDIT_KEY, None)
+    bot_name = context.application.bot_data.get("name", "机器人")
+    await update.message.reply_text(
+        "✅ 欢迎词已保存，预览如下：\n\n" + _build_start_welcome_text(bot_name),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+    raise ApplicationHandlerStop
 
 
 async def clear_login_prompt_on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -780,6 +888,14 @@ def create_app(bot_cfg: dict):
 
     app.add_handler(BusinessConnectionHandler(handle_business_connection))
     app.add_handler(TypeHandler(Update, runtime_context_handler), group=-1000)
+    app.add_handler(CallbackQueryHandler(start_welcome_callback, pattern=r"^welcome:"))
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.TEXT & (~filters.COMMAND),
+            start_welcome_input,
+        ),
+        group=-30,
+    )
     app.add_handler(
         MessageHandler(filters.ChatType.GROUPS, block_disabled_group_messages),
         group=-950,
@@ -1017,6 +1133,7 @@ async def leave_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def post_init_setup(app):
     set_runtime_bot_name(app.bot_data.get("name", ""))
     write_startup_debug(f"[post_init_setup] bot={app.bot_data.get('name')} post-init start")
+    ensure_info_migrated()
     await set_bot_commands(app)  # 直接 await，事件循环已运行
     write_startup_debug(f"[post_init_setup] bot={app.bot_data.get('name')} post-init done")
 

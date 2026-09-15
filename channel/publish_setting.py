@@ -8,7 +8,7 @@ import re
 import time
 import uuid
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, TypeHandler, filters
+from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, ContextTypes, MessageHandler, TypeHandler, filters
 from telegram.error import BadRequest, Forbidden
 
 from channel.channel_config import USER_MESSAGE_FILE
@@ -500,20 +500,66 @@ def _normalize_routing_keyword(value: str) -> str:
 
 
 def _extract_routing_keywords(msg, config: dict) -> list[dict]:
-    text = str(getattr(msg, "text", None) or getattr(msg, "caption", None) or "")
+    text = str(
+        getattr(msg, "text", None)
+        or getattr(msg, "caption", None)
+        or ""
+    )
+
     if not text:
         return []
+
     result = []
+
     for label in _keyword_labels(config):
-        pattern = re.compile(
-            rf"{re.escape(label)}[：:]?\s*([^\n\r]+)",
-            re.IGNORECASE,
-        )
-        for match in pattern.finditer(text):
-            raw = match.group(1).strip()
-            key = _normalize_routing_keyword(raw)
-            if key and not any(item["key"] == key and item["label"] == label for item in result):
-                result.append({"label": label, "key": key, "raw": raw})
+        if label == "标签":
+            # 找到“标签”字段
+            pattern = re.compile(
+                rf"{re.escape(label)}[：:]?(.*)",
+                re.IGNORECASE | re.DOTALL,
+            )
+
+            match = pattern.search(text)
+            if not match:
+                continue
+
+            # 标签字段后面的所有 #xxx
+            content = match.group(1)
+
+            for raw in re.findall(r"#[^\s#]+", content):
+                key = _normalize_routing_keyword(raw)
+
+                if key and not any(
+                    item["key"] == key and item["label"] == label
+                    for item in result
+                ):
+                    result.append({
+                        "label": label,
+                        "key": key,
+                        "raw": raw,
+                    })
+
+        else:
+            # 普通字段：取 label 后第一个非空白内容
+            pattern = re.compile(
+                rf"{re.escape(label)}[：:]?\s*([^\s]+)",
+                re.IGNORECASE,
+            )
+
+            for match in pattern.finditer(text):
+                raw = match.group(1).strip()
+                key = _normalize_routing_keyword(raw)
+
+                if key and not any(
+                    item["key"] == key and item["label"] == label
+                    for item in result
+                ):
+                    result.append({
+                        "label": label,
+                        "key": key,
+                        "raw": raw,
+                    })
+
     return result
 
 
@@ -1616,9 +1662,9 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.answer("你没有投稿配置权限。", show_alert=True)
 
     await query.answer()
-    
+
     if action == "publishset":
-        help_text = "📣 请设置发布的频道"       
+        help_text = "📣 请设置发布的频道"
         await query.edit_message_text(
             help_text,
             reply_markup=publish_setting_keyboard(config)
@@ -1646,7 +1692,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "custom_buttons":
         if not has_admin_permission(context, query.from_user.id, "submission_config"):
             return await query.answer("你没有投稿配置权限。", show_alert=True)
-        
+
         return await query.edit_message_text(
             _custom_user_buttons_text(config),
             reply_markup=_custom_user_buttons_keyboard(config),
@@ -1655,7 +1701,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "custom_toggle":
         if not has_admin_permission(context, query.from_user.id, "submission_config"):
             return await query.answer("你没有投稿配置权限。", show_alert=True)
-            
+
         key = query.data.split(":", 2)[2] if len(query.data.split(":", 2)) == 3 else ""
         if not key:
             return await query.answer("按钮配置无效。", show_alert=True)
@@ -1785,7 +1831,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     if action == "channel":
-        
+
         text = (
             f"📢 当前频道：\n{channel_id}"
             if channel_id
@@ -1884,7 +1930,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         lines = ["📋 广告列表", ""]
         rows = []
-        
+
         for ad in ads:
             lines.append(
                 f"#{ad['id']} {'✅' if ad['enabled'] else '❌'}"
@@ -1973,7 +2019,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.edit_message_text(
             f"请输入新的广告内容\n广告ID:{ad_id}"
         )
-    
+
     if action.startswith("toggle_ad_"):
 
         ad_id = int(action.replace("toggle_ad_", ""))
@@ -1982,15 +2028,15 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if ad["id"] == ad_id:
                 ad["enabled"] = not ad["enabled"]
                 break
-        
+
         save_publish_config(config)
-        
+
         await query.edit_message_text(
         "📋 广告列表（点击切换启用状态）",
         reply_markup=build_ads_list_keyboard(config["ads"])
-    ) 
+    )
         return
-        
+
     if action == "buttons":
         _clear_button_input(context)
         return await query.edit_message_text(
@@ -2073,7 +2119,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚙️ 发布设置",
             reply_markup=publish_setting_keyboard(config)
         )
-    
+
     if action == "publish":
         owner_id = _owner_id(context)
         if (
@@ -2092,11 +2138,11 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "找到对应帖子后，再发送投稿内容。"
             )
         await publish_message(update, context)
-        
+
     if action == "channel_message":
-        
+
         context.user_data["reply_bottle"] = True
-        
+
         user_id = query.from_user.id
 
         posts = _load_cannel_message()
@@ -2141,16 +2187,16 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     if action == "global_ad_toggle":
-       
+
         enabled = not context.user_data["post_no_name"]
-        
+
         await query.answer("✅ 已更新", show_alert=False)
-        
-        
+
+
         help_text = "📣 请发送您要的内容。\n\n支持文字、图片、视频等消息。 点击返回停止发送"
-    
+
         context.user_data["post_no_name"] = enabled
-        
+
         await query.edit_message_text(
             help_text,
             reply_markup=create_post_keyboard(enabled)
@@ -2244,32 +2290,32 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message_id=message_id,
             reply_markup=query.message.reply_markup,
         )
-    
+
     if action == "add_friend":
 
         target_user_id = int(query.data.split(":")[2])
         target_user_id = int(target_user_id)
         from_user_id = query.from_user.id
-        
+
         history_data = _load_bottle_history()
         user_key = str(from_user_id)
         friend_applied = history_data[user_key].setdefault(
             "friend_applied",
             {}
         )
-        
+
         if str(target_user_id) in friend_applied:
             await query.message.reply_text(
                 "你已经发送过好友申请了"
             )
             return
-        
+
         accepter = get_user(from_user_id)
-        
+
         await context.bot.send_message(
             chat_id=target_user_id,
             text= (
-                f"@{accepter['username']}  想认识你" 
+                f"@{accepter['username']}  想认识你"
             ),
             reply_markup=InlineKeyboardMarkup([
                 [
@@ -2284,11 +2330,11 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]
             ])
         )
-        
+
         await query.message.reply_text(
             "好友申请发送成功"
         )
-        
+
         friend_applied[str(target_user_id)] = True
         _save_bottle_history(history_data)
     if action == "accept_friend":
@@ -2313,14 +2359,14 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         await query.message.delete()
-         
+
         # 通知同意人
         await query.message.reply_text(
             f"已向对方发送你的联系方式，对方联系方式：@{requester['username']}"
         )
-        
-       
-    
+
+
+
     if action == "reject_friend":
         requester_id = int(query.data.split(":")[2])
 
@@ -2330,32 +2376,32 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         await query.message.delete()
-        
+
         await query.message.reply_text("已拒绝")
-        
+
 async def publish_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    context.user_data["waiting_post"] = True
-        
+    # context.user_data["waiting_post"] = True
+
     enabled = context.user_data.get("post_no_name", True)
-    
+
     help_text = "📣 请发送您要投稿的内容。\n\n支持文字、图片、视频等消息。"
-    
+
     context.user_data["post_no_name"] = enabled
-    
+
     if query:
-        
+
         await query.edit_message_text(
             help_text,
             reply_markup=create_post_keyboard(enabled)
         )
-        
+
     else:
         await update.message.reply_text(
             help_text,
             reply_markup=create_post_keyboard(enabled)
         )
-    
+
 def create_post_keyboard(enabled: bool):
     rows = [
         [
@@ -2564,8 +2610,12 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 
 async def _handle_keyword_search_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    # Only consume messages while the user is explicitly in the keyword-search
+    # flow. Without this guard every private message would be treated as a
+    # keyword and could conflict with the bidirectional private-forward flow.
     if not (context.user_data or {}).get(KEYWORD_INPUT_KEY):
         return False
+
     msg = update.message
     if not msg or not msg.text:
         if msg:
@@ -2582,6 +2632,8 @@ async def _handle_keyword_search_input(update: Update, context: ContextTypes.DEF
         await msg.reply_text(
             "❗ 未找到可评论的对应帖子。请检查关键词，或等待管理员发布带关键词的新帖子后重试。"
         )
+        # A searched-but-unmatched keyword is still consumed; do not pass it
+        # to dual private forwarding or ordinary message routing.
         return True
 
     if len(routes) == 1:
@@ -2618,6 +2670,7 @@ async def _handle_keyword_search_input(update: Update, context: ContextTypes.DEF
         if link:
             rows.append([InlineKeyboardButton(f"🔗 查看 {value}", url=link)])
     return await msg.reply_text("找到多个对应帖子，请选择：", reply_markup=InlineKeyboardMarkup(rows))
+
 
 
 async def _handle_reject_reason_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -2684,9 +2737,22 @@ async def _handle_reject_reason_input(update: Update, context: ContextTypes.DEFA
     await msg.reply_text("❌ 已拒绝投稿，已通知投稿人拒绝原因。")
     return True
 
+async def _keyword_search_interceptor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Give keyword search first chance to consume private text.
+
+    Returning without raising lets the normal dual-forward handlers continue.
+    A handled search raises ApplicationHandlerStop before those handlers can
+    forward the text to an active private-dialog recipient.
+    """
+    if await _handle_keyword_search_input(update, context):
+        raise ApplicationHandlerStop
+
+
 async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await _handle_keyword_search_input(update, context):
-        return
+        # Stop group=999 message_router and any later handler from sending the
+        # search text into the bidirectional/private bot flow.
+        raise ApplicationHandlerStop
     if await _handle_reject_reason_input(update, context):
         return
 
@@ -2694,7 +2760,7 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if not update.message.text:
         return
-    
+
     config = load_publish_config()
 
     if context.user_data.get(KEYWORD_LABEL_INPUT_KEY):
@@ -2800,7 +2866,7 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         limit = int(update.message.text.strip())
 
- 
+
         config["daily_limit"] = limit
 
         save_publish_config(config)
@@ -2848,7 +2914,7 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return await update.message.reply_text(
             "✅ 广告修改成功"
         )
-        
+
 def build_ads_list_keyboard(ads):
     rows = []
 
@@ -2864,11 +2930,11 @@ def build_ads_list_keyboard(ads):
         InlineKeyboardButton("⬅️ 返回", callback_data="publish:ads")
     ])
 
-    return InlineKeyboardMarkup(rows)   
-    
+    return InlineKeyboardMarkup(rows)
+
 def get_user(user_id):
     users = load_json(BOT_USER_FILE)
-    return users.get(str(user_id))       
+    return users.get(str(user_id))
 
 def _load_bottle_history():
     data = load_json(BOTTLE_HISTORY_FILE)
@@ -2925,7 +2991,7 @@ def _load_cannel_message() -> list:
     data = load_json(USER_MESSAGE_FILE)
     return data if isinstance(data, list) else []
 
-    
+
 # =========================
 # 注册
 # =========================
@@ -2942,6 +3008,17 @@ def register_publish_setting_handlers(app):
         TypeHandler(Update, _capture_comment_source_message),
         # Must run before generic group handlers that may stop processing.
         group=-940,
+    )
+    # Keyword search must run before bot.py's group=0 private-forward handlers.
+    # If it does not consume the message, processing falls through normally.
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE
+            & (~filters.COMMAND)
+            & ~filters.UpdateType.BUSINESS_MESSAGE,
+            _keyword_search_interceptor,
+        ),
+        group=-20,
     )
     app.add_handler(
         MessageHandler(

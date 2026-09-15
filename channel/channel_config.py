@@ -149,6 +149,13 @@ def _is_active_subscription(user) -> bool:
         return False
 
 
+
+
+def is_active_subscription(user) -> bool:
+    """Public subscription status helper for bot-level owner settings."""
+    return _is_active_subscription(user)
+
+
 def _get_user_config_file(context: ContextTypes.DEFAULT_TYPE) -> str:
     return context.user_data.get("channel_config_file") or FORWARD_USER_CONFIG_FILE
 

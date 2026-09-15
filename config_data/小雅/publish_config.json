@@ -14,11 +14,12 @@
     "submission_enabled": true,
     "random_view_enabled": false,
     "bottom_buttons_enabled": false,
-    "proof_required": true,
-    "reject_reason_required": true,
+    "proof_required": false,
+    "reject_reason_required": false,
     "comment_forward_enabled": true,
     "forward_channel_id": -1003968770671,
     "keyword_extract_labels": [
+        "标签",
         "艺名",
         "联系"
     ],

@@ -10,7 +10,6 @@ from farm.animals_game import ANIMALS_DATA_FILE
 from command_router import FEATURE_MANOR, feature_required, register_command
 from utils import (
     GROUP_LIST_FILE,
-    INFO_FILE,
     MANAGER_FILE,
     delete_later,
     load_json,
@@ -19,6 +18,7 @@ from utils import (
 )
 
 from farm.crop_config import CROP_CONFIG  # 作物数据
+from info.storage import load_group_info
 from farm.farm_game import FARM_DATA_FILE, create_empty_land, get_growth_stage
 from farm.inventory import get_user_inventory, change_item, save_user_inventory
 
@@ -213,7 +213,6 @@ async def auto_farm_tasks(bot):
     """管家自动执行农场任务（定时执行）"""
     manager_data = load_json(MANAGER_FILE)
     group_cfg_all = load_json(GROUP_LIST_FILE)
-    info_all = load_json(INFO_FILE)
     farm_data = load_json(FARM_DATA_FILE)
     animals_data = load_json(ANIMALS_DATA_FILE)
 
@@ -345,13 +344,7 @@ async def auto_farm_tasks(bot):
             # ---- 发送通知 ----
             if action_log:
                 try:
-                    user_profile = (
-                        info_all.get(str(chat_id), {})
-                        .get("users", {})
-                        .get(str(user_id), {})
-                        if isinstance(info_all, dict)
-                        else {}
-                    )
+                    user_profile = load_group_info(str(chat_id)).get("users", {}).get(str(user_id), {})
                     display_name = user_profile.get("name") or f"用户{user_id}"
                     safe_name = escape(str(display_name))
 
