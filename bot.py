@@ -44,7 +44,7 @@ from modules import register_all_handlers  # 注册各功能模块
 from dispatcher import message_router  # 最终文本处理路由器
 from channel.telethon_forwarder import start_telethon_forwarder_job
 from channel.telethon_login import _clear_login_state
-from channel.publish_setting import handle_comment_start_parameter, load_publish_config
+from channel.publish_setting import handle_comment_start_parameter, handle_report_start_parameter, load_publish_config
 from command_router import get_matched_command
 from admin_permissions import has_admin_permission, is_owner_or_super_admin
 
@@ -108,7 +108,7 @@ async def show_menu(update, context):
     #         [[InlineKeyboardButton("招商负责人（点此跳转）", url="https://t.me/mr566")]]
     #     ),
     # )
-    
+
 async def hide_menu(update, context):
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
@@ -209,8 +209,8 @@ PRIVATE_FORWARD_SELF_SERVICE_STAGE_KEY = "private_forward_self_service_stage"
 MULTI_BOT_STAGE_KEY = "multi_bot_stage"
 STARTUP_DEBUG_FILE = os.path.join("data", "startup_debug.log")
 
-WAITING_POST = "waiting_post" 
-REPLY_BOTTLE = "reply_bottle" 
+WAITING_POST = "waiting_post"
+REPLY_BOTTLE = "reply_bottle"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
@@ -220,7 +220,7 @@ async def get_file_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print("FILE_ID:")
     print(photo.file_id)
     await update.message.reply_text(photo.file_id)
-    
+
 
 async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = (update.inline_query.query or "").strip()
@@ -239,15 +239,15 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             ),
         )
     ]
-    
+
     # chat_id = int(update.effective_chat.id) if update and update.effective_chat else None
     # await context.bot.send_message(
     #             chat_id=chat_id,
     #             text=results,
     #         )
-    
+
     await update.inline_query.answer(results=results, cache_time=0, is_personal=True)
-    
+
 
 def write_startup_debug(message: str) -> None:
     try:
@@ -325,8 +325,8 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
     bind_runtime_bot_context(context)
     user = update.effective_user
     chat = update.effective_chat
-    
-    
+
+
     user_data = context.user_data or {}
     # 投稿及审核拒绝原因由投稿模块处理；不要再走私聊双向转发。
     if (
@@ -349,7 +349,7 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
         print("[private_forward_router] 忽略：主机器人当前处于自助/多机器人输入阶段")
         return
 
-  
+
     # ()
     # msg = update.message
     msg = get_message(update)
@@ -407,7 +407,7 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
     # 主机器人私聊 AI：开启后不再转发给主人（关闭后才会转发）
     if await handle_gemini_ai(update, context):
         raise ApplicationHandlerStop
-    
+
     # 机器人转发
     await forward_to_owner(update, context)
     # 客服机器人自动回复
@@ -437,6 +437,8 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         if await handle_comment_start_parameter(update, context, context.args[0]):
             return
+        if await handle_report_start_parameter(update, context, context.args[0]):
+            return
 
     # A normal /start is also an explicit exit from an unfinished submission.
     _clear_submission_draft(context)
@@ -451,8 +453,8 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.effective_user else None
     keyboard_rows = _build_start_panel_rows(context, user_id)
     keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
-    
-    
+
+
     text = _build_start_welcome_text(bot_name)
     # text = "👏"
     await update.message.reply_text(
@@ -646,7 +648,7 @@ def _build_start_panel_rows(
                 InlineKeyboardButton("🤖机器人面板", callback_data="mbot:list")
             ]
         )
-        
+
     if is_bot_admin_viewer or any(
         can_use(permission) for permission in ("submission_config", "private_forward")
     ):
@@ -662,17 +664,9 @@ def _build_start_panel_rows(
             owner_row.append(InlineKeyboardButton("🧩自定义按钮", callback_data="publish:custom_buttons"))
         if is_bot_admin_viewer:
             owner_row.append(InlineKeyboardButton("👥多管理员", callback_data="adm:panel"))
-        
-        # owner_row.append(
-        #         InlineKeyboardButton(
-        #             "🧩多管理员",
-        #             callback_data="publish:custom_buttons",
-        #         )
-        #     )
-        
         if owner_row:
             rows.append(owner_row)
-   
+
     if "channel" in enabled:
         channel_row = []
         if can_use("channel_config") and show_custom_button("channel_clone"):
@@ -683,7 +677,7 @@ def _build_start_panel_rows(
             channel_row.append(InlineKeyboardButton("📣机器人频道配置", callback_data="chcfg:bot"))
         if channel_row:
             rows.append(channel_row)
-        
+
     if "group" in enabled:
         group_row = []
         if can_use("group_config") and show_custom_button("group_config"):
@@ -692,7 +686,7 @@ def _build_start_panel_rows(
             group_row.append(InlineKeyboardButton("📢全群广告推送", callback_data="gcfg:global_ad_menu"))
         if group_row:
             rows.append(group_row)
-        
+
     # 投稿配置控制公共入口的显示；旧配置会在 load_publish_config 中自动
     # 补齐开关字段，并默认保持此前两个按钮都显示的行为。
     resource_row = []
@@ -711,8 +705,8 @@ def _build_start_panel_rows(
 
 def _build_start_welcome_text(bot_name: str) -> str:
     safe_name = html.escape(str(bot_name or "机器人"))
-    
-    
+
+
     # welcome_message = get_config("start_welcome_message")
 
 
@@ -726,7 +720,7 @@ def _build_start_welcome_text(bot_name: str) -> str:
         )
     else:
         master_label = html.escape(MASTER_BOT_NAME)
-        
+
     return f"👏欢迎使用 {safe_name} 克隆自 {master_label}\n 能帮你便捷安全地管理频道和群组，是TG上领先的管理的机器人之一\n➡️请赋予我频道/群组管理员权限！"
 
 
@@ -783,7 +777,7 @@ def create_app(bot_cfg: dict):
     app.bot_data["name"] = bot_name
     app.bot_data["enabled_features"] = set(bot_cfg.get("enabled_features", []))
     set_bot_owner(bot_name, owner_id)
-    
+
     app.add_handler(BusinessConnectionHandler(handle_business_connection))
     app.add_handler(TypeHandler(Update, runtime_context_handler), group=-1000)
     app.add_handler(
@@ -805,11 +799,10 @@ def create_app(bot_cfg: dict):
     app.add_handler(CommandHandler("features", features_command))
     app.add_handler(CommandHandler("intro", features_command))
     app.add_handler(CommandHandler("leave", leave_group_command))
-    app.add_handler(CommandHandler("restoregroups", restore_group_configs_command))
-    
+
     app.add_handler(CommandHandler("show", show_menu))
     app.add_handler(CommandHandler("hide", hide_menu))
-    
+
     # ===== 私聊转发逻辑 =====
     if is_feature_enabled(app, "private_forward"):
         write_startup_debug(f"[create_app] register private_forward handlers bot={bot_name}")
@@ -819,7 +812,7 @@ def create_app(bot_cfg: dict):
                 owner_reply_router,
             ),
         )
-        
+
         app.add_handler(
             MessageHandler(
                 filters.ChatType.PRIVATE & ~filters.COMMAND,
@@ -841,7 +834,7 @@ def create_app(bot_cfg: dict):
     )
     app.add_handler(CallbackQueryHandler(clear_login_prompt_on_callback), group=-900)
     app.add_handler(CallbackQueryHandler(start_panel_callback, pattern=r"^start:"))
-    
+
     # 内连
     app.add_handler(InlineQueryHandler(inline_query_handler))
     # 访客机器人必须新的才可以，别的地方启动过就不可以了 guest_bot_handler 这个消息就见听不到
@@ -884,7 +877,7 @@ def create_app(bot_cfg: dict):
         app.job_queue.run_repeating(start_telethon_forwarder_job, interval=30, first=30)
 
     app.add_error_handler(error_handler)
-    
+
     return app
 
 
@@ -909,7 +902,7 @@ async def set_bot_commands(app):
 
     # 普通用户命令：只显示当前机器人确实启用的功能
     commands.append(BotCommand("start", "功能简介"))
-    
+
     # commands.append(BotCommand("help", "命令帮助"))
     # if "group" in enabled:
     #     commands.append(BotCommand("group", "群设置"))
@@ -1019,45 +1012,6 @@ async def leave_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await context.bot.leave_chat(chat_id)
     except Exception as e:
         await update.message.reply_text(f"退出群失败: {e}")
-
-
-async def restore_group_configs_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-):
-    """将当前机器人 groups_old.json 中已有群的配置合并回 groups.json。"""
-    user = update.effective_user
-    if not user or not is_super_admin(user.id):
-        return
-
-    old_groups = load_json("data/groups_old.json")
-    groups = load_json(GROUPS_FILE)
-    if not isinstance(old_groups, dict):
-        await update.message.reply_text("未找到有效的 groups_old.json 配置。")
-        return
-    if not isinstance(groups, dict):
-        await update.message.reply_text("未找到有效的 groups.json 配置。")
-        return
-
-    updated_count = 0
-    for chat_id, old_cfg in old_groups.items():
-        # 只迁移 groups.json 已存在的群，绝不从旧文件新增群记录。
-        current_cfg = groups.get(str(chat_id))
-        if not isinstance(current_cfg, dict) or not isinstance(old_cfg, dict):
-            continue
-
-        # 仅覆盖当前配置中已有的字段，旧文件独有的字段也不新增；同时保留
-        # 当前机器人实际在群状态，避免旧备份让已离群的群重新显示在面板。
-        merged_cfg = current_cfg.copy()
-        for key, value in old_cfg.items():
-            if key in current_cfg and key not in {"bot_in_group", "bot_muted"}:
-                merged_cfg[key] = value
-        if merged_cfg != current_cfg:
-            groups[str(chat_id)] = merged_cfg
-            updated_count += 1
-
-    if updated_count:
-        save_json(GROUPS_FILE, groups)
-    await update.message.reply_text(f"✅ 已迁移 {updated_count} 个现有群的旧配置。")
 
 
 async def post_init_setup(app):

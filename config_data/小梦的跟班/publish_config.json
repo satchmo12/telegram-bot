@@ -20,5 +20,6 @@
         "bot_channel_config": true,
         "group_config": true,
         "global_ad_config": true
-    }
+    },
+    "report_link_enabled": false
 }

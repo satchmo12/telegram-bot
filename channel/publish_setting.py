@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from datetime import datetime
-import asyncio
+from typing import Optional
 from urllib.parse import urlparse
 import os
 import random
@@ -12,7 +12,6 @@ from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, Typ
 from telegram.error import BadRequest, Forbidden
 
 from channel.channel_config import USER_MESSAGE_FILE
-from channel.discussion_mapping import resolve_discussion_message
 from utils import BOT_USER_FILE, _can_manage, is_super_admin, load_json, save_json
 from admin_permissions import get_delegated_admin_ids, has_admin_permission
 
@@ -30,9 +29,11 @@ REJECT_REASON_KEY = "publish_reject_reason"
 COMMENT_TARGET_KEY = "publish_comment_target"
 COMMENT_MAP_FILE = "data/publish_comment_map.json"
 KEYWORD_MAP_FILE = "data/publish_keyword_map.json"
+COMMENT_REPORTS_FILE = "data/comment_reports.json"
 KEYWORD_INPUT_KEY = "publish_keyword_search"
 KEYWORD_RESULTS_KEY = "publish_keyword_results"
 KEYWORD_LABEL_INPUT_KEY = "publish_keyword_label_input"
+REPORT_PAGE_SIZE = 6
 
 # =========================
 # 配置读写
@@ -57,6 +58,8 @@ def load_publish_config():
         # Comments are submitted through review and mirrored to forward_channel_id.
         "comment_forward_enabled": False,
         "forward_channel_id": None,
+        # Generate a public Telegram deep link for comments under admin posts.
+        "report_link_enabled": False,
         # Labels such as 艺名 / 联系方式 used to extract routing keywords.
         "keyword_extract_labels": [],
         # Preserve the existing behavior: one 投稿 action can send multiple posts.
@@ -113,6 +116,336 @@ def _save_comment_map(data: dict) -> None:
         for key, _ in oldest:
             data.pop(key, None)
     save_json(COMMENT_MAP_FILE, data)
+
+
+def _load_comment_reports() -> dict:
+    data = load_json(COMMENT_REPORTS_FILE)
+    if not isinstance(data, dict):
+        data = {}
+    reports = data.get("reports")
+    if not isinstance(reports, dict):
+        reports = {}
+    data["reports"] = reports
+    return data
+
+
+def _save_comment_reports(data: dict) -> None:
+    reports = data.get("reports", {}) if isinstance(data, dict) else {}
+    if isinstance(reports, dict) and len(reports) > 3000:
+        expired = sorted(
+            reports,
+            key=lambda key: int((reports.get(key) or {}).get("created_at", 0) or 0),
+        )[: len(reports) - 3000]
+        for key in expired:
+            reports.pop(key, None)
+    save_json(COMMENT_REPORTS_FILE, data)
+
+
+def _create_comment_report(
+    channel_id: int, message_id: int, report_id: str, subject_entries: Optional[list[dict]] = None
+) -> None:
+    data = _load_comment_reports()
+    subjects = []
+    for entry in subject_entries or []:
+        if not isinstance(entry, dict):
+            continue
+        label = str(entry.get("label") or "").strip()
+        value = str(entry.get("raw") or entry.get("key") or "").strip()
+        if value and not any(item.get("label") == label and item.get("value") == value for item in subjects):
+            subjects.append({"label": label, "value": value})
+    data["reports"][report_id] = {
+        "channel_id": int(channel_id),
+        "message_id": int(message_id),
+        "created_at": int(time.time()),
+        "subjects": subjects,
+        "comments": [],
+    }
+    _save_comment_reports(data)
+
+
+def _get_comment_report(report_id: str):
+    report = _load_comment_reports().get("reports", {}).get(str(report_id))
+    return report if isinstance(report, dict) else None
+
+
+def _comment_content(msg, max_length: int = 3500) -> str:
+    text = str(getattr(msg, "text", None) or getattr(msg, "caption", None) or "").strip()
+    if not text:
+        if getattr(msg, "photo", None):
+            text = "[图片评论]"
+        elif getattr(msg, "video", None):
+            text = "[视频评论]"
+        elif getattr(msg, "document", None):
+            text = "[文件评论]"
+        elif getattr(msg, "voice", None):
+            text = "[语音评论]"
+        else:
+            text = "[媒体评论]"
+    return text if len(text) <= max_length else text[: max_length - 1] + "…"
+
+
+def _comment_author(msg) -> str:
+    user = getattr(msg, "from_user", None)
+    if not user:
+        return "未知用户"
+    name = str(getattr(user, "full_name", "") or getattr(user, "first_name", "") or "用户").strip()
+    username = str(getattr(user, "username", "") or "").strip()
+    return f"{name} (@{username})" if username else name
+
+
+async def _report_deep_link(context: ContextTypes.DEFAULT_TYPE, report_id: str):
+    username = str(getattr(context.bot, "username", "") or "").strip().lstrip("@")
+    if not username:
+        try:
+            username = str((await context.bot.get_me()).username or "").strip().lstrip("@")
+        except Exception:
+            return None
+    return f"https://t.me/{username}?start=report_{report_id}" if username else None
+
+
+def _append_report_comment(submission: dict, forwarded_message) -> None:
+    target = _comment_target_from_submission(submission)
+    channel_id = _as_int(target.get("channel_id"))
+    message_id = _as_int(target.get("message_id"))
+    if channel_id is None or message_id is None:
+        return
+    data = _load_comment_reports()
+    report = None
+    for item in data["reports"].values():
+        if (
+            isinstance(item, dict)
+            and _as_int(item.get("channel_id")) == channel_id
+            and _as_int(item.get("message_id")) == message_id
+        ):
+            report = item
+            break
+    if report is None:
+        return
+    comments = report.setdefault("comments", [])
+    comments.append({
+        "author": str(submission.get("report_author") or "用户"),
+        "content": str(submission.get("report_content") or "[评论内容]"),
+        "forward_channel_id": _as_int(submission.get("forward_channel_id")),
+        "forward_message_id": _as_int(getattr(forwarded_message, "message_id", None)),
+        "created_at": int(time.time()),
+    })
+    if len(comments) > 1000:
+        del comments[:-1000]
+    _save_comment_reports(data)
+
+
+def _count_migratable_report_comments(target_channel_id: int) -> int:
+    total = 0
+    for report in _load_comment_reports().get("reports", {}).values():
+        if not isinstance(report, dict):
+            continue
+        for comment in report.get("comments", []) or []:
+            if not isinstance(comment, dict):
+                continue
+            old_channel = _as_int(comment.get("forward_channel_id"))
+            old_message = _as_int(comment.get("forward_message_id"))
+            if old_channel is not None and old_message is not None and old_channel != target_channel_id:
+                total += 1
+    return total
+
+
+async def _migrate_report_comments(
+    context: ContextTypes.DEFAULT_TYPE, target_channel_id: int
+) -> tuple[int, int, int, int]:
+    """Copy recorded comments to a new forward channel and rewrite report links.
+
+    Returns ``(migrated, restored_from_content, skipped, failed)``. Every
+    successful copy or content restoration updates stored channel/message IDs,
+    so report detail links immediately point at the new channel and a retry
+    will not duplicate already-migrated comments.
+    """
+    data = _load_comment_reports()
+    migrated = restored_from_content = skipped = failed = 0
+    changed = False
+    for report in data.get("reports", {}).values():
+        if not isinstance(report, dict):
+            continue
+        comments = report.get("comments", [])
+        if not isinstance(comments, list):
+            continue
+        for comment in comments:
+            if not isinstance(comment, dict):
+                skipped += 1
+                continue
+            source_channel_id = _as_int(comment.get("forward_channel_id"))
+            source_message_id = _as_int(comment.get("forward_message_id"))
+            if source_channel_id == target_channel_id:
+                skipped += 1
+                continue
+            if source_channel_id is None or source_message_id is None:
+                skipped += 1
+                continue
+            try:
+                copied = await context.bot.copy_message(
+                    chat_id=target_channel_id,
+                    from_chat_id=source_channel_id,
+                    message_id=source_message_id,
+                )
+                migration_mode = "copy"
+            except Exception as copy_exc:
+                # The old forward channel may have removed the historical
+                # message. Reports retain the comment body specifically so we
+                # can still restore a readable text version to the new channel.
+                content = str(comment.get("content") or "").strip()
+                author = str(comment.get("author") or "用户").strip()
+                if not content:
+                    failed += 1
+                    print(
+                        "[评论迁移] 原消息不存在且报告未保存内容 "
+                        f"from={source_channel_id}/{source_message_id}: {copy_exc}"
+                    )
+                    continue
+                # restore_text = f"💬 历史评论迁移\n作者：{author}\n\n{content}"
+                restore_text  = f"{content}"
+                try:
+                    copied = await context.bot.send_message(
+                        chat_id=target_channel_id,
+                        text=restore_text[:4096],
+                        disable_web_page_preview=True,
+                    )
+                    migration_mode = "content_restore"
+                    restored_from_content += 1
+                    print(
+                        "[评论迁移] 原消息不可复制，已按报告内容恢复 "
+                        f"from={source_channel_id}/{source_message_id} to={target_channel_id}"
+                    )
+                except Exception as restore_exc:
+                    failed += 1
+                    print(
+                        "[评论迁移] 转发和内容恢复均失败 "
+                        f"from={source_channel_id}/{source_message_id}: copy={copy_exc}; restore={restore_exc}"
+                    )
+                    continue
+            comment["forward_channel_id"] = target_channel_id
+            comment["forward_message_id"] = copied.message_id
+            comment["migrated_at"] = int(time.time())
+            comment["migration_mode"] = migration_mode
+            migrated += 1
+            changed = True
+    if changed:
+        _save_comment_reports(data)
+    return migrated, restored_from_content, skipped, failed
+
+
+async def _run_comment_migration_task(
+    context: ContextTypes.DEFAULT_TYPE, target_channel_id: int, notify_chat_id: int
+) -> None:
+    try:
+        migrated, restored_from_content, skipped, failed = await _migrate_report_comments(context, target_channel_id)
+        await context.bot.send_message(
+            chat_id=notify_chat_id,
+            text=(
+                "✅ 历史评论迁移完成\n"
+                f"新转发频道：{target_channel_id}\n"
+                f"成功迁移：{migrated} 条\n"
+                f"其中按报告内容恢复：{restored_from_content} 条\n"
+                f"无需迁移/缺少记录：{skipped} 条\n"
+                f"失败：{failed} 条\n\n"
+                "报告中的“打开转发频道评论”已自动指向新频道。"
+            ),
+        )
+    finally:
+        context.application.bot_data["comment_migration_in_progress"] = False
+
+
+def _report_subjects(report: dict) -> list[dict]:
+    subjects = report.get("subjects", []) if isinstance(report.get("subjects"), list) else []
+    result = [item for item in subjects if isinstance(item, dict) and item.get("value")]
+    if result:
+        return result
+
+    # Reports created before this field was added can recover their subject from
+    # the keyword index using the channel post they belong to.
+    channel_id = report.get("channel_id")
+    message_id = report.get("message_id")
+    for records in _load_keyword_map().values():
+        for record in records or []:
+            if (
+                isinstance(record, dict)
+                and str(record.get("channel_id")) == str(channel_id)
+                and int(record.get("channel_message_id", 0) or 0) == int(message_id or 0)
+            ):
+                label = str(record.get("label") or "").strip()
+                value = str(record.get("raw") or "").strip()
+                if value and not any(item.get("label") == label and item.get("value") == value for item in result):
+                    result.append({"label": label, "value": value})
+    return result
+
+
+def _report_subject_text(report: dict) -> str:
+    subjects = _report_subjects(report)
+    if not subjects:
+        return "收录对象：未识别"
+    values = []
+    for item in subjects:
+        label = str(item.get("label") or "").strip()
+        value = str(item.get("value") or "").strip()
+        values.append(f"{label}：{value}" if label else value)
+    return "收录对象：" + "；".join(values)
+
+
+def _comment_date(comment: dict) -> str:
+    try:
+        return datetime.fromtimestamp(int(comment.get("created_at", 0) or 0)).strftime("%Y-%m-%d")
+    except Exception:
+        return "未知日期"
+
+
+def _report_list_view(report_id: str, report: dict, page: int):
+    comments = report.get("comments", []) if isinstance(report.get("comments"), list) else []
+    total = len(comments)
+    pages = max(1, (total + REPORT_PAGE_SIZE - 1) // REPORT_PAGE_SIZE)
+    page = max(1, min(page, pages))
+    start = (page - 1) * REPORT_PAGE_SIZE
+    rows = []
+    lines = [
+        "📋 帖子评论报告",
+        "",
+        f"报告总数：{total} 条评论",
+        f"当前页：{page}/{pages}",
+        _report_subject_text(report),
+        "",
+        "请选择下方评论查看详情：",
+    ]
+    for index, comment in enumerate(comments[start : start + REPORT_PAGE_SIZE], start=start):
+        author = str(comment.get("author") or "用户")[:28]
+        date_text = _comment_date(comment)
+        # Do not put comment content into the report overview. It is available
+        # only after the viewer selects this entry.
+        rows.append([InlineKeyboardButton(
+            f"📅 {date_text} · {index + 1}. {author}",
+            callback_data=f"publish:report_detail:{report_id}:{page}:{index}",
+        )])
+    if not comments:
+        lines.append("暂无已审核并转发的评论。")
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"publish:report_page:{report_id}:{page - 1}"))
+    if page < pages:
+        nav.append(InlineKeyboardButton("➡️ 下一页", callback_data=f"publish:report_page:{report_id}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def handle_report_start_parameter(update: Update, context: ContextTypes.DEFAULT_TYPE, parameter: str) -> bool:
+    if not isinstance(parameter, str) or not parameter.startswith("report_"):
+        return False
+    report_id = parameter.removeprefix("report_").strip()
+    report = _get_comment_report(report_id)
+    if not report:
+        if update.message:
+            await update.message.reply_text("❗ 该报告不存在或已过期。")
+        return True
+    text, markup = _report_list_view(report_id, report, 1)
+    if update.message:
+        await update.message.reply_text(text, reply_markup=markup, disable_web_page_preview=True)
+    return True
 
 
 def _as_int(value):
@@ -228,6 +561,67 @@ def _register_post_keywords(entries: list[dict], channel_id, message_id) -> None
             "created_at": now,
         })
     _save_keyword_map(data)
+
+
+def _replace_post_keywords_from_channel_edit(
+    entries: list[dict], channel_id, message_id
+) -> int:
+    """Replace all keyword records for one edited main-channel post.
+
+    Unlike normal publication, an edit can remove or rename an existing keyword,
+    so stale entries for the same post must be removed across every keyword key.
+    Existing discussion mapping is retained for the replacement records.
+    """
+    data = _load_keyword_map()
+    retained_mapping = {}
+    for key, records in list(data.items()):
+        if not isinstance(records, list):
+            continue
+        kept = []
+        for record in records:
+            is_same_post = (
+                isinstance(record, dict)
+                and str(record.get("channel_id")) == str(channel_id)
+                and int(record.get("channel_message_id", 0) or 0) == int(message_id)
+            )
+            if is_same_post:
+                for field in ("discussion_chat_id", "discussion_message_id"):
+                    if record.get(field) is not None:
+                        retained_mapping[field] = record[field]
+            else:
+                kept.append(record)
+        if kept:
+            data[key] = kept
+        else:
+            data.pop(key, None)
+
+    # The discussion map is the source of truth if the old keyword records did
+    # not include it (for example, when an earlier edit occurred before mapping).
+    mapping = _load_comment_map().get(_comment_map_key(channel_id, message_id), {})
+    if isinstance(mapping, dict):
+        retained_mapping.setdefault("discussion_chat_id", mapping.get("discussion_chat_id"))
+        retained_mapping.setdefault("discussion_message_id", mapping.get("discussion_message_id"))
+
+    now = int(time.time())
+    for entry in entries:
+        key = entry.get("key")
+        if not key:
+            continue
+        record = {
+            "label": entry.get("label", ""),
+            "raw": entry.get("raw", key),
+            "channel_id": channel_id,
+            "channel_message_id": message_id,
+            "created_at": now,
+        }
+        if retained_mapping.get("discussion_chat_id") is not None:
+            record["discussion_chat_id"] = retained_mapping["discussion_chat_id"]
+        if retained_mapping.get("discussion_message_id") is not None:
+            record["discussion_message_id"] = retained_mapping["discussion_message_id"]
+        data.setdefault(key, []).append(record)
+
+    _save_keyword_map(data)
+    return len(entries)
 
 
 def _update_keyword_comment_mapping(channel_id, message_id, discussion_chat_id, discussion_message_id) -> None:
@@ -470,10 +864,29 @@ async def _capture_comment_source_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    """Capture linked-discussion copies when Telegram sends the Bot API update."""
+    """Capture discussion forwards and refresh keywords after channel edits."""
     msg = update.effective_message
     if not msg:
         return
+
+    config = load_publish_config()
+    main_channel_id = _as_int(config.get("channel_id"))
+    edited_channel_post = getattr(update, "edited_channel_post", None)
+    if (
+        edited_channel_post is not None
+        and main_channel_id is not None
+        and int(getattr(getattr(msg, "chat", None), "id", 0) or 0) == main_channel_id
+    ):
+        entries = _extract_routing_keywords(msg, config)
+        count = _replace_post_keywords_from_channel_edit(
+            entries, main_channel_id, msg.message_id
+        )
+        print(
+            "✅ 已更新编辑后频道帖关键词 "
+            f"channel={main_channel_id} message={msg.message_id} keywords={count}"
+        )
+        return
+
     sender_chat = getattr(msg, "sender_chat", None)
     origin = getattr(msg, "forward_origin", None)
     origin_chat = getattr(origin, "chat", None) if origin else None
@@ -489,9 +902,23 @@ async def _capture_comment_source_message(
     )
     if channel_id is None or channel_message_id is None:
         return
-    config = load_publish_config()
     if not bool(config.get("comment_forward_enabled", False)) or str(channel_id) != str(config.get("channel_id")):
         return
+
+    # Some bots receive an edit only through the linked discussion group's
+    # automatic forward (edited_message), not as edited_channel_post. The
+    # forwarded content mirrors the edited channel post, so refresh its keyword
+    # records using the source channel/message IDs in that update.
+    if getattr(update, "edited_message", None) is not None:
+        entries = _extract_routing_keywords(msg, config)
+        count = _replace_post_keywords_from_channel_edit(
+            entries, channel_id, channel_message_id
+        )
+        print(
+            "✅ 已通过讨论组编辑更新频道帖关键词 "
+            f"channel={channel_id} message={channel_message_id} keywords={count}"
+        )
+
     records = _load_comment_map()
     records[_comment_map_key(channel_id, channel_message_id)] = {
         "discussion_chat_id": msg.chat_id,
@@ -598,47 +1025,6 @@ async def handle_comment_start_parameter(
     return True
 
 
-async def _resolve_discussion_mapping_in_background(
-    context: ContextTypes.DEFAULT_TYPE, channel_id: int, message_id: int
-) -> None:
-    """Give Bot API a short chance, then use Telethon only as a fallback."""
-    await asyncio.sleep(1.5)
-    key = _comment_map_key(channel_id, message_id)
-    if _load_comment_map().get(key):
-        return
-    mapping = await resolve_discussion_message(context, channel_id, message_id)
-    if not mapping:
-        return
-    discussion_chat_id, discussion_message_id = mapping
-    records = _load_comment_map()
-    records[key] = {
-        "discussion_chat_id": discussion_chat_id,
-        "discussion_message_id": discussion_message_id,
-        "created_at": int(time.time()),
-    }
-    _save_comment_map(records)
-    _update_keyword_comment_mapping(
-        channel_id, message_id, discussion_chat_id, discussion_message_id
-    )
-    print(
-        "✅ 已通过协议号补齐 discussion 映射 "
-        f"{channel_id}/{message_id} -> {discussion_chat_id}/{discussion_message_id}"
-    )
-
-
-def _schedule_discussion_mapping(
-    context: ContextTypes.DEFAULT_TYPE, channel_id, message_id
-) -> None:
-    try:
-        channel_id, message_id = int(channel_id), int(message_id)
-    except (TypeError, ValueError):
-        return
-    context.application.create_task(
-        _resolve_discussion_mapping_in_background(context, channel_id, message_id),
-        name=f"discussion-map:{channel_id}:{message_id}",
-    )
-
-
 async def _copy_submission_to_channel(
     context: ContextTypes.DEFAULT_TYPE,
     submission: dict,
@@ -646,15 +1032,20 @@ async def _copy_submission_to_channel(
     config: dict,
     *,
     add_comment_button: bool = False,
+    report_url: str = "",
 ):
     """Copy original user content to a channel and optionally append comment action."""
     # The main post cannot have inline markup: Telegram otherwise hides its
     # native comment thread.
+    report_markup = (
+        InlineKeyboardMarkup([[InlineKeyboardButton("📋 查看评论报告", url=report_url)]])
+        if report_url else None
+    )
     published = await context.bot.copy_message(
         chat_id=target_channel_id,
         from_chat_id=submission["user_chat_id"],
         message_id=submission["user_message_id"],
-        reply_markup=None if add_comment_button else publish_buttons_keyboard(config),
+        reply_markup=report_markup if report_markup else (None if add_comment_button else publish_buttons_keyboard(config)),
     )
     if submission.get("keyword_entries"):
         _register_post_keywords(
@@ -663,10 +1054,6 @@ async def _copy_submission_to_channel(
             published.message_id,
         )
     if add_comment_button:
-        # Publishing must stay fast. Bot API mapping is immediate when its
-        # automatic-forward update arrives; otherwise the protocol lookup runs
-        # in the background and never blocks the success response.
-        _schedule_discussion_mapping(context, target_channel_id, published.message_id)
         # 暂时停用“参与讨论请点击下方按钮”辅助消息及其评论按钮。
         # 主频道正文保持无 InlineKeyboard，避免影响 Telegram 原生评论显示。
         pass
@@ -708,12 +1095,15 @@ async def _publish_comment_and_forward(
         message_id=submission["user_message_id"],
         reply_to_message_id=discussion_message_id,
     )
-    return await _copy_submission_to_channel(
+    submission["forward_channel_id"] = forward_channel_id
+    forwarded = await _copy_submission_to_channel(
         context,
         submission,
         forward_channel_id,
         config,
     )
+    _append_report_comment(submission, forwarded)
+    return forwarded
 
 
 async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, config: dict):
@@ -1026,6 +1416,7 @@ def publish_setting_keyboard(config: dict):
     reject_reason_required = bool(config.get("reject_reason_required", False))
     comment_forward_enabled = bool(config.get("comment_forward_enabled", False))
     continuous_submission_enabled = bool(config.get("continuous_submission_enabled", True))
+    report_link_enabled = bool(config.get("report_link_enabled", False))
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📢 发布频道", callback_data="publish:channel")],
         [InlineKeyboardButton("📝 审核设置", callback_data="publish:review")],
@@ -1065,6 +1456,14 @@ def publish_setting_keyboard(config: dict):
                 callback_data="publish:toggle_continuous_submission",
             )
         ],
+        [InlineKeyboardButton(
+            f"{'✅' if report_link_enabled else '🚫'} 生成报告链接",
+            callback_data="publish:toggle_report_link",
+        )],
+        [InlineKeyboardButton(
+            "🔄 一键迁移历史评论到当前转发频道",
+            callback_data="publish:migrate_forward_comments",
+        )],
         [InlineKeyboardButton("⬅️ 返回", callback_data="start:back")]
     ])
 
@@ -1137,6 +1536,50 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "comment":
         return await _start_comment_submission(query, context, config)
+
+    if action == "report_page":
+        parts = query.data.split(":")
+        if len(parts) != 4:
+            return await query.answer("报告分页参数无效。", show_alert=True)
+        try:
+            page = int(parts[3])
+        except ValueError:
+            page = 1
+        report = _get_comment_report(parts[2])
+        if not report:
+            return await query.answer("该报告不存在或已过期。", show_alert=True)
+        text, markup = _report_list_view(parts[2], report, page)
+        await query.answer()
+        return await query.edit_message_text(text, reply_markup=markup, disable_web_page_preview=True)
+
+    if action == "report_detail":
+        parts = query.data.split(":")
+        if len(parts) != 5:
+            return await query.answer("报告详情参数无效。", show_alert=True)
+        report = _get_comment_report(parts[2])
+        try:
+            page, index = int(parts[3]), int(parts[4])
+            comment = report.get("comments", [])[index] if report else None
+        except (ValueError, IndexError, TypeError):
+            comment = None
+        if not isinstance(comment, dict):
+            return await query.answer("该评论不存在或已清理。", show_alert=True)
+        text = "\n".join([
+            "💬 评论详情",
+            "",
+            _report_subject_text(report),
+            f"评论日期：{_comment_date(comment)}",
+            f"作者：{comment.get('author') or '用户'}",
+            "",
+            str(comment.get("content") or "[媒体评论]"),
+        ])
+        rows = []
+        link = _fallback_channel_message_link(comment.get("forward_channel_id"), comment.get("forward_message_id"))
+        if link:
+            rows.append([InlineKeyboardButton("🔗 打开转发频道评论", url=link)])
+        rows.append([InlineKeyboardButton("⬅️ 返回报告", callback_data=f"publish:report_page:{parts[2]}:{page}")])
+        await query.answer()
+        return await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows), disable_web_page_preview=True)
 
     if action == "keyword_pick":
         results = (context.user_data or {}).get(KEYWORD_RESULTS_KEY, [])
@@ -1271,6 +1714,38 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.edit_message_text(
             f"评论并转发已{'开启' if config['comment_forward_enabled'] else '关闭'}。"
             "开启后，管理员发布到主频道的帖子会显示评论按钮。",
+            reply_markup=publish_setting_keyboard(config),
+        )
+
+    if action == "migrate_forward_comments":
+        target_channel_id = _as_int(config.get("forward_channel_id"))
+        if target_channel_id is None:
+            return await query.answer("请先设置新的转发频道。", show_alert=True)
+        if context.application.bot_data.get("comment_migration_in_progress"):
+            return await query.answer("历史评论正在迁移，请稍候。", show_alert=True)
+        total = _count_migratable_report_comments(target_channel_id)
+        if total <= 0:
+            return await query.answer("没有需要迁移的已记录评论。", show_alert=True)
+        context.application.bot_data["comment_migration_in_progress"] = True
+        notify_chat_id = query.message.chat_id if query.message else query.from_user.id
+        context.application.create_task(
+            _run_comment_migration_task(context, target_channel_id, notify_chat_id),
+            name=f"comment-migration:{target_channel_id}",
+        )
+        await query.answer("已开始迁移。", show_alert=False)
+        return await query.edit_message_text(
+            f"🔄 正在迁移 {total} 条历史评论到新转发频道：{target_channel_id}\n"
+            "完成后会向你发送结果，报告链接会自动改为定位新频道。"
+        )
+
+    if action == "toggle_report_link":
+        config["report_link_enabled"] = not bool(config.get("report_link_enabled", False))
+        save_publish_config(config)
+        note = "管理员发布主频道帖子时会附加“查看报告”链接；评论审核通过并转发后会收录到报告。"
+        if not bool(config.get("comment_forward_enabled", False)):
+            note += "\n⚠️ 请同时开启“评论并转发”。"
+        return await query.edit_message_text(
+            f"报告链接已{'开启' if config['report_link_enabled'] else '关闭'}。\n{note}",
             reply_markup=publish_setting_keyboard(config),
         )
 
@@ -1990,6 +2465,8 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
             "user_chat_id": msg.chat_id,
             "username": msg.from_user.username,
             "author": _submission_author_text(msg),
+            "report_author": _comment_author(msg),
+            "report_content": _comment_content(msg),
             "user_message_id": msg.message_id,
             "submitted_at": int(time.time()),
             "submission_kind": submission_kind,
@@ -2029,12 +2506,25 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
     submission = {
         "user_chat_id": msg.chat_id,
         "user_message_id": msg.message_id,
+        "report_author": _comment_author(msg),
+        "report_content": _comment_content(msg),
         "keyword_entries": (
             _extract_routing_keywords(msg, config)
             if comment_forward_enabled and is_owner_submission and submission_kind == "main"
             else []
         ),
     }
+    report_id = ""
+    report_url = ""
+    if (
+        bool(config.get("report_link_enabled", False))
+        and comment_forward_enabled
+        and is_owner_submission
+        and submission_kind == "main"
+    ):
+        report_id = uuid.uuid4().hex[:16]
+        report_url = await _report_deep_link(context, report_id) or ""
+
     try:
         if submission_kind == "comment":
             published = await _publish_comment_and_forward(context, {
@@ -2053,6 +2543,14 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
                     and is_owner_submission
                     and submission_kind == "main"
                 ),
+                report_url=report_url,
+            )
+        if report_id and report_url:
+            _create_comment_report(
+                int(target_channel_id),
+                published.message_id,
+                report_id,
+                subject_entries=submission.get("keyword_entries", []),
             )
         _append_published_submission(msg, published.message_id, target_channel_id)
         _finish_submission_if_needed(context, config)

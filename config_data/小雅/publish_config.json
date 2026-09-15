@@ -17,7 +17,7 @@
     "proof_required": true,
     "reject_reason_required": true,
     "comment_forward_enabled": true,
-    "forward_channel_id": -1004428338952,
+    "forward_channel_id": -1003968770671,
     "keyword_extract_labels": [
         "艺名",
         "联系"
@@ -30,5 +30,7 @@
         "bot_channel_config": false,
         "group_config": false,
         "global_ad_config": false
-    }
+    },
+    "discussion_mapping_session": "main",
+    "report_link_enabled": true
 }

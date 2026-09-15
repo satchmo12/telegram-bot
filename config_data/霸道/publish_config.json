@@ -3,5 +3,22 @@
     "review_enabled": false,
     "daily_limit": 0,
     "ads_enabled": false,
-    "ads": []
+    "ads": [],
+    "buttons": [],
+    "bottom_buttons_enabled": true,
+    "proof_required": false,
+    "reject_reason_required": false,
+    "comment_forward_enabled": false,
+    "forward_channel_id": null,
+    "keyword_extract_labels": [],
+    "continuous_submission_enabled": true,
+    "custom_menu_buttons": {
+        "channel_clone": true,
+        "telethon_manage": true,
+        "bot_channel_config": true,
+        "group_config": true,
+        "global_ad_config": true
+    },
+    "submission_enabled": false,
+    "random_view_enabled": false
 }
