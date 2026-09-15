@@ -14,8 +14,8 @@
     "submission_enabled": true,
     "random_view_enabled": false,
     "bottom_buttons_enabled": false,
-    "proof_required": false,
-    "reject_reason_required": false,
+    "proof_required": true,
+    "reject_reason_required": true,
     "comment_forward_enabled": true,
     "forward_channel_id": -1003968770671,
     "keyword_extract_labels": [
@@ -33,5 +33,49 @@
         "global_ad_config": false
     },
     "discussion_mapping_session": "main",
-    "report_link_enabled": true
+    "report_link_enabled": true,
+    "template_publish_enabled": true,
+    "publish_templates": [
+        {
+            "id": 2,
+            "name": "2",
+            "text": "艺名：{艺名}  【联系】 {联系方式}\n\n课费：{课费}\n\n标签：\n{标签}",
+            "format": "html",
+            "buttons": []
+        },
+        {
+            "id": 3,
+            "name": "测试3",
+            "text": "🍃艺名 #{艺名}         🌎区域 #{区域}              \n\n📡联系：@{联系}  \n                                        \n💰课费：{课费}  \n额外积分：约课备注*艺术展览会推荐\n\n✅标签 ：{标签}  \n\n📡频道：{频道}",
+            "format": "html",
+            "buttons": []
+        },
+        {
+            "id": 4,
+            "name": "测试中奖",
+            "text": "艺名 {艺名}                 区域 #{区域}             \n\n联系：@{联系}  \n                                           助推频道\n课费：{课费}  \n额外积分：约课备注*艺术展览会推荐\n绅士Vip群\n标签 ：#手势验证 点击返回工兵区 \n#舌吻 #白虎 #肤白 #筷子腿 #A4腰\n\n📡频道：{频道}\n\n  老师总榜单  中转平台  点击更多福利\n\n   福利群       报告区       人气榜单",
+            "format": "html",
+            "buttons": []
+        },
+        {
+            "id": 5,
+            "name": "4",
+            "text": "艺名：{艺名}\n联系：{联系方式}",
+            "format": "html",
+            "buttons": [
+                {
+                    "text": "老师总榜单",
+                    "url": "https://t.me/+9VoY0YHVJXFhOWZh"
+                },
+                {
+                    "text": "中转平台",
+                    "url": "https://t.me/+-sIwH2NalFw2MzEy"
+                },
+                {
+                    "text": "点击更多福利",
+                    "url": "https://example.com"
+                }
+            ]
+        }
+    ]
 }

@@ -20,5 +20,6 @@
         "global_ad_config": true
     },
     "submission_enabled": false,
-    "random_view_enabled": false
+    "random_view_enabled": false,
+    "report_link_enabled": false
 }

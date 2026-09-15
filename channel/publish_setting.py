@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 from datetime import datetime
+from types import SimpleNamespace
+import html
 from typing import Optional
 from urllib.parse import urlparse
 import os
@@ -34,6 +36,9 @@ KEYWORD_INPUT_KEY = "publish_keyword_search"
 KEYWORD_RESULTS_KEY = "publish_keyword_results"
 KEYWORD_LABEL_INPUT_KEY = "publish_keyword_label_input"
 REPORT_PAGE_SIZE = 6
+TEMPLATE_DRAFT_KEY = "publish_template_draft"
+TEMPLATE_FLOW_KEY = "publish_template_flow"
+TEMPLATE_KEY_PATTERN = re.compile(r"\{([\w\-一-鿿]+)\}")
 
 # =========================
 # 配置读写
@@ -60,6 +65,9 @@ def load_publish_config():
         "forward_channel_id": None,
         # Generate a public Telegram deep link for comments under admin posts.
         "report_link_enabled": False,
+        # Structured template publishing for administrators.
+        "template_publish_enabled": False,
+        "publish_templates": [],
         # Labels such as 艺名 / 联系方式 used to extract routing keywords.
         "keyword_extract_labels": [],
         # Preserve the existing behavior: one 投稿 action can send multiple posts.
@@ -201,6 +209,57 @@ async def _report_deep_link(context: ContextTypes.DEFAULT_TYPE, report_id: str):
         except Exception:
             return None
     return f"https://t.me/{username}?start=report_{report_id}" if username else None
+
+
+async def _append_report_link_to_original_post(
+    context: ContextTypes.DEFAULT_TYPE,
+    source_message,
+    channel_id: int,
+    message_id: int,
+    report_url: str,
+) -> bool:
+    """Append a plain deep link without replacing Telegram's discussion button.
+
+    Only plain text/plain captions are edited. Rich entities are deliberately
+    left untouched because editing them as plain text would destroy formatting.
+    """
+    link_line = f"📋 评论报告：{report_url}"
+    text = getattr(source_message, "text", None)
+    caption = getattr(source_message, "caption", None)
+    try:
+        if text and not getattr(source_message, "entities", None):
+            new_text = f"{text.rstrip()}\n\n{link_line}"
+            if len(new_text) <= 4096:
+                await context.bot.edit_message_text(
+                    chat_id=channel_id,
+                    message_id=message_id,
+                    text=new_text,
+                    disable_web_page_preview=True,
+                )
+                return True
+        if caption and not getattr(source_message, "caption_entities", None):
+            new_caption = f"{caption.rstrip()}\n\n{link_line}"
+            if len(new_caption) <= 1024:
+                await context.bot.edit_message_caption(
+                    chat_id=channel_id,
+                    message_id=message_id,
+                    caption=new_caption,
+                )
+                return True
+    except Exception as exc:
+        print(f"追加评论报告链接到原帖失败: {exc}")
+    return False
+
+
+async def _send_report_link_companion(
+    context: ContextTypes.DEFAULT_TYPE, channel_id: int, report_url: str
+) -> None:
+    """Fallback: send only a plain link text immediately after the source post."""
+    await context.bot.send_message(
+        chat_id=channel_id,
+        text=f"📋 评论报告：{report_url}",
+        disable_web_page_preview=True,
+    )
 
 
 def _append_report_comment(submission: dict, forwarded_message) -> None:
@@ -1078,20 +1137,17 @@ async def _copy_submission_to_channel(
     config: dict,
     *,
     add_comment_button: bool = False,
-    report_url: str = "",
 ):
     """Copy original user content to a channel and optionally append comment action."""
     # The main post cannot have inline markup: Telegram otherwise hides its
     # native comment thread.
-    report_markup = (
-        InlineKeyboardMarkup([[InlineKeyboardButton("📋 查看评论报告", url=report_url)]])
-        if report_url else None
-    )
     published = await context.bot.copy_message(
         chat_id=target_channel_id,
         from_chat_id=submission["user_chat_id"],
         message_id=submission["user_message_id"],
-        reply_markup=report_markup if report_markup else (None if add_comment_button else publish_buttons_keyboard(config)),
+        # Never attach report markup to the main post: Telegram would replace
+        # its native discussion button with this inline keyboard.
+        reply_markup=None if add_comment_button else publish_buttons_keyboard(config),
     )
     if submission.get("keyword_entries"):
         _register_post_keywords(
@@ -1453,6 +1509,119 @@ def _custom_user_buttons_keyboard(config: dict):
     return InlineKeyboardMarkup(rows)
 
 
+def _publish_templates(config: dict) -> list[dict]:
+    templates = config.get("publish_templates", []) if isinstance(config, dict) else []
+    return [item for item in templates if isinstance(item, dict) and item.get("id")]
+
+
+def _template_by_id(config: dict, template_id: int):
+    for template in _publish_templates(config):
+        if int(template.get("id", 0) or 0) == int(template_id):
+            return template
+    return None
+
+
+def _template_keys(template: dict) -> list[str]:
+    sources = [str(template.get("text") or "")]
+    for button in template.get("buttons", []) or []:
+        if isinstance(button, dict):
+            sources.extend([str(button.get("text") or ""), str(button.get("url") or "")])
+    keys = []
+    for source in sources:
+        for key in TEMPLATE_KEY_PATTERN.findall(source):
+            if key not in keys:
+                keys.append(key)
+    return keys
+
+
+def _render_template_value(value: str, values: dict, *, html_mode: bool) -> str:
+    def replace(match):
+        raw = str(values.get(match.group(1), ""))
+        return html.escape(raw) if html_mode else raw
+    return TEMPLATE_KEY_PATTERN.sub(replace, str(value or ""))
+
+
+def _template_keyboard(template: dict, values: dict):
+    rows = []
+    for button in template.get("buttons", []) or []:
+        if not isinstance(button, dict):
+            continue
+        text = _render_template_value(str(button.get("text") or ""), values, html_mode=False).strip()
+        url = _render_template_value(str(button.get("url") or ""), values, html_mode=False).strip()
+        if text and _normalize_button_url(url):
+            rows.append([InlineKeyboardButton(text[:64], url=_normalize_button_url(url))])
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+def _render_template(template: dict, values: dict):
+    html_mode = str(template.get("format") or "plain") == "html"
+    text = _render_template_value(str(template.get("text") or ""), values, html_mode=html_mode)
+    markup = _template_keyboard(template, values)
+    return text, markup, "HTML" if html_mode else None
+
+
+def _template_flow_preview(template: dict, values: dict) -> str:
+    text, _, mode = _render_template(template, values)
+    return "\n".join([
+        f"🧩 模板预览：{template.get('name', '未命名')}",
+        f"格式：{'HTML' if mode == 'HTML' else '纯文本'}",
+        "",
+        text,
+        "",
+        "确认发布到频道？",
+    ])
+
+
+def _template_settings_text(config: dict) -> str:
+    templates = _publish_templates(config)
+    lines = [
+        "🧩 模板发布设置",
+        "",
+        f"状态：{'✅ 开启' if config.get('template_publish_enabled', False) else '🚫 关闭'}",
+        f"模板数量：{len(templates)}",
+        "",
+        "模板正文支持 {键名} 占位符，例如：{艺名}、{联系方式}。",
+        "按钮填写格式：按钮文字 | https://链接",
+        "发布时机器人会逐项询问占位符的值。",
+    ]
+    return "\n".join(lines)
+
+
+def _template_settings_keyboard(config: dict) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("➕ 添加模板", callback_data="publish:template_add")],
+    ]
+    for template in _publish_templates(config):
+        template_id = int(template.get("id", 0) or 0)
+        name = str(template.get("name") or f"模板 {template_id}")[:46]
+        rows.append([InlineKeyboardButton(f"📝 {name}", callback_data=f"publish:template_view:{template_id}")])
+    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="publish:back")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _template_detail_text(template: dict) -> str:
+    keys = _template_keys(template)
+    button_count = len(template.get("buttons", []) or [])
+    return "\n".join([
+        f"🧩 模板：{template.get('name', '未命名')}",
+        f"格式：{'HTML' if template.get('format') == 'html' else '纯文本'}",
+        f"占位键：{'、'.join(keys) if keys else '无'}",
+        f"超链接按钮：{button_count} 个",
+        "",
+        str(template.get("text") or ""),
+    ])
+
+
+def _template_draft_preview(draft: dict) -> str:
+    template = {
+        "name": draft.get("name", "未命名"),
+        "text": draft.get("text", ""),
+        "format": draft.get("format", "plain"),
+        "buttons": draft.get("buttons", []),
+    }
+    return _template_detail_text(template) + "\n\n确认保存该模板？"
+
+
 # =========================
 # 键盘
 # =========================
@@ -1463,6 +1632,7 @@ def publish_setting_keyboard(config: dict):
     comment_forward_enabled = bool(config.get("comment_forward_enabled", False))
     continuous_submission_enabled = bool(config.get("continuous_submission_enabled", True))
     report_link_enabled = bool(config.get("report_link_enabled", False))
+    template_publish_enabled = bool(config.get("template_publish_enabled", False))
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📢 发布频道", callback_data="publish:channel")],
         [InlineKeyboardButton("📝 审核设置", callback_data="publish:review")],
@@ -1510,6 +1680,13 @@ def publish_setting_keyboard(config: dict):
             "🔄 一键迁移历史评论到当前转发频道",
             callback_data="publish:migrate_forward_comments",
         )],
+        [
+            InlineKeyboardButton(
+                f"{'✅' if template_publish_enabled else '🚫'} 模板发布",
+                callback_data="publish:toggle_template_publish",
+            ),
+            InlineKeyboardButton("🧩 模板配置", callback_data="publish:template_settings"),
+        ],
         [InlineKeyboardButton("⬅️ 返回", callback_data="start:back")]
     ])
 
@@ -1662,6 +1839,189 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.answer("你没有投稿配置权限。", show_alert=True)
 
     await query.answer()
+
+    if action == "toggle_template_publish":
+        config["template_publish_enabled"] = not bool(config.get("template_publish_enabled", False))
+        save_publish_config(config)
+        return await query.edit_message_text(
+            f"模板发布已{'开启' if config['template_publish_enabled'] else '关闭'}。",
+            reply_markup=publish_setting_keyboard(config),
+        )
+
+    if action == "template_settings":
+        return await query.edit_message_text(
+            _template_settings_text(config),
+            reply_markup=_template_settings_keyboard(config),
+        )
+
+    if action == "template_add":
+        next_id = max((int(item.get("id", 0) or 0) for item in _publish_templates(config)), default=0) + 1
+        context.user_data[TEMPLATE_DRAFT_KEY] = {
+            "id": next_id, "step": "name", "format": "plain", "buttons": []
+        }
+        return await query.edit_message_text(
+            "请输入模板名称，例如：招聘发布。\n发送“取消”可放弃添加。"
+        )
+
+    if action == "template_format":
+        draft = context.user_data.get(TEMPLATE_DRAFT_KEY)
+        mode = query.data.split(":", 2)[2] if len(query.data.split(":", 2)) == 3 else ""
+        if not isinstance(draft, dict) or mode not in {"plain", "html"}:
+            return await query.answer("模板草稿已失效，请重新添加。", show_alert=True)
+        draft["format"] = mode
+        draft["step"] = "buttons"
+        return await query.edit_message_text(
+            "请输入超链接按钮，每行一个：\n"
+            "按钮文字 | https://example.com\n\n"
+            "没有按钮请发送“无”。按钮文字和链接都可使用 {键名}。"
+        )
+
+    if action == "template_save":
+        draft = context.user_data.get(TEMPLATE_DRAFT_KEY)
+        if not isinstance(draft, dict) or not draft.get("name") or not draft.get("text"):
+            return await query.answer("模板草稿不完整，请重新添加。", show_alert=True)
+        templates = _publish_templates(config)
+        templates = [item for item in templates if int(item.get("id", 0) or 0) != int(draft["id"])]
+        templates.append({
+            "id": int(draft["id"]),
+            "name": str(draft["name"])[:50],
+            "text": str(draft["text"]),
+            "format": str(draft.get("format") or "plain"),
+            "buttons": list(draft.get("buttons") or []),
+        })
+        config["publish_templates"] = templates
+        save_publish_config(config)
+        context.user_data.pop(TEMPLATE_DRAFT_KEY, None)
+        return await query.edit_message_text(
+            "✅ 模板已保存。\n\n" + _template_settings_text(config),
+            reply_markup=_template_settings_keyboard(config),
+        )
+
+    if action == "template_cancel":
+        context.user_data.pop(TEMPLATE_DRAFT_KEY, None)
+        context.user_data.pop(TEMPLATE_FLOW_KEY, None)
+        return await query.edit_message_text(
+            _template_settings_text(config),
+            reply_markup=_template_settings_keyboard(config),
+        )
+
+    if action == "template_view":
+        try:
+            template_id = int(query.data.split(":", 2)[2])
+        except (ValueError, IndexError):
+            return await query.answer("模板数据无效。", show_alert=True)
+        template = _template_by_id(config, template_id)
+        if not template:
+            return await query.answer("模板不存在。", show_alert=True)
+        return await query.edit_message_text(
+            _template_detail_text(template),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑 删除模板", callback_data=f"publish:template_delete:{template_id}")],
+                [InlineKeyboardButton("⬅️ 返回模板列表", callback_data="publish:template_settings")],
+            ]),
+        )
+
+    if action == "template_delete":
+        try:
+            template_id = int(query.data.split(":", 2)[2])
+        except (ValueError, IndexError):
+            return await query.answer("模板数据无效。", show_alert=True)
+        config["publish_templates"] = [
+            item for item in _publish_templates(config)
+            if int(item.get("id", 0) or 0) != template_id
+        ]
+        save_publish_config(config)
+        return await query.edit_message_text(
+            "✅ 模板已删除。\n\n" + _template_settings_text(config),
+            reply_markup=_template_settings_keyboard(config),
+        )
+
+    if action == "template_publish":
+        if not bool(config.get("template_publish_enabled", False)):
+            return await query.answer("模板发布尚未开启，请先在投稿设置中开启。", show_alert=True)
+        templates = _publish_templates(config)
+        if not templates:
+            return await query.answer("请先在模板配置中添加模板。", show_alert=True)
+        rows = [[InlineKeyboardButton(
+            f"🧩 {str(item.get('name') or '未命名')[:48]}",
+            callback_data=f"publish:template_use:{int(item['id'])}",
+        )] for item in templates]
+        rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
+        return await query.edit_message_text("请选择要发布的模板：", reply_markup=InlineKeyboardMarkup(rows))
+
+    if action == "template_use":
+        try:
+            template_id = int(query.data.split(":", 2)[2])
+        except (ValueError, IndexError):
+            return await query.answer("模板数据无效。", show_alert=True)
+        template = _template_by_id(config, template_id)
+        if not template:
+            return await query.answer("模板不存在。", show_alert=True)
+        keys = _template_keys(template)
+        context.user_data[TEMPLATE_FLOW_KEY] = {"template_id": template_id, "keys": keys, "index": 0, "values": {}}
+        if not keys:
+            context.user_data[TEMPLATE_FLOW_KEY]["ready"] = True
+            return await query.edit_message_text(
+                _template_flow_preview(template, {}),
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ 确认发布", callback_data="publish:template_confirm")],
+                    [InlineKeyboardButton("❌ 取消", callback_data="publish:template_cancel")],
+                ]),
+                parse_mode="HTML" if template.get("format") == "html" else None,
+            )
+        return await query.edit_message_text(
+            f"请填写 {len(keys)} 项中的第 1 项：\n\n<b>{html.escape(keys[0])}</b>",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ 取消", callback_data="publish:template_cancel")]]),
+            parse_mode="HTML",
+        )
+
+    if action == "template_confirm":
+        flow = context.user_data.get(TEMPLATE_FLOW_KEY)
+        if not isinstance(flow, dict) or not flow.get("ready"):
+            return await query.answer("模板填写尚未完成。", show_alert=True)
+        template = _template_by_id(config, int(flow.get("template_id", 0) or 0))
+        channel_id_int = _as_int(config.get("channel_id"))
+        if not template or channel_id_int is None:
+            return await query.answer("模板或发布频道不存在。", show_alert=True)
+        rendered_text, markup, parse_mode = _render_template(template, flow.get("values", {}))
+        # Template publishing follows the same main-post rules as ordinary
+        # admin publishing: keyword registration, comment routing and optional
+        # report link creation all use the configured publish channel.
+        entries = _extract_routing_keywords(SimpleNamespace(text=rendered_text, caption=None), config)
+        report_id = ""
+        report_url = ""
+        text_to_publish = rendered_text
+        if bool(config.get("comment_forward_enabled", False)) and bool(config.get("report_link_enabled", False)):
+            report_id = uuid.uuid4().hex[:16]
+            report_url = await _report_deep_link(context, report_id) or ""
+            if report_url:
+                link_for_text = html.escape(report_url) if parse_mode == "HTML" else report_url
+                text_to_publish = f"{rendered_text.rstrip()}\n\n📋 评论报告：{link_for_text}"
+        try:
+            published = await context.bot.send_message(
+                chat_id=channel_id_int,
+                text=text_to_publish,
+                parse_mode=parse_mode,
+                reply_markup=markup,
+                disable_web_page_preview=True,
+            )
+        except Exception as exc:
+            return await query.answer(f"发布失败：{str(exc)[:100]}", show_alert=True)
+        if bool(config.get("comment_forward_enabled", False)):
+            _register_post_keywords(entries, channel_id_int, published.message_id)
+        if report_id and report_url:
+            _create_comment_report(
+                channel_id_int,
+                published.message_id,
+                report_id,
+                subject_entries=entries,
+            )
+        context.user_data.pop(TEMPLATE_FLOW_KEY, None)
+        await query.answer("✅ 模板已发布。")
+        return await query.edit_message_text(
+            "✅ 模板已按投稿规则发布到频道。",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ 返回首页", callback_data="start:back")]]),
+        )
 
     if action == "publishset":
         help_text = "📣 请设置发布的频道"
@@ -2381,7 +2741,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def publish_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    # context.user_data["waiting_post"] = True
+    context.user_data["waiting_post"] = True
 
     enabled = context.user_data.get("post_no_name", True)
 
@@ -2589,7 +2949,6 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
                     and is_owner_submission
                     and submission_kind == "main"
                 ),
-                report_url=report_url,
             )
         if report_id and report_url:
             _create_comment_report(
@@ -2598,6 +2957,22 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
                 report_id,
                 subject_entries=submission.get("keyword_entries", []),
             )
+            embedded = await _append_report_link_to_original_post(
+                context,
+                msg,
+                int(target_channel_id),
+                published.message_id,
+                report_url,
+            )
+            if not embedded:
+                try:
+                    await _send_report_link_companion(
+                        context, int(target_channel_id), report_url
+                    )
+                except Exception as exc:
+                    # The report remains available by deep link; failure to
+                    # send the fallback companion must not roll back the post.
+                    print(f"发送评论报告入口失败: {exc}")
         _append_published_submission(msg, published.message_id, target_channel_id)
         _finish_submission_if_needed(context, config)
         await msg.reply_text("✅ 发送成功")
@@ -2609,11 +2984,114 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
 # 文本输入处理
 # =========================
 
+async def _handle_template_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    msg = update.message
+    if not msg or not msg.text:
+        return False
+    text = msg.text.strip()
+
+    draft = context.user_data.get(TEMPLATE_DRAFT_KEY)
+    if isinstance(draft, dict):
+        if text in {"取消", "返回"}:
+            context.user_data.pop(TEMPLATE_DRAFT_KEY, None)
+            await msg.reply_text("已取消模板编辑。")
+            return True
+        step = draft.get("step")
+        if step == "name":
+            if not text or len(text) > 50:
+                await msg.reply_text("模板名称不能为空且不能超过 50 个字符。")
+                return True
+            draft["name"] = text
+            draft["step"] = "text"
+            await msg.reply_text(
+                "请输入模板正文。可使用 {键名} 占位符，例如：\n"
+                "【艺名】：{艺名}\n【联系】：{联系方式}"
+            )
+            return True
+        if step == "text":
+            if not text or len(text) > 3500:
+                await msg.reply_text("模板正文不能为空且不能超过 3500 个字符。")
+                return True
+            draft["text"] = text
+            draft["step"] = "format"
+            await msg.reply_text(
+                "请选择文本格式：",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("纯文本", callback_data="publish:template_format:plain")],
+                    [InlineKeyboardButton("HTML 格式", callback_data="publish:template_format:html")],
+                    [InlineKeyboardButton("❌ 取消", callback_data="publish:template_cancel")],
+                ]),
+            )
+            return True
+        if step == "buttons":
+            if text in {"无", "跳过", "none"}:
+                draft["buttons"] = []
+            else:
+                buttons = []
+                for line in text.splitlines():
+                    if not line.strip():
+                        continue
+                    if "|" not in line:
+                        await msg.reply_text("❗ 每行格式应为：按钮文字 | https://链接")
+                        return True
+                    label, url = [part.strip() for part in line.split("|", 1)]
+                    test_url = TEMPLATE_KEY_PATTERN.sub("value", url)
+                    if not label or not _normalize_button_url(test_url):
+                        await msg.reply_text("❗ 按钮文字或链接无效，请重新输入。")
+                        return True
+                    buttons.append({"text": label[:64], "url": url})
+                draft["buttons"] = buttons
+            draft["step"] = "confirm"
+            await msg.reply_text(
+                _template_draft_preview(draft),
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ 保存模板", callback_data="publish:template_save")],
+                    [InlineKeyboardButton("❌ 取消", callback_data="publish:template_cancel")],
+                ]),
+            )
+            return True
+
+    flow = context.user_data.get(TEMPLATE_FLOW_KEY)
+    if isinstance(flow, dict) and not flow.get("ready"):
+        if text in {"取消", "返回"}:
+            context.user_data.pop(TEMPLATE_FLOW_KEY, None)
+            await msg.reply_text("已取消模板发布。")
+            return True
+        keys = flow.get("keys", [])
+        index = int(flow.get("index", 0) or 0)
+        if index < 0 or index >= len(keys):
+            context.user_data.pop(TEMPLATE_FLOW_KEY, None)
+            await msg.reply_text("模板填写状态已失效，请重新选择模板。")
+            return True
+        flow.setdefault("values", {})[keys[index]] = text
+        index += 1
+        flow["index"] = index
+        template = _template_by_id(load_publish_config(), int(flow.get("template_id", 0) or 0))
+        if not template:
+            context.user_data.pop(TEMPLATE_FLOW_KEY, None)
+            await msg.reply_text("模板不存在，请重新选择。")
+            return True
+        if index < len(keys):
+            await msg.reply_text(f"请填写第 {index + 1}/{len(keys)} 项：\n\n{keys[index]}")
+            return True
+        flow["ready"] = True
+        await msg.reply_text(
+            _template_flow_preview(template, flow.get("values", {})),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ 确认发布", callback_data="publish:template_confirm")],
+                [InlineKeyboardButton("❌ 取消", callback_data="publish:template_cancel")],
+            ]),
+            parse_mode="HTML" if template.get("format") == "html" else None,
+        )
+        return True
+
+    return False
+
+
 async def _handle_keyword_search_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    # Only consume messages while the user is explicitly in the keyword-search
-    # flow. Without this guard every private message would be treated as a
-    # keyword and could conflict with the bidirectional private-forward flow.
     if not (context.user_data or {}).get(KEYWORD_INPUT_KEY):
+        return False
+    if (context.user_data or {}).get("waiting_post"):
         return False
 
     msg = update.message
@@ -2621,7 +3099,6 @@ async def _handle_keyword_search_input(update: Update, context: ContextTypes.DEF
         if msg:
             await msg.reply_text("❗ 请发送文字关键词。")
         return True
-
     query = msg.text.strip()
     if query in {"取消", "返回"}:
         context.user_data.pop(KEYWORD_INPUT_KEY, None)
@@ -2629,48 +3106,32 @@ async def _handle_keyword_search_input(update: Update, context: ContextTypes.DEF
         return True
     routes = _find_keyword_routes(query)
     if not routes:
-        await msg.reply_text(
-            "❗ 未找到可评论的对应帖子。请检查关键词，或等待管理员发布带关键词的新帖子后重试。"
-        )
-        # A searched-but-unmatched keyword is still consumed; do not pass it
-        # to dual private forwarding or ordinary message routing.
+        await msg.reply_text("❗ 未找到可评论的对应帖子。请检查关键词，或等待管理员发布带关键词的新帖子后重试。")
         return True
-
     if len(routes) == 1:
         route = routes[0]
         context.user_data.pop(KEYWORD_INPUT_KEY, None)
-        context.user_data[COMMENT_TARGET_KEY] = {
-            "channel_id": route["channel_id"],
-            "message_id": route["channel_message_id"],
-        }
+        context.user_data[COMMENT_TARGET_KEY] = {"channel_id": route["channel_id"], "message_id": route["channel_message_id"]}
         context.user_data["waiting_post"] = True
         link = await _route_message_link(context, route)
-        return await msg.reply_text(
+        await msg.reply_text(
             f"✅ 已匹配 {route.get('label', '关键词')}：{route.get('raw', route.get('key'))}。\n"
             "请继续发送投稿内容，审核通过后会评论到对应帖子下，并发布到转发频道。",
-            reply_markup=_keyword_route_keyboard(
-                route,
-                link,
-                context.user_data.get("post_no_name", True),
-            ),
+            reply_markup=_keyword_route_keyboard(route, link, context.user_data.get("post_no_name", True)),
         )
+        return True
 
     context.user_data[KEYWORD_RESULTS_KEY] = routes
     rows = []
     for index, route in enumerate(routes):
         label = str(route.get("label", "关键词"))[:12]
         value = str(route.get("raw", route.get("key", "")))[:30]
-        rows.append([
-            InlineKeyboardButton(
-                f"选择 {label}：{value}",
-                callback_data=f"publish:keyword_pick:{index}",
-            )
-        ])
+        rows.append([InlineKeyboardButton(f"选择 {label}：{value}", callback_data=f"publish:keyword_pick:{index}")])
         link = await _route_message_link(context, route)
         if link:
             rows.append([InlineKeyboardButton(f"🔗 查看 {value}", url=link)])
-    return await msg.reply_text("找到多个对应帖子，请选择：", reply_markup=InlineKeyboardMarkup(rows))
-
+    await msg.reply_text("找到多个对应帖子，请选择：", reply_markup=InlineKeyboardMarkup(rows))
+    return True
 
 
 async def _handle_reject_reason_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -2738,17 +3199,20 @@ async def _handle_reject_reason_input(update: Update, context: ContextTypes.DEFA
     return True
 
 async def _keyword_search_interceptor(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Give keyword search first chance to consume private text.
+    """Give active keyword search first chance to consume private text.
 
-    Returning without raising lets the normal dual-forward handlers continue.
-    A handled search raises ApplicationHandlerStop before those handlers can
-    forward the text to an active private-dialog recipient.
+    If there is no active search/template flow, processing returns normally and
+    the bidirectional private-forward handlers can continue.
     """
+    if await _handle_template_input(update, context):
+        raise ApplicationHandlerStop
     if await _handle_keyword_search_input(update, context):
         raise ApplicationHandlerStop
 
 
 async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await _handle_template_input(update, context):
+        raise ApplicationHandlerStop
     if await _handle_keyword_search_input(update, context):
         # Stop group=999 message_router and any later handler from sending the
         # search text into the bidirectional/private bot flow.

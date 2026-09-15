@@ -335,6 +335,8 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
         user_data.get(WAITING_POST)
         or user_data.get("publish_reject_reason")
         or user_data.get("publish_keyword_search")
+        or user_data.get("publish_template_draft")
+        or user_data.get("publish_template_flow")
         or user_data.get("publish_keyword_label_input")
     ):
         print("[private_forward_router] 忽略：当前正在投稿、关键词搜索或填写拒绝原因")
@@ -435,6 +437,8 @@ def _can_configure_start_welcome(context: ContextTypes.DEFAULT_TYPE, user) -> bo
         is_owner = int(user.id) == int(context.application.bot_data.get("owner_id"))
     except (TypeError, ValueError):
         is_owner = False
+    return bool(is_owner)
+
     # This setting is intentionally stricter than ordinary admin settings.
     return bool(is_owner and is_active_subscription(user))
 
@@ -706,6 +710,8 @@ def _build_start_panel_rows(
         # 自定义用户入口属于投稿配置权限；多管理员本身仅所有者/超级管理员可管理。
         if can_use("submission_config"):
             owner_row.append(InlineKeyboardButton("🧩自定义按钮", callback_data="publish:custom_buttons"))
+            if bool(publish_config.get("template_publish_enabled", False)):
+                owner_row.append(InlineKeyboardButton("🧩模板发布", callback_data="publish:template_publish"))
         if is_bot_admin_viewer:
             owner_row.append(InlineKeyboardButton("👥多管理员", callback_data="adm:panel"))
         if can_config_welcome:
