@@ -105,9 +105,9 @@
         },
         {
             "id": 2,
-            "name": "2",
-            "text": "<a href=\"https://t.me/boost/yishuzanlanhui\">123</a>",
-            "format": "html",
+            "name": "发布新模版",
+            "text": "等待内容编辑中",
+            "format": "plain",
             "buttons": [],
             "button_columns": 1
         }

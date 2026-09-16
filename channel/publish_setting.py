@@ -34,6 +34,7 @@ KEYWORD_MAP_FILE = "data/publish_keyword_map.json"
 COMMENT_REPORTS_FILE = "data/comment_reports.json"
 KEYWORD_INPUT_KEY = "publish_keyword_search"
 KEYWORD_RESULTS_KEY = "publish_keyword_results"
+KEYWORD_POST_RESULTS_KEY = "publish_keyword_post_results"
 KEYWORD_LABEL_INPUT_KEY = "publish_keyword_label_input"
 REPORT_PAGE_SIZE = 6
 TEMPLATE_DRAFT_KEY = "publish_template_draft"
@@ -438,14 +439,30 @@ def _report_subjects(report: dict) -> list[dict]:
 
 def _report_subject_text(report: dict) -> str:
     subjects = _report_subjects(report)
+
     if not subjects:
         return "收录对象：未识别"
-    values = []
+
+    grouped = {}
+
     for item in subjects:
         label = str(item.get("label") or "").strip()
         value = str(item.get("value") or "").strip()
-        values.append(f"{label}：{value}" if label else value)
-    return "收录对象：" + "；".join(values)
+
+        if not label or not value:
+            continue
+
+        grouped.setdefault(label, []).append(value)
+
+    if not grouped:
+        return "收录对象：未识别"
+
+    lines = []
+
+    for label, values in grouped.items():
+        lines.append(f"{label}：" + "、".join(values))
+
+    return "\n".join(lines)
 
 
 def _comment_date(comment: dict) -> str:
@@ -747,7 +764,13 @@ def _update_keyword_comment_mapping(channel_id, message_id, discussion_chat_id, 
         _save_keyword_map(data)
 
 
-def _find_keyword_routes(query: str) -> list[dict]:
+def _find_keyword_routes(query: str, *, require_discussion: bool = True) -> list[dict]:
+    """Find indexed channel posts for a keyword.
+
+    Comment submission needs a linked discussion message, while ordinary post
+    lookup only needs the original channel message.  Keep the stricter behavior
+    as the default for the existing comment workflow.
+    """
     key = _normalize_routing_keyword(query)
     if not key:
         return []
@@ -757,7 +780,11 @@ def _find_keyword_routes(query: str) -> list[dict]:
         if key not in stored_key and stored_key not in key:
             continue
         for record in records or []:
-            if isinstance(record, dict) and record.get("discussion_message_id"):
+            if not isinstance(record, dict):
+                continue
+            if require_discussion and not record.get("discussion_message_id"):
+                continue
+            if record.get("channel_id") and record.get("channel_message_id"):
                 matches.append({**record, "key": stored_key})
     matches.sort(key=lambda item: int(item.get("created_at", 0) or 0), reverse=True)
     return matches[:10]
@@ -782,6 +809,104 @@ async def _route_message_link(context: ContextTypes.DEFAULT_TYPE, route: dict):
     except Exception:
         pass
     return _fallback_channel_message_link(channel_id, message_id)
+
+
+async def _send_keyword_post_result(message, context: ContextTypes.DEFAULT_TYPE, route: dict) -> None:
+    """Send the indexed channel post to a private lookup requester.
+
+    Copying shows the full original post inside the bot chat. If Telegram does
+    not allow copying (for example, protected content), a channel link is used
+    as the fallback.
+    """
+    label = str(route.get("label", "关键词"))
+    value = str(route.get("raw", route.get("key", "")))
+    link = await _route_message_link(context, route)
+    try:
+        await context.bot.copy_message(
+            chat_id=message.chat_id,
+            from_chat_id=route["channel_id"],
+            message_id=route["channel_message_id"],
+        )
+        if link:
+            await message.reply_text(
+                f"🔎 已找到 {label}：{value}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔗 在频道中打开", url=link)]
+                ]),
+                disable_web_page_preview=True,
+            )
+        return
+    except Exception as exc:
+        print(f"关键词帖子复制失败: {exc}")
+
+    if link:
+        await message.reply_text(
+            f"🔎 已找到 {label}：{value}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔗 查看对应帖子", url=link)]
+            ]),
+            disable_web_page_preview=True,
+        )
+    else:
+        await message.reply_text("❗ 已找到对应帖子，但暂时无法打开或复制该消息。")
+
+
+async def _handle_automatic_keyword_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Look up a directly-sent private keyword before normal text handling.
+
+    A miss deliberately returns ``False`` so the message continues through the
+    bot's existing private forwarding, commands, AI, and other workflows.
+    """
+    msg = update.message
+    if not msg or not msg.text or not update.effective_chat:
+        return False
+    if update.effective_chat.type != "private":
+        return False
+
+    user_data = context.user_data or {}
+    # Do not hijack content that belongs to an active publish/configuration
+    # flow. Active explicit keyword search is handled just before this helper.
+    if any([
+        user_data.get("waiting_post"),
+        user_data.get(REJECT_REASON_KEY),
+        user_data.get(KEYWORD_INPUT_KEY),
+        user_data.get(KEYWORD_LABEL_INPUT_KEY),
+        user_data.get(TEMPLATE_DRAFT_KEY),
+        user_data.get(TEMPLATE_FLOW_KEY),
+        user_data.get("publish_button_input"),
+        user_data.get("waiting_channel_id"),
+        user_data.get("waiting_forward_channel_id"),
+        user_data.get("waiting_limit"),
+    ]):
+        return False
+
+    query = msg.text.strip()
+    # Automatic lookup intentionally accepts only a short, single-line query.
+    # This lets users send “南伊一” directly without stealing normal sentences.
+    if not query or len(query) > 64 or "\n" in query or any(char.isspace() for char in query):
+        return False
+
+    routes = _find_keyword_routes(query, require_discussion=False)
+    if not routes:
+        return False
+
+    if len(routes) == 1:
+        await _send_keyword_post_result(msg, context, routes[0])
+        return True
+
+    context.user_data[KEYWORD_POST_RESULTS_KEY] = routes
+    rows = []
+    for index, route in enumerate(routes):
+        label = str(route.get("label", "关键词"))[:12]
+        value = str(route.get("raw", route.get("key", "")))[:30]
+        rows.append([
+            InlineKeyboardButton(
+                f"查看 {label}：{value}",
+                callback_data=f"publish:keyword_post_pick:{index}",
+            )
+        ])
+    await msg.reply_text("找到多个对应帖子，请选择要查看的帖子：", reply_markup=InlineKeyboardMarkup(rows))
+    return True
 
 
 def _keyword_route_keyboard(route: dict, link: str, enabled: bool):
@@ -1915,6 +2040,21 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows.append([InlineKeyboardButton("⬅️ 返回报告", callback_data=f"publish:report_page:{parts[2]}:{page}")])
         await query.answer()
         return await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows), disable_web_page_preview=True)
+
+    if action == "keyword_post_pick":
+        results = (context.user_data or {}).get(KEYWORD_POST_RESULTS_KEY, [])
+        try:
+            result_index = int(query.data.split(":", 2)[2])
+            route = results[result_index]
+        except (ValueError, IndexError, TypeError):
+            return await query.answer("关键词结果已失效，请重新搜索。", show_alert=True)
+        context.user_data.pop(KEYWORD_POST_RESULTS_KEY, None)
+        await query.answer()
+        await _send_keyword_post_result(query.message, context, route)
+        try:
+            return await query.edit_message_text("✅ 已发送对应帖子。")
+        except Exception:
+            return
 
     if action == "keyword_pick":
         results = (context.user_data or {}).get(KEYWORD_RESULTS_KEY, [])
@@ -3466,6 +3606,8 @@ async def _keyword_search_interceptor(update: Update, context: ContextTypes.DEFA
     if await _handle_template_input(update, context):
         raise ApplicationHandlerStop
     if await _handle_keyword_search_input(update, context):
+        raise ApplicationHandlerStop
+    if await _handle_automatic_keyword_lookup(update, context):
         raise ApplicationHandlerStop
 
 

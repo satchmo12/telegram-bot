@@ -47,6 +47,11 @@ from channel.telethon_login import _clear_login_state
 from info.storage import ensure_info_migrated
 from channel.channel_config import is_active_subscription
 from channel.publish_setting import handle_comment_start_parameter, handle_report_start_parameter, load_publish_config
+from custom_command_templates import (
+    register_custom_command_handlers,
+    visible_bot_commands,
+    visible_reply_labels,
+)
 from command_router import get_matched_command
 from admin_permissions import has_admin_permission, is_owner_or_super_admin
 
@@ -81,13 +86,14 @@ from telegram import BotCommand
 import uuid
 
 async def show_menu(update, context):
-
-    keyboard = [
-        # ["🎲积分抽奖"],
-        ["📅每日签到", "💰我的积分"],
-        ["🏆排行榜"],
-        # ["招商负责人","业务频道"]
-    ]
+    # Visible custom command templates are also exposed as reply-keyboard
+    # shortcuts. Adding/removing a visible template updates this menu too.
+    keyboard = [["📅每日签到"]]
+    for label in visible_reply_labels():
+        if len(keyboard[-1]) >= 2:
+            keyboard.append([])
+        keyboard[-1].append(label)
+    keyboard.append(["🏆排行榜", "💰我的积分"])
 
     reply_markup = ReplyKeyboardMarkup(
         keyboard,
@@ -657,7 +663,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text(text)
     return await context.bot.send_message(chat_id=update.effective_chat.id, text=text)
 
-
 async def features_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = build_feature_intro(context)
     if update.message:
@@ -713,6 +718,7 @@ def _build_start_panel_rows(
             if bool(publish_config.get("template_publish_enabled", False)):
                 owner_row.append(InlineKeyboardButton("🧩模板发布", callback_data="publish:template_publish"))
         if is_bot_admin_viewer:
+            owner_row.append(InlineKeyboardButton("⌨️命令模板", callback_data="ccmd:menu"))
             owner_row.append(InlineKeyboardButton("👥多管理员", callback_data="adm:panel"))
         if can_config_welcome:
             owner_row.append(InlineKeyboardButton("✏️欢迎词", callback_data="welcome:edit"))
@@ -896,6 +902,8 @@ def create_app(bot_cfg: dict):
     app.bot_data["token"] = token
     app.bot_data["name"] = bot_name
     app.bot_data["enabled_features"] = set(bot_cfg.get("enabled_features", []))
+    # Custom command edits can refresh Telegram's slash-command menu immediately.
+    app.bot_data["refresh_bot_commands"] = set_bot_commands
     set_bot_owner(bot_name, owner_id)
 
     app.add_handler(BusinessConnectionHandler(handle_business_connection))
@@ -930,6 +938,9 @@ def create_app(bot_cfg: dict):
 
     app.add_handler(CommandHandler("show", show_menu))
     app.add_handler(CommandHandler("hide", hide_menu))
+    # Custom command templates use their own early handlers so arbitrary
+    # owner-configured /commands can be added without editing this file.
+    register_custom_command_handlers(app)
 
     # ===== 私聊转发逻辑 =====
     if is_feature_enabled(app, "private_forward"):
@@ -1032,6 +1043,12 @@ async def set_bot_commands(app):
     commands.append(BotCommand("start", "功能简介"))
 
     # commands.append(BotCommand("help", "命令帮助"))
+    existing_commands = {command.command for command in commands}
+    for command, description in visible_bot_commands():
+        if command not in existing_commands:
+            commands.append(BotCommand(command, description))
+            existing_commands.add(command)
+
     # if "group" in enabled:
     #     commands.append(BotCommand("group", "群设置"))
 

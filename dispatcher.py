@@ -27,6 +27,7 @@ from feature_flags import is_feature_enabled
 from channel.channel_config import handle_channel_config_text
 from channel.telethon_login import handle_telethon_login_text
 from group.ai_group_reply import ai_group_reply_handler
+from custom_command_templates import handle_custom_template_text
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -108,7 +109,12 @@ async def handle_text_dispatcher(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     text = update.message.text.strip()
-    
+
+    # Reply-keyboard labels for visible command templates take precedence over
+    # generic AI/private-message processing.
+    if await handle_custom_template_text(update, context):
+        return
+
     # 仅主机器人：用户级 AI 对话（开启后无需 @）
     if await handle_gemini_ai(update, context):
         return
@@ -165,7 +171,6 @@ async def handle_text(update, context):
     if text == "🎲积分抽奖":
         await points_lottery_panel(update, context)
         return True
-
     elif text == "📅每日签到":
         await daycheckin(update, context)
         return True
