@@ -1553,7 +1553,25 @@ def _render_template_value(value: str, values: dict, *, html_mode: bool) -> str:
 #     return InlineKeyboardMarkup(rows) if rows else None
 
 
+def _template_button_columns(template: dict) -> int:
+    """Return the number of text links displayed on one line.
+
+    Template links are deliberately rendered in the message body instead of as
+    Telegram inline-keyboard buttons. Keep old templates compatible by using
+    one link per line when the setting is absent or invalid.
+    """
+    try:
+        return max(1, min(int(template.get("button_columns", 1) or 1), 8))
+    except (TypeError, ValueError):
+        return 1
+
+
 def _template_keyboard(template: dict, values: dict):
+    """Render configured template buttons as HTML text links.
+
+    ``button_columns`` controls wrapping: links in the same row are separated
+    by spaces, and a newline is inserted only after the configured count.
+    """
     links = []
 
     for button in template.get("buttons", []) or []:
@@ -1563,40 +1581,54 @@ def _template_keyboard(template: dict, values: dict):
         text = _render_template_value(
             str(button.get("text") or ""),
             values,
-            html_mode=False
+            html_mode=False,
         ).strip()
-
         url = _render_template_value(
             str(button.get("url") or ""),
             values,
-            html_mode=False
+            html_mode=False,
         ).strip()
-
         url = _normalize_button_url(url)
 
         if text and url:
-            links.append(f'<a href="{url}">{text[:64]}</a>')
+            # Escape rendered text/URL so a value cannot break the HTML body.
+            links.append(
+                f'<a href="{html.escape(url, quote=True)}">'
+                f'{html.escape(text[:64])}</a>'
+            )
 
-    return "\n".join(links) if links else None
+    if not links:
+        return None
+    columns = _template_button_columns(template)
+    return "\n".join(
+        "  ".join(links[index:index + columns])
+        for index in range(0, len(links), columns)
+    )
 
 
 def _render_template(template: dict, values: dict):
     html_mode = str(template.get("format") or "plain") == "html"
     text = _render_template_value(str(template.get("text") or ""), values, html_mode=html_mode)
-    # markup = _template_keyboard(template, values)
-    
     link_text = _template_keyboard(template, values)
 
     if link_text:
+        # Text hyperlinks require HTML parsing.  For a plain-text body, escape
+        # it first so it remains literal while the appended <a> tags work.
+        if not html_mode:
+            text = html.escape(text)
         text = f"{text.rstrip()}\n\n{link_text}"
-    
+        return text, None, "HTML"
+
     return text, None, "HTML" if html_mode else None
 
 
 def _template_flow_preview(template: dict, values: dict) -> str:
     text, _, mode = _render_template(template, values)
+    name = str(template.get("name", "未命名"))
+    if mode == "HTML":
+        name = html.escape(name)
     return "\n".join([
-        f"🧩 模板预览：{template.get('name', '未命名')}",
+        f"🧩 模板预览：{name}",
         f"格式：{'HTML' if mode == 'HTML' else '纯文本'}",
         "",
         text,
@@ -1614,7 +1646,8 @@ def _template_settings_text(config: dict) -> str:
         f"模板数量：{len(templates)}",
         "",
         "模板正文支持 {键名} 占位符，例如：{艺名}、{联系方式}。",
-        "按钮填写格式：按钮文字 | https://链接",
+        "超链接填写格式：按钮文字 | https://链接",
+        "可设置每行显示几个超链接；同一行的链接以空格分隔。",
         "发布时机器人会逐项询问占位符的值。",
     ]
     return "\n".join(lines)
@@ -1639,7 +1672,7 @@ def _template_detail_text(template: dict) -> str:
         f"🧩 模板：{template.get('name', '未命名')}",
         f"格式：{'HTML' if template.get('format') == 'html' else '纯文本'}",
         f"占位键：{'、'.join(keys) if keys else '无'}",
-        f"超链接按钮：{button_count} 个",
+        f"文本超链接：{button_count} 个（每行 {_template_button_columns(template)} 个）",
         "",
         str(template.get("text") or ""),
     ])
@@ -1651,8 +1684,33 @@ def _template_draft_preview(draft: dict) -> str:
         "text": draft.get("text", ""),
         "format": draft.get("format", "plain"),
         "buttons": draft.get("buttons", []),
+        "button_columns": draft.get("button_columns", 1),
     }
     return _template_detail_text(template) + "\n\n确认保存该模板？"
+
+
+def _template_edit_keyboard(draft: dict) -> InlineKeyboardMarkup:
+    """Keyboard for editing a draft without discarding its other fields."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ 模板名称", callback_data="publish:template_edit_field:name")],
+        [InlineKeyboardButton("📝 模板正文", callback_data="publish:template_edit_field:text")],
+        [InlineKeyboardButton("🔤 文本格式", callback_data="publish:template_edit_field:format")],
+        [InlineKeyboardButton("🔗 文本超链接", callback_data="publish:template_edit_field:buttons")],
+        [InlineKeyboardButton(
+            f"↔️ 每行链接数（当前 {_template_button_columns(draft)}）",
+            callback_data="publish:template_edit_field:button_columns",
+        )],
+        [InlineKeyboardButton("✅ 保存修改", callback_data="publish:template_save")],
+        [InlineKeyboardButton("❌ 取消", callback_data="publish:template_cancel")],
+    ])
+
+
+def _template_format_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("纯文本", callback_data="publish:template_format:plain")],
+        [InlineKeyboardButton("HTML 格式", callback_data="publish:template_format:html")],
+        [InlineKeyboardButton("❌ 取消", callback_data="publish:template_cancel")],
+    ])
 
 
 # =========================
@@ -1667,13 +1725,18 @@ def publish_setting_keyboard(config: dict):
     report_link_enabled = bool(config.get("report_link_enabled", False))
     template_publish_enabled = bool(config.get("template_publish_enabled", False))
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📢 发布频道", callback_data="publish:channel")],
-        [InlineKeyboardButton("📝 审核设置", callback_data="publish:review")],
+        [
+            InlineKeyboardButton("📢 发布频道", callback_data="publish:channel"),
+            InlineKeyboardButton("📝 审核设置", callback_data="publish:review"),
+        ],
         # [InlineKeyboardButton("📊 每日发布上限", callback_data="publish:limit")],
         # [InlineKeyboardButton("📣 广告管理", callback_data="publish:ads")],
-        [InlineKeyboardButton("🔘 底部按钮设置", callback_data="publish:buttons")],
+        # [InlineKeyboardButton("🔘 底部按钮设置", callback_data="publish:buttons")],
         [InlineKeyboardButton("🔑 关键词设置", callback_data="publish:keywords")],
         [
+            
+            InlineKeyboardButton("🔘 底部按钮设置", callback_data="publish:buttons"),
+            
             InlineKeyboardButton(
                 f"{'✅' if bottom_buttons_enabled else '🚫'} 显示底部按钮",
                 callback_data="publish:toggle_bottom_buttons",
@@ -1890,7 +1953,12 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "template_add":
         next_id = max((int(item.get("id", 0) or 0) for item in _publish_templates(config)), default=0) + 1
         context.user_data[TEMPLATE_DRAFT_KEY] = {
-            "id": next_id, "step": "name", "format": "plain", "buttons": []
+            "id": next_id,
+            "step": "name",
+            "format": "plain",
+            "buttons": [],
+            "button_columns": 1,
+            "is_new": True,
         }
         return await query.edit_message_text(
             "请输入模板名称，例如：招聘发布。\n发送“取消”可放弃添加。"
@@ -1901,18 +1969,41 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mode = query.data.split(":", 2)[2] if len(query.data.split(":", 2)) == 3 else ""
         if not isinstance(draft, dict) or mode not in {"plain", "html"}:
             return await query.answer("模板草稿已失效，请重新添加。", show_alert=True)
+
+        # The body was received before this choice.  PTB exposes its original
+        # Telegram entities as ``text_html``; use that representation only
+        # when HTML was selected so bold/italic/link formatting is retained.
+        if draft.get("body_plain") is not None:
+            draft["text"] = (
+                draft.get("body_html", draft["body_plain"])
+                if mode == "html"
+                else draft["body_plain"]
+            )
+            draft.pop("body_plain", None)
+            draft.pop("body_html", None)
         draft["format"] = mode
+
+        next_step = draft.pop("after_format_step", "buttons")
+        if next_step == "edit_menu":
+            draft["step"] = "edit_menu"
+            return await query.edit_message_text(
+                "请选择继续修改的项目，或保存修改：",
+                reply_markup=_template_edit_keyboard(draft),
+            )
+
         draft["step"] = "buttons"
         return await query.edit_message_text(
-            "请输入超链接按钮，每行一个：\n"
+            "请输入文本超链接，每行一个：\n"
             "按钮文字 | https://example.com\n\n"
-            "没有按钮请发送“无”。按钮文字和链接都可使用 {键名}。"
+            "没有超链接请发送“无”。按钮文字和链接都可使用 {键名}。"
         )
 
     if action == "template_save":
         draft = context.user_data.get(TEMPLATE_DRAFT_KEY)
         if not isinstance(draft, dict) or not draft.get("name") or not draft.get("text"):
             return await query.answer("模板草稿不完整，请重新添加。", show_alert=True)
+        if draft.get("step") not in {"confirm", "edit_menu"}:
+            return await query.answer("请先完成当前编辑项目。", show_alert=True)
         templates = _publish_templates(config)
         templates = [item for item in templates if int(item.get("id", 0) or 0) != int(draft["id"])]
         templates.append({
@@ -1921,6 +2012,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "text": str(draft["text"]),
             "format": str(draft.get("format") or "plain"),
             "buttons": list(draft.get("buttons") or []),
+            "button_columns": _template_button_columns(draft),
         })
         config["publish_templates"] = templates
         save_publish_config(config)
@@ -1949,10 +2041,57 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.edit_message_text(
             _template_detail_text(template),
             reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ 编辑模板", callback_data=f"publish:template_edit:{template_id}")],
                 [InlineKeyboardButton("🗑 删除模板", callback_data=f"publish:template_delete:{template_id}")],
                 [InlineKeyboardButton("⬅️ 返回模板列表", callback_data="publish:template_settings")],
             ]),
         )
+
+    if action == "template_edit":
+        try:
+            template_id = int(query.data.split(":", 2)[2])
+        except (ValueError, IndexError):
+            return await query.answer("模板数据无效。", show_alert=True)
+        template = _template_by_id(config, template_id)
+        if not template:
+            return await query.answer("模板不存在。", show_alert=True)
+        context.user_data[TEMPLATE_DRAFT_KEY] = {
+            "id": template_id,
+            "name": str(template.get("name") or ""),
+            "text": str(template.get("text") or ""),
+            "format": str(template.get("format") or "plain"),
+            "buttons": [dict(button) for button in template.get("buttons", []) if isinstance(button, dict)],
+            "button_columns": _template_button_columns(template),
+            "step": "edit_menu",
+            "is_new": False,
+        }
+        return await query.edit_message_text(
+            "✏️ 编辑模板：请选择要修改的项目。",
+            reply_markup=_template_edit_keyboard(context.user_data[TEMPLATE_DRAFT_KEY]),
+        )
+
+    if action == "template_edit_field":
+        draft = context.user_data.get(TEMPLATE_DRAFT_KEY)
+        field = query.data.split(":", 2)[2] if len(query.data.split(":", 2)) == 3 else ""
+        if not isinstance(draft, dict) or draft.get("step") != "edit_menu":
+            return await query.answer("编辑草稿已失效，请重新打开模板。", show_alert=True)
+        prompts = {
+            "name": "请输入新的模板名称（最多 50 个字符）：",
+            "text": "请输入新的模板正文。发送时的粗体、斜体、链接等格式会在选择 HTML 后保留。",
+            "buttons": (
+                "请输入文本超链接，每行一个：\n"
+                "按钮文字 | https://example.com\n\n"
+                "没有超链接请发送“无”。"
+            ),
+            "button_columns": "请输入每行显示几个超链接（1-8）。同一行的链接会用空格隔开：",
+        }
+        if field == "format":
+            draft["after_format_step"] = "edit_menu"
+            return await query.edit_message_text("请选择文本格式：", reply_markup=_template_format_keyboard())
+        if field not in prompts:
+            return await query.answer("不支持的编辑项目。", show_alert=True)
+        draft["step"] = f"edit_{field}"
+        return await query.edit_message_text(prompts[field])
 
     if action == "template_delete":
         try:
@@ -2000,7 +2139,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     [InlineKeyboardButton("✅ 确认发布", callback_data="publish:template_confirm")],
                     [InlineKeyboardButton("❌ 取消", callback_data="publish:template_cancel")],
                 ]),
-                parse_mode="HTML" if template.get("format") == "html" else None,
+                parse_mode=_render_template(template, {})[2],
             )
         return await query.edit_message_text(
             f"请填写 {len(keys)} 项中的第 1 项：\n\n<b>{html.escape(keys[0])}</b>",
@@ -3021,47 +3160,64 @@ async def _handle_template_input(update: Update, context: ContextTypes.DEFAULT_T
     msg = update.message
     if not msg or not msg.text:
         return False
-    text = msg.text.strip()
 
+    # Keep ``raw_text`` for the body.  ``text`` is only for commands and
+    # validation, so leading/trailing newlines in a template are not removed.
+    raw_text = msg.text
+    text = raw_text.strip()
     draft = context.user_data.get(TEMPLATE_DRAFT_KEY)
     if isinstance(draft, dict):
         if text in {"取消", "返回"}:
             context.user_data.pop(TEMPLATE_DRAFT_KEY, None)
             await msg.reply_text("已取消模板编辑。")
             return True
+
         step = draft.get("step")
-        if step == "name":
+        is_edit = str(step).startswith("edit_")
+
+        if step in {"name", "edit_name"}:
             if not text or len(text) > 50:
                 await msg.reply_text("模板名称不能为空且不能超过 50 个字符。")
                 return True
             draft["name"] = text
-            draft["step"] = "text"
-            await msg.reply_text(
-                "请输入模板正文。可使用 {键名} 占位符，例如：\n"
-                "【艺名】：{艺名}\n【联系】：{联系方式}"
-            )
+            if is_edit:
+                draft["step"] = "edit_menu"
+                await msg.reply_text(
+                    "模板名称已更新。请选择继续修改的项目，或保存修改：",
+                    reply_markup=_template_edit_keyboard(draft),
+                )
+            else:
+                draft["step"] = "text"
+                await msg.reply_text(
+                    "请输入模板正文。可使用 {键名} 占位符，例如：\n"
+                    "【艺名】：{艺名}\n【联系】：{联系方式}\n\n"
+                    "如果消息本身带有粗体、斜体、下划线或链接，请在下一步选择 HTML 格式以保留它们。"
+                )
             return True
-        if step == "text":
-            if not text or len(text) > 3500:
+
+        if step in {"text", "edit_text"}:
+            if not text or len(raw_text) > 3500:
                 await msg.reply_text("模板正文不能为空且不能超过 3500 个字符。")
                 return True
-            draft["text"] = text
+
+            # ``Message.text_html`` is generated from the entities Telegram
+            # received with this message.  Storing both forms lets the user
+            # decide *afterwards* whether to use plain text or HTML without
+            # losing the original rich formatting.
+            rich_text = getattr(msg, "text_html", None)
+            draft["body_plain"] = raw_text
+            draft["body_html"] = rich_text if isinstance(rich_text, str) else raw_text
+            draft["after_format_step"] = "edit_menu" if is_edit else "buttons"
             draft["step"] = "format"
-            await msg.reply_text(
-                "请选择文本格式：",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("纯文本", callback_data="publish:template_format:plain")],
-                    [InlineKeyboardButton("HTML 格式", callback_data="publish:template_format:html")],
-                    [InlineKeyboardButton("❌ 取消", callback_data="publish:template_cancel")],
-                ]),
-            )
+            await msg.reply_text("请选择文本格式：", reply_markup=_template_format_keyboard())
             return True
-        if step == "buttons":
+
+        if step in {"buttons", "edit_buttons"}:
             if text in {"无", "跳过", "none"}:
                 draft["buttons"] = []
             else:
                 buttons = []
-                for line in text.splitlines():
+                for line in raw_text.splitlines():
                     if not line.strip():
                         continue
                     if "|" not in line:
@@ -3074,6 +3230,23 @@ async def _handle_template_input(update: Update, context: ContextTypes.DEFAULT_T
                         return True
                     buttons.append({"text": label[:64], "url": url})
                 draft["buttons"] = buttons
+
+            if is_edit:
+                draft["step"] = "edit_menu"
+                await msg.reply_text(
+                    "文本超链接已更新。请选择继续修改的项目，或保存修改：",
+                    reply_markup=_template_edit_keyboard(draft),
+                )
+                return True
+
+            if draft.get("buttons"):
+                draft["step"] = "button_columns"
+                await msg.reply_text(
+                    "每行显示几个文本超链接？请输入 1-8。\n"
+                    "同一行的链接会以空格隔开，达到数量后自动换行。"
+                )
+                return True
+            draft["button_columns"] = 1
             draft["step"] = "confirm"
             await msg.reply_text(
                 _template_draft_preview(draft),
@@ -3082,6 +3255,32 @@ async def _handle_template_input(update: Update, context: ContextTypes.DEFAULT_T
                     [InlineKeyboardButton("❌ 取消", callback_data="publish:template_cancel")],
                 ]),
             )
+            return True
+
+        if step in {"button_columns", "edit_button_columns"}:
+            try:
+                columns = int(text)
+            except (TypeError, ValueError):
+                columns = 0
+            if not 1 <= columns <= 8:
+                await msg.reply_text("❗ 请输入 1 到 8 之间的整数。")
+                return True
+            draft["button_columns"] = columns
+            if is_edit:
+                draft["step"] = "edit_menu"
+                await msg.reply_text(
+                    "每行链接数已更新。请选择继续修改的项目，或保存修改：",
+                    reply_markup=_template_edit_keyboard(draft),
+                )
+            else:
+                draft["step"] = "confirm"
+                await msg.reply_text(
+                    _template_draft_preview(draft),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("✅ 保存模板", callback_data="publish:template_save")],
+                        [InlineKeyboardButton("❌ 取消", callback_data="publish:template_cancel")],
+                    ]),
+                )
             return True
 
     flow = context.user_data.get(TEMPLATE_FLOW_KEY)
@@ -3096,7 +3295,7 @@ async def _handle_template_input(update: Update, context: ContextTypes.DEFAULT_T
             context.user_data.pop(TEMPLATE_FLOW_KEY, None)
             await msg.reply_text("模板填写状态已失效，请重新选择模板。")
             return True
-        flow.setdefault("values", {})[keys[index]] = text
+        flow.setdefault("values", {})[keys[index]] = raw_text
         index += 1
         flow["index"] = index
         template = _template_by_id(load_publish_config(), int(flow.get("template_id", 0) or 0))
@@ -3114,7 +3313,7 @@ async def _handle_template_input(update: Update, context: ContextTypes.DEFAULT_T
                 [InlineKeyboardButton("✅ 确认发布", callback_data="publish:template_confirm")],
                 [InlineKeyboardButton("❌ 取消", callback_data="publish:template_cancel")],
             ]),
-            parse_mode="HTML" if template.get("format") == "html" else None,
+            parse_mode=_render_template(template, flow.get("values", {}))[2],
         )
         return True
 

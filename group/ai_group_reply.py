@@ -9,7 +9,7 @@ import httpx
 
 from telegram import Update
 from telegram.constants import ChatType
-from utils import get_group_whitelist
+from utils import get_group_whitelist, load_json, save_json
 
 from telegram.ext import (
     Application,
@@ -34,6 +34,11 @@ OLLAMA_KEEP_ALIVE = "10m"
 # AI 接话配置
 # ============================================================
 
+# 总开关关闭时不读取单个群的 AI 配置，也不会发送任何 AI 回复。只有总开关
+# 开启后，才会继续检查每个群自己的 ai_reply_enabled 开关和限额。
+GLOBAL_AI_REPLY_CONFIG_FILE = "data/ai_group_reply.json"
+DEFAULT_GLOBAL_AI_REPLY_ENABLED = False
+
 # 以下默认值只用于兼容缺少字段的旧群配置；实际开关和限额均从每个群的配置读取。
 DEFAULT_AI_REPLY_ENABLED = True
 DEFAULT_REPLY_PROBABILITY_PERCENT = 100
@@ -54,6 +59,33 @@ MAX_DELAY = 1.5
 # ============================================================
 # 群配置
 # ============================================================
+
+def get_global_ai_reply_config() -> dict:
+    """Load the per-bot master control for group AI replies.
+
+    A missing config defaults to disabled. This makes the master switch a real
+    safety gate: no per-group switch is inspected until an owner enables it.
+    """
+    raw = load_json(GLOBAL_AI_REPLY_CONFIG_FILE)
+    config = raw if isinstance(raw, dict) else {}
+    enabled = config.get("enabled", DEFAULT_GLOBAL_AI_REPLY_ENABLED)
+    if not isinstance(enabled, bool):
+        # Keep JSON configuration forgiving without treating a non-empty string
+        # such as ``"false"`` as enabled.
+        enabled = str(enabled).strip().lower() in {"1", "true", "yes", "on", "开启"}
+    return {"enabled": enabled}
+
+
+def is_global_ai_reply_enabled() -> bool:
+    """Return whether the master AI-reply switch is enabled for this bot."""
+    return bool(get_global_ai_reply_config()["enabled"])
+
+
+def save_global_ai_reply_config(config: dict) -> None:
+    """Persist the master AI-reply switch in this bot's isolated data file."""
+    enabled = bool((config or {}).get("enabled", DEFAULT_GLOBAL_AI_REPLY_ENABLED))
+    save_json(GLOBAL_AI_REPLY_CONFIG_FILE, {"enabled": enabled})
+
 
 def _clamp_int(value, minimum: int, maximum: int, default: int) -> int:
     try:
@@ -472,6 +504,14 @@ async def ai_group_reply_handler(
         return
 
     chat_id = chat.id
+
+    # ========================================================
+    # 总开关（必须先通过，再读取本群 AI 设置）
+    # ========================================================
+
+    if not is_global_ai_reply_enabled():
+        print(f"[AI][SKIP] AI 回复总开关未开启，跳过群 {chat_id}")
+        return
 
     # ========================================================
     # 群配置开关与限额

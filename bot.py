@@ -717,18 +717,24 @@ def _build_start_panel_rows(
         if can_config_welcome:
             owner_row.append(InlineKeyboardButton("✏️欢迎词", callback_data="welcome:edit"))
         if owner_row:
-            rows.append(owner_row)
+            # rows.append(owner_row)
+            # 每两个按钮一行
+            for i in range(0, len(owner_row), 2):
+                rows.append(owner_row[i:i + 2])
 
     if "channel" in enabled:
         channel_row = []
         if can_use("channel_config") and show_custom_button("channel_clone"):
             channel_row.append(InlineKeyboardButton("📣克隆频道", callback_data="chcfg:back"))
-        if can_use("telethon_manage") and show_custom_button("telethon_manage"):
-            channel_row.append(InlineKeyboardButton("📱管理协议号(可群发)", callback_data="tlogin:list"))
         if can_use("bot_channel_config") and show_custom_button("bot_channel_config"):
             channel_row.append(InlineKeyboardButton("📣机器人频道配置", callback_data="chcfg:bot"))
+        if can_use("telethon_manage") and show_custom_button("telethon_manage"):
+            channel_row.append(InlineKeyboardButton("📱管理协议号(可群发)", callback_data="tlogin:list"))
+       
         if channel_row:
-            rows.append(channel_row)
+            for i in range(0, len(channel_row), 2):
+                rows.append(channel_row[i:i + 2])
+            # rows.append(channel_row)
 
     if "group" in enabled:
         group_row = []

@@ -41,6 +41,10 @@ from group.points_rules import (
     get_invite_points_config,
     get_talk_points_config,
 )
+from group.ai_group_reply import (
+    get_global_ai_reply_config,
+    save_global_ai_reply_config,
+)
 from group.talk_lottery_settings import (
     STAGE_TRIGGER_RATE,
     handle_callback as _handle_talk_lottery_callback,
@@ -628,12 +632,69 @@ async def _open_force_subscribe_settings_panel(
     )
 
 
+def _can_manage_global_ai_reply(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    """Only the bot owner or a super admin may change an all-group switch."""
+    return _is_current_bot_owner(context, user_id) or is_super_admin(user_id)
+
+
+def _global_ai_reply_enabled_groups(groups: dict) -> tuple[int, int]:
+    """Return (locally enabled groups, active configured groups)."""
+    active_groups = [
+        cfg
+        for cfg in (groups or {}).values()
+        if isinstance(cfg, dict)
+        and bool(cfg.get("bot_in_group", False))
+        and bool(cfg.get("enabled", True))
+        and bool(cfg.get("bot_enabled", True))
+    ]
+    enabled = sum(bool(cfg.get("ai_reply_enabled", False)) for cfg in active_groups)
+    return enabled, len(active_groups)
+
+
+def _build_global_ai_reply_settings_text(cfg: dict, groups: dict) -> str:
+    enabled = bool(cfg.get("enabled", False))
+    local_enabled, active_groups = _global_ai_reply_enabled_groups(groups)
+    return "\n".join([
+        "🤖 AI 自动回复总开关",
+        f"状态：{'✅ 已开启' if enabled else '🚫 已关闭'}",
+        f"本地 AI 接话已开启群：{local_enabled} / {active_groups}",
+        "",
+        "运行顺序：先检查此总开关；只有总开关开启后，才会检查每个群的 AI 接话开关及其限额。",
+        "关闭总开关后，所有群都不会调用 AI，也不会读取单群 AI 开关。",
+    ])
+
+
+def _build_global_ai_reply_settings_keyboard(cfg: dict) -> InlineKeyboardMarkup:
+    enabled = bool(cfg.get("enabled", False))
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"{'✅' if enabled else '🚫'} AI 自动回复总开关",
+            callback_data=f"{CALLBACK_PREFIX}:ai_reply_global_toggle",
+        )],
+        [InlineKeyboardButton("⬅️ 返回群配置", callback_data=f"{CALLBACK_PREFIX}:list:1")],
+    ])
+
+
+async def _open_global_ai_reply_settings_panel(query, context: ContextTypes.DEFAULT_TYPE):
+    user_id = query.from_user.id if query and query.from_user else 0
+    if not _can_manage_global_ai_reply(context, user_id):
+        return await query.answer("只有机器人所有者或高级管理员可以设置 AI 总开关。", show_alert=True)
+    cfg = get_global_ai_reply_config()
+    await query.answer()
+    return await query.edit_message_text(
+        _build_global_ai_reply_settings_text(cfg, get_group_whitelist(context)),
+        reply_markup=_build_global_ai_reply_settings_keyboard(cfg),
+    )
+
+
 def _build_group_list_keyboard(
     data: dict,
     page: int = 1,
     *,
     add_group_url: str = "",
     include_global_ad: bool = False,
+    include_global_ai_reply: bool = False,
+    global_ai_reply_enabled: bool = False,
 ) -> InlineKeyboardMarkup:
     items = [
         (chat_id, cfg)
@@ -649,6 +710,13 @@ def _build_group_list_keyboard(
     end = start + GROUP_LIST_PAGE_SIZE
 
     rows = []
+    if include_global_ai_reply:
+        rows.append([
+            InlineKeyboardButton(
+                f"{'✅' if global_ai_reply_enabled else '🚫'} AI 自动回复总开关",
+                callback_data=f"{CALLBACK_PREFIX}:ai_reply_global_menu",
+            )
+        ])
     # if include_global_ad:
     #     rows.append(
     #         [
@@ -724,13 +792,16 @@ def _ai_reply_settings_values(cfg: dict) -> tuple[bool, int, int, int]:
 
 def _build_ai_reply_settings_text(chat_id_str: str, cfg: dict) -> str:
     enabled, probability, max_per_hour, min_interval = _ai_reply_settings_values(cfg)
+    global_enabled = bool(get_global_ai_reply_config().get("enabled", False))
     return (
         "🤖 AI 接话设置\n"
         f"群ID：<code>{chat_id_str}</code>\n\n"
-        f"状态：{'✅ 已开启' if enabled else '🚫 已关闭'}\n"
+        f"总开关：{'✅ 已开启' if global_enabled else '🚫 已关闭'}\n"
+        f"本群开关：{'✅ 已开启' if enabled else '🚫 已关闭'}\n"
         f"回复概率：{probability}%\n"
         f"每小时最多回复：{max_per_hour} 次\n"
-        f"两次回复最短间隔：{min_interval} 秒"
+        f"两次回复最短间隔：{min_interval} 秒\n\n"
+        "提示：仅总开关开启后，才会检查本群开关。"
     )
 
 
@@ -1111,12 +1182,17 @@ async def _show_group_picker(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_id = user.id if user else 0
     data = await _visible_group_data_for_user(context, user_id, data)
     include_global_ad = has_admin_permission(context, user_id, "global_ad_config")
-    if not data and not include_global_ad:
+    include_global_ai_reply = _can_manage_global_ai_reply(context, user_id)
+    if not data and not include_global_ad and not include_global_ai_reply:
         return await safe_reply(update, context, "暂无可配置的群记录。")
     page = 1
     context.user_data["group_setting_list_page"] = page
     keyboard = _build_group_list_keyboard(
-        data, page, include_global_ad=include_global_ad
+        data,
+        page,
+        include_global_ad=include_global_ad,
+        include_global_ai_reply=include_global_ai_reply,
+        global_ai_reply_enabled=bool(get_global_ai_reply_config().get("enabled", False)),
     )
     text = _group_list_text(data, page)
     if keyboard.inline_keyboard:
@@ -1224,7 +1300,8 @@ async def group_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = get_group_whitelist(context)
     data = await _visible_group_data_for_user(context, user_id, data)
     include_global_ad = has_admin_permission(context, user_id, "global_ad_config")
-    if not data and not include_global_ad:
+    include_global_ai_reply = _can_manage_global_ai_reply(context, user_id)
+    if not data and not include_global_ad and not include_global_ai_reply:
         add_group_url = _add_group_url(context)
         reply_markup = (
             InlineKeyboardMarkup(
@@ -1243,10 +1320,35 @@ async def group_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         page,
         add_group_url=_add_group_url(context),
         include_global_ad=include_global_ad,
+        include_global_ai_reply=include_global_ai_reply,
+        global_ai_reply_enabled=bool(get_global_ai_reply_config().get("enabled", False)),
     )
     if not keyboard.inline_keyboard:
         return await safe_reply(update, context, "暂无可配置的群记录。")
     await update.message.reply_text(_group_list_text(data, page), reply_markup=keyboard)
+
+
+@register_command("AI总开关", "AI回复总开关", "AI自动回复总开关")
+async def global_ai_reply_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+    if not update.effective_user or not _can_manage_global_ai_reply(
+        context, update.effective_user.id
+    ):
+        return await safe_reply(update, context, "❌ 只有机器人所有者或高级管理员可以设置 AI 总开关。")
+    if update.effective_chat and update.effective_chat.type != "private":
+        private_url = _private_chat_url(context)
+        reply_markup = (
+            InlineKeyboardMarkup([[InlineKeyboardButton("👉 去私聊配置", url=private_url)]])
+            if private_url
+            else None
+        )
+        return await safe_reply(update, context, "请在私聊里配置 AI 自动回复总开关。", reply_markup=reply_markup)
+    cfg = get_global_ai_reply_config()
+    return await update.message.reply_text(
+        _build_global_ai_reply_settings_text(cfg, get_group_whitelist(context)),
+        reply_markup=_build_global_ai_reply_settings_keyboard(cfg),
+    )
 
 
 @register_command("全群广告推送", "所有群广告推送")
@@ -1522,6 +1624,23 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
     user_id = update.effective_user.id
     data = get_group_whitelist(context)
 
+    if action == "ai_reply_global_menu":
+        if not _can_manage_global_ai_reply(context, user_id):
+            return await query.answer("只有机器人所有者或高级管理员可以设置 AI 总开关。", show_alert=True)
+        return await _open_global_ai_reply_settings_panel(query, context)
+
+    if action == "ai_reply_global_toggle":
+        if not _can_manage_global_ai_reply(context, user_id):
+            return await query.answer("只有机器人所有者或高级管理员可以设置 AI 总开关。", show_alert=True)
+        cfg = get_global_ai_reply_config()
+        cfg["enabled"] = not bool(cfg.get("enabled", False))
+        save_global_ai_reply_config(cfg)
+        await query.answer("✅ AI 自动回复总开关已更新", show_alert=False)
+        return await query.edit_message_text(
+            _build_global_ai_reply_settings_text(cfg, data),
+            reply_markup=_build_global_ai_reply_settings_keyboard(cfg),
+        )
+
     if action == "global_ad_menu":
         if not has_admin_permission(context, user_id, "global_ad_config"):
             return await query.answer("你没有全群广告推送权限。", show_alert=True)
@@ -1614,6 +1733,8 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             page,
             add_group_url=_add_group_url(context),
             include_global_ad=has_admin_permission(context, user_id, "global_ad_config"),
+            include_global_ai_reply=_can_manage_global_ai_reply(context, user_id),
+            global_ai_reply_enabled=bool(get_global_ai_reply_config().get("enabled", False)),
         )
         if not keyboard.inline_keyboard:
             return await query.edit_message_text("暂无可配置的群记录。")
@@ -1663,6 +1784,8 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             page,
             add_group_url=_add_group_url(context),
             include_global_ad=has_admin_permission(context, user_id, "global_ad_config"),
+            include_global_ai_reply=_can_manage_global_ai_reply(context, user_id),
+            global_ai_reply_enabled=bool(get_global_ai_reply_config().get("enabled", False)),
         )
         if not keyboard.inline_keyboard:
             return await query.edit_message_text("已退出该群，暂无可配置的群记录。")
