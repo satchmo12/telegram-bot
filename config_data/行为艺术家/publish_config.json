@@ -26,5 +26,80 @@
     },
     "report_link_enabled": true,
     "template_publish_enabled": true,
-    "publish_templates": []
+    "publish_templates": [
+        {
+            "id": 1,
+            "name": "发布模版",
+            "text": "🍃艺名 #<b>{艺名}</b>         🌎区域 #<b>{区域}   </b>           \n\n📡联系 ：@<b>{联系}  </b>   <a href=\"https://t.me/boost/yishuzanlanhui\">😀助推榜单</a>                                      \n💰课费：{课费}  \n<blockquote>额外积分：约课备注*艺术展览会推荐</blockquote>\n\n✅标签 ：{标签}  \n\n📡频道 ：{频道} \n<blockquote>{优惠}</blockquote> ",
+            "format": "html",
+            "buttons": [
+                {
+                    "text": "老师总榜单",
+                    "url": "https://t.me/+9VoY0YHVJXFhOWZh"
+                },
+                {
+                    "text": "中转平台",
+                    "url": "https://t.me/+-sIwH2NalFw2MzEy"
+                },
+                {
+                    "text": "点击更多福利",
+                    "url": "https://t.me/+-sIwH2NalFw2MzEy"
+                },
+                {
+                    "text": "📱福利群",
+                    "url": "https://t.me/+jfSu2e8TeHYwYmJh"
+                },
+                {
+                    "text": "📖报告区",
+                    "url": "https://t.me/+NtE1N4u4M2MzMjJh"
+                },
+                {
+                    "text": "🔥 人气榜单",
+                    "url": "https://t.me/+vOj1VuT48NE3MDc1"
+                }
+            ],
+            "button_columns": 3
+        },
+        {
+            "id": 2,
+            "name": "发布模版(不带优惠信息)",
+            "text": "🍃艺名 #<b>{艺名}</b>         🌎区域 #<b>{区域}   </b>           \n\n📡联系 ：@<b>{联系}  </b>   <a href=\"https://t.me/boost/yishuzanlanhui\">😀助推榜单</a>                                      \n💰课费：{课费}  \n<blockquote>额外积分：约课备注*艺术展览会推荐</blockquote>\n\n✅标签 ：{标签}  \n\n📡频道 ：{频道} \n",
+            "format": "html",
+            "buttons": [
+                {
+                    "text": "老师总榜单",
+                    "url": "https://t.me/+9VoY0YHVJXFhOWZh"
+                },
+                {
+                    "text": "中转平台",
+                    "url": "https://t.me/+-sIwH2NalFw2MzEy"
+                },
+                {
+                    "text": "点击更多福利",
+                    "url": "https://t.me/+-sIwH2NalFw2MzEy"
+                },
+                {
+                    "text": "📱福利群",
+                    "url": "https://t.me/+jfSu2e8TeHYwYmJh"
+                },
+                {
+                    "text": "📖报告区",
+                    "url": "https://t.me/+NtE1N4u4M2MzMjJh"
+                },
+                {
+                    "text": "🔥 人气榜单",
+                    "url": "https://t.me/+vOj1VuT48NE3MDc1"
+                }
+            ],
+            "button_columns": 3
+        },
+        {
+            "id": 3,
+            "name": "新模版",
+            "text": "测试",
+            "format": "plain",
+            "buttons": [],
+            "button_columns": 1
+        }
+    ]
 }

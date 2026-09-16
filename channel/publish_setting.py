@@ -1653,6 +1653,22 @@ def _template_settings_text(config: dict) -> str:
     return "\n".join(lines)
 
 
+def _template_publish_keyboard(config: dict) -> InlineKeyboardMarkup:
+    """Build the template picker used by the administrator publish flow."""
+    rows = []
+    for template in _publish_templates(config):
+        template_id = int(template.get("id", 0) or 0)
+        name = str(template.get("name") or f"模板 {template_id}")[:48]
+        rows.append([
+            InlineKeyboardButton(
+                f"🧩 {name}",
+                callback_data=f"publish:template_use:{template_id}",
+            )
+        ])
+    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
+    return InlineKeyboardMarkup(rows)
+
+
 def _template_settings_keyboard(config: dict) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("➕ 添加模板", callback_data="publish:template_add")],
@@ -2023,8 +2039,17 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     if action == "template_cancel":
+        # Adding/editing a template belongs to the template-settings screen,
+        # while cancelling an actual template *publication* must return to the
+        # template picker the user came from.
+        had_publish_flow = isinstance(context.user_data.get(TEMPLATE_FLOW_KEY), dict)
         context.user_data.pop(TEMPLATE_DRAFT_KEY, None)
         context.user_data.pop(TEMPLATE_FLOW_KEY, None)
+        if had_publish_flow:
+            return await query.edit_message_text(
+                "已取消本次模板发布，请重新选择模板：",
+                reply_markup=_template_publish_keyboard(config),
+            )
         return await query.edit_message_text(
             _template_settings_text(config),
             reply_markup=_template_settings_keyboard(config),
@@ -2114,12 +2139,10 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         templates = _publish_templates(config)
         if not templates:
             return await query.answer("请先在模板配置中添加模板。", show_alert=True)
-        rows = [[InlineKeyboardButton(
-            f"🧩 {str(item.get('name') or '未命名')[:48]}",
-            callback_data=f"publish:template_use:{int(item['id'])}",
-        )] for item in templates]
-        rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
-        return await query.edit_message_text("请选择要发布的模板：", reply_markup=InlineKeyboardMarkup(rows))
+        return await query.edit_message_text(
+            "请选择要发布的模板：",
+            reply_markup=_template_publish_keyboard(config),
+        )
 
     if action == "template_use":
         try:
@@ -3287,7 +3310,11 @@ async def _handle_template_input(update: Update, context: ContextTypes.DEFAULT_T
     if isinstance(flow, dict) and not flow.get("ready"):
         if text in {"取消", "返回"}:
             context.user_data.pop(TEMPLATE_FLOW_KEY, None)
-            await msg.reply_text("已取消模板发布。")
+            config = load_publish_config()
+            await msg.reply_text(
+                "已取消本次模板发布，请重新选择模板：",
+                reply_markup=_template_publish_keyboard(config),
+            )
             return True
         keys = flow.get("keys", [])
         index = int(flow.get("index", 0) or 0)

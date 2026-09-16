@@ -37,13 +37,6 @@
     "template_publish_enabled": true,
     "publish_templates": [
         {
-            "id": 2,
-            "name": "2",
-            "text": "艺名：{艺名}  【联系】 {联系方式}\n\n课费：{课费}\n\n标签：\n{标签}",
-            "format": "html",
-            "buttons": []
-        },
-        {
             "id": 3,
             "name": "测试3",
             "text": "🍃艺名 #{艺名}         🌎区域 #{区域}              \n\n📡联系：@{联系}  \n                                        \n💰课费：{课费}  \n额外积分：约课备注*艺术展览会推荐\n\n✅标签 ：{标签}  \n\n📡频道：{频道}",
@@ -53,7 +46,7 @@
         {
             "id": 4,
             "name": "测试中奖",
-            "text": "艺名 {艺名}                 区域 #{区域}             \n\n联系：@{联系}  \n                                           助推频道\n课费：{课费}  \n额外积分：约课备注*艺术展览会推荐\n绅士Vip群\n标签 ：#手势验证 点击返回工兵区 \n#舌吻 #白虎 #肤白 #筷子腿 #A4腰\n\n📡频道：{频道}\n\n  老师总榜单  中转平台  点击更多福利\n\n   福利群       报告区       人气榜单",
+            "text": "艺名 {艺名}                 区域 #{区域}             \n\n联系：@{联系}  <a href=\"https://t.me/boost/yishuzanlanhui\">😀助推榜单</a> \n                                           助推频道\n课费：{课费}  \n额外积分：约课备注*艺术展览会推荐\n绅士Vip群\n标签 ：#手势验证 点击返回工兵区 \n#舌吻 #白虎 #肤白 #筷子腿 #A4腰\n\n📡频道：{频道}\n\n  老师总榜单  中转平台  点击更多福利\n\n   福利群       报告区       人气榜单",
             "format": "html",
             "buttons": []
         },
@@ -79,8 +72,8 @@
         },
         {
             "id": 6,
-            "name": "5",
-            "text": "🍃艺名 #{<b>艺名</b>}         🌎区域 #{<b>区域</b>}              \n\n📡联系 ：@{<b>联系</b>}  \n                                        \n💰课费：{课费}  \n<blockquote>额外积分：约课备注*艺术展览会推荐</blockquote>\n\n✅标签 ：{标签}  \n\n📡频道 ：{频道}",
+            "name": "885",
+            "text": "🍃艺名 #<b>{艺名}</b>         🌎区域 #<b>{区域}   </b>           \n\n📡联系 ：@<b>{联系}  </b>   <a href=\"https://t.me/boost/yishuzanlanhui\">😀助推榜单</a>                                      \n💰课费：{课费}  \n<blockquote>额外积分：约课备注*艺术展览会推荐</blockquote>\n\n✅标签 ：{标签}  \n\n📡频道 ：{频道} \n\n <blockquote>{优惠}</blockquote> ",
             "format": "html",
             "buttons": [
                 {
@@ -96,19 +89,27 @@
                     "url": "https://t.me/+-sIwH2NalFw2MzEy"
                 },
                 {
-                    "text": "福利群",
+                    "text": "📱福利群",
                     "url": "https://t.me/+jfSu2e8TeHYwYmJh"
                 },
                 {
-                    "text": "报告区",
+                    "text": "📖报告区",
                     "url": "https://t.me/+NtE1N4u4M2MzMjJh"
                 },
                 {
-                    "text": "人气榜单",
+                    "text": "🔥 人气榜单",
                     "url": "https://t.me/+vOj1VuT48NE3MDc1"
                 }
             ],
             "button_columns": 3
+        },
+        {
+            "id": 2,
+            "name": "2",
+            "text": "<a href=\"https://t.me/boost/yishuzanlanhui\">123</a>",
+            "format": "html",
+            "buttons": [],
+            "button_columns": 1
         }
     ]
 }
