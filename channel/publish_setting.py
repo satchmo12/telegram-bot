@@ -14,7 +14,7 @@ from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, ContextTy
 from telegram.error import BadRequest, Forbidden
 
 from channel.channel_config import USER_MESSAGE_FILE
-from utils import BOT_USER_FILE, _can_manage, is_super_admin, load_json, save_json
+from utils import BOT_USER_FILE, _can_manage, is_shared_session_name, is_super_admin, load_json, save_json
 from admin_permissions import get_delegated_admin_ids, has_admin_permission
 
 PUBLISH_CONFIG_FILE = "config_data/publish_config.json"
@@ -32,6 +32,8 @@ COMMENT_TARGET_KEY = "publish_comment_target"
 COMMENT_MAP_FILE = "data/publish_comment_map.json"
 KEYWORD_MAP_FILE = "data/publish_keyword_map.json"
 COMMENT_REPORTS_FILE = "data/comment_reports.json"
+POST_MIGRATION_STATE_FILE = "data/publish_post_migrations.json"
+HISTORY_FORWARD_STATE_FILE = "data/history_forward_state.json"
 KEYWORD_INPUT_KEY = "publish_keyword_search"
 KEYWORD_RESULTS_KEY = "publish_keyword_results"
 KEYWORD_POST_RESULTS_KEY = "publish_keyword_post_results"
@@ -48,6 +50,10 @@ TEMPLATE_KEY_PATTERN = re.compile(r"\{([\w\-一-鿿]+)\}")
 def load_publish_config():
     default = {
         "channel_id": None,
+        # When the owner switches to a cloned replacement channel, remember
+        # the old/new pair so historical report migration needs no old ID input.
+        "pending_history_post_migration": None,
+        "channel_change_history": [],
         "review_enabled": False,
         "daily_limit": 0,
         "ads_enabled": False,
@@ -104,6 +110,33 @@ def load_publish_config():
 
 def save_publish_config(data):
     save_json(PUBLISH_CONFIG_FILE, data)
+
+
+def _record_publish_channel_change(config: dict, old_channel_id, new_channel_id) -> None:
+    """Remember a main-channel switch for later automatic history rebinding."""
+    old_channel_id = _as_int(old_channel_id)
+    new_channel_id = _as_int(new_channel_id)
+    if old_channel_id is None or new_channel_id is None or old_channel_id == new_channel_id:
+        return
+    history = config.get("channel_change_history")
+    if not isinstance(history, list):
+        history = []
+    record = {
+        "old_channel_id": old_channel_id,
+        "new_channel_id": new_channel_id,
+        "changed_at": int(time.time()),
+    }
+    history = [
+        item for item in history
+        if not (
+            isinstance(item, dict)
+            and _as_int(item.get("old_channel_id")) == old_channel_id
+            and _as_int(item.get("new_channel_id")) == new_channel_id
+        )
+    ]
+    history.append(record)
+    config["channel_change_history"] = history[-20:]
+    config["pending_history_post_migration"] = record
 
 
 def _comment_map_key(channel_id, message_id) -> str:
@@ -411,6 +444,414 @@ async def _run_comment_migration_task(
         )
     finally:
         context.application.bot_data["comment_migration_in_progress"] = False
+
+
+def _load_post_migration_state() -> dict:
+    data = load_json(POST_MIGRATION_STATE_FILE)
+    if not isinstance(data, dict):
+        data = {}
+    migrations = data.get("migrations")
+    if not isinstance(migrations, dict):
+        migrations = {}
+    data["migrations"] = migrations
+    return data
+
+
+def _save_post_migration_state(data: dict) -> None:
+    save_json(POST_MIGRATION_STATE_FILE, data if isinstance(data, dict) else {"migrations": {}})
+
+
+def _post_migration_key(source_channel_id: int, target_channel_id: int) -> str:
+    return f"{source_channel_id}:{target_channel_id}"
+
+
+def _collect_cloned_history_mappings(
+    target_channel_id: int,
+    source_channel_id: Optional[int] = None,
+) -> dict[tuple[int, int], dict]:
+    """Read exact old→new IDs written by the channel-clone forwarder.
+
+    The migration requires both the user-supplied old channel and current new
+    channel to match the stored mapping. This avoids rebinding a report to a
+    cloned post from an unrelated source channel.
+    """
+    state = load_json(HISTORY_FORWARD_STATE_FILE)
+    message_maps = state.get("message_maps", {}) if isinstance(state, dict) else {}
+    if not isinstance(message_maps, dict):
+        return {}
+
+    mappings: dict[tuple[int, int], dict] = {}
+    for raw_key, record in message_maps.items():
+        try:
+            session_name, source_text, target_text, _rule_hash = str(raw_key).rsplit(":", 3)
+        except ValueError:
+            continue
+        mapped_source_channel_id = _as_int(source_text)
+        mapped_target_channel_id = _as_int(target_text)
+        if (
+            mapped_source_channel_id is None
+            or mapped_target_channel_id != target_channel_id
+            or (
+                source_channel_id is not None
+                and mapped_source_channel_id != source_channel_id
+            )
+        ):
+            continue
+        messages = record.get("messages", {}) if isinstance(record, dict) else {}
+        if not isinstance(messages, dict):
+            continue
+        for source_message_text, target_message_ids in messages.items():
+            source_message_id = _as_int(source_message_text)
+            if source_message_id is None or source_message_id <= 0:
+                continue
+            values = target_message_ids if isinstance(target_message_ids, list) else []
+            target_message_id = next(
+                (value for value in (_as_int(item) for item in values) if value and value > 0),
+                None,
+            )
+            if target_message_id is None:
+                continue
+            mappings.setdefault(
+                (mapped_source_channel_id, source_message_id),
+                {
+                    "target_channel_id": target_channel_id,
+                    "target_message_id": target_message_id,
+                    "session_name": session_name,
+                },
+            )
+    return mappings
+
+
+def _count_migratable_history_posts(
+    target_channel_id: int,
+    source_channel_id: Optional[int] = None,
+) -> int:
+    mappings = _collect_cloned_history_mappings(target_channel_id, source_channel_id)
+    state = _load_post_migration_state()
+    total = 0
+    for (mapped_source_channel_id, source_message_id), mapping in mappings.items():
+        migration = state["migrations"].get(
+            _post_migration_key(mapped_source_channel_id, target_channel_id),
+            {},
+        )
+        posts = migration.get("posts", {}) if isinstance(migration, dict) else {}
+        if _as_int(posts.get(str(source_message_id))) != mapping["target_message_id"]:
+            total += 1
+    return total
+
+
+def _relocate_post_indexes(
+    reports_data: dict,
+    keyword_data: dict,
+    user_posts: list,
+    *,
+    source_channel_id: int,
+    source_message_id: int,
+    target_channel_id: int,
+    target_message_id: int,
+) -> list[str]:
+    """Point report/keyword/random-view records at an existing cloned post."""
+    report_ids = []
+    for report_id, report in reports_data.get("reports", {}).items():
+        if not isinstance(report, dict):
+            continue
+        if (
+            _as_int(report.get("channel_id")) == source_channel_id
+            and _as_int(report.get("message_id")) == source_message_id
+        ):
+            report["migrated_from_channel_id"] = source_channel_id
+            report["migrated_from_message_id"] = source_message_id
+            report["channel_id"] = target_channel_id
+            report["message_id"] = target_message_id
+            report["migrated_at"] = int(time.time())
+            report_ids.append(str(report_id))
+
+    for records in keyword_data.values():
+        for record in records if isinstance(records, list) else []:
+            if not isinstance(record, dict):
+                continue
+            if (
+                _as_int(record.get("channel_id")) == source_channel_id
+                and _as_int(record.get("channel_message_id")) == source_message_id
+            ):
+                record["channel_id"] = target_channel_id
+                record["channel_message_id"] = target_message_id
+                record["migrated_at"] = int(time.time())
+
+    for item in user_posts:
+        if not isinstance(item, dict):
+            continue
+        if (
+            _as_int(item.get("channel_id")) == source_channel_id
+            and _as_int(item.get("channel_message_id")) == source_message_id
+        ):
+            item["channel_id"] = target_channel_id
+            item["channel_message_id"] = target_message_id
+            item["migrated_at"] = int(time.time())
+
+    return report_ids
+
+
+def _apply_discussion_mapping_to_keyword_data(
+    keyword_data: dict,
+    channel_id: int,
+    message_id: int,
+    discussion_chat_id: int,
+    discussion_message_id: int,
+) -> bool:
+    changed = False
+    for records in keyword_data.values():
+        for record in records if isinstance(records, list) else []:
+            if not isinstance(record, dict):
+                continue
+            if (
+                _as_int(record.get("channel_id")) == channel_id
+                and _as_int(record.get("channel_message_id")) == message_id
+            ):
+                record["discussion_chat_id"] = discussion_chat_id
+                record["discussion_message_id"] = discussion_message_id
+                changed = True
+    return changed
+
+
+async def _restore_cloned_discussion_mappings(
+    context: ContextTypes.DEFAULT_TYPE,
+    config: dict,
+    target_channel_id: int,
+    target_message_ids: list[int],
+    comment_map: dict,
+    keyword_data: dict,
+) -> tuple[int, int, bool]:
+    """Resolve linked-discussion messages for already-cloned channel posts.
+
+    Cloned messages may have reached the discussion group while the old channel
+    was still configured, so the normal update handler intentionally ignored
+    them. Resolve them through the configured protocol account now, then write
+    the normal comment-map and keyword-map records expected by comment review.
+    """
+    unresolved = [
+        message_id for message_id in target_message_ids
+        if not isinstance(comment_map.get(_comment_map_key(target_channel_id, message_id)), dict)
+    ]
+    if not unresolved:
+        return 0, 0, False
+
+    try:
+        from telethon import utils as telethon_utils
+        from channel.telethon_forwarder import SESSION_CLIENTS_BY_BOT, _ensure_client
+        from channel.telethon_login import _get_api_creds
+    except Exception as exc:
+        print(f"[历史主帖关联] Telethon 讨论组映射组件不可用: {exc}")
+        return 0, len(unresolved), False
+
+    session_name = str(config.get("discussion_mapping_session") or "main").strip()
+    bot_name = str(context.application.bot_data.get("name", "") or "")
+    client = SESSION_CLIENTS_BY_BOT.get(bot_name, {}).get(session_name)
+    if client is None:
+        api_id, api_hash = _get_api_creds()
+        if not api_id or not api_hash:
+            return 0, len(unresolved), False
+        try:
+            client = await _ensure_client(
+                bot_name,
+                session_name,
+                api_id,
+                api_hash,
+                allow_shared_session=is_shared_session_name(session_name),
+            )
+        except Exception as exc:
+            print(f"[历史主帖关联] 启动讨论组映射协议号失败: {exc}")
+            return 0, len(unresolved), False
+    if client is None:
+        return 0, len(unresolved), False
+
+    resolved = failed = 0
+    changed = False
+    for message_id in unresolved:
+        try:
+            # Telethon's helper invokes GetDiscussionMessageRequest and returns
+            # the discussion peer plus the automatic-forward message ID.
+            discussion_peer, discussion_message_id = await client._get_comment_data(
+                target_channel_id,
+                message_id,
+            )
+            discussion_chat_id = int(telethon_utils.get_peer_id(discussion_peer))
+            comment_map[_comment_map_key(target_channel_id, message_id)] = {
+                "discussion_chat_id": discussion_chat_id,
+                "discussion_message_id": int(discussion_message_id),
+                "created_at": int(time.time()),
+                "migrated_at": int(time.time()),
+            }
+            _apply_discussion_mapping_to_keyword_data(
+                keyword_data,
+                target_channel_id,
+                message_id,
+                discussion_chat_id,
+                int(discussion_message_id),
+            )
+            resolved += 1
+            changed = True
+        except Exception as exc:
+            failed += 1
+            print(
+                "[历史主帖关联] 获取新频道讨论组映射失败 "
+                f"channel={target_channel_id} message={message_id}: {exc}"
+            )
+    return resolved, failed, changed
+
+
+async def _migrate_historical_posts(
+    context: ContextTypes.DEFAULT_TYPE,
+    target_channel_id: int,
+    source_channel_id: int,
+) -> tuple[int, int, int, int, int]:
+    """Rebind only mappings whose old and new channel IDs both match.
+
+    Also restores the target channel's discussion-message mapping so comments
+    on migrated posts continue to publish below the new cloned main post.
+    """
+    mappings = _collect_cloned_history_mappings(target_channel_id, source_channel_id)
+    state = _load_post_migration_state()
+    reports_data = _load_comment_reports()
+    keyword_data = _load_keyword_map()
+    user_posts = _load_cannel_message()
+    if not isinstance(user_posts, list):
+        user_posts = []
+
+    rebound = already_done = reports_relinked = 0
+    target_message_ids = []
+    data_changed = False
+    for (mapped_source_channel_id, source_message_id), mapping in mappings.items():
+        target_message_id = mapping["target_message_id"]
+        migration_key = _post_migration_key(mapped_source_channel_id, target_channel_id)
+        migration = state["migrations"].setdefault(
+            migration_key,
+            {"posts": {}, "created_at": int(time.time())},
+        )
+        posts = migration.setdefault("posts", {})
+        if not isinstance(posts, dict):
+            posts = migration["posts"] = {}
+        if _as_int(posts.get(str(source_message_id))) == target_message_id:
+            already_done += 1
+        else:
+            posts[str(source_message_id)] = target_message_id
+            migration["mode"] = "history_forward_state"
+            migration["session_name"] = mapping.get("session_name", "")
+            migration["updated_at"] = int(time.time())
+            _save_post_migration_state(state)
+            rebound += 1
+
+        if target_message_id not in target_message_ids:
+            target_message_ids.append(target_message_id)
+        report_ids = _relocate_post_indexes(
+            reports_data,
+            keyword_data,
+            user_posts,
+            source_channel_id=mapped_source_channel_id,
+            source_message_id=source_message_id,
+            target_channel_id=target_channel_id,
+            target_message_id=target_message_id,
+        )
+        reports_relinked += len(report_ids)
+        data_changed = True
+
+    comment_map = _load_comment_map()
+    discussion_resolved, discussion_failed, discussion_changed = await _restore_cloned_discussion_mappings(
+        context,
+        config=load_publish_config(),
+        target_channel_id=target_channel_id,
+        target_message_ids=target_message_ids,
+        comment_map=comment_map,
+        keyword_data=keyword_data,
+    )
+    if discussion_changed:
+        _save_comment_map(comment_map)
+        data_changed = True
+    if data_changed:
+        _save_comment_reports(reports_data)
+        _save_keyword_map(keyword_data)
+        save_json(USER_MESSAGE_FILE, user_posts)
+    return rebound, already_done, reports_relinked, discussion_resolved, discussion_failed
+
+
+async def _run_historical_post_migration_task(
+    context: ContextTypes.DEFAULT_TYPE,
+    source_channel_id: int,
+    target_channel_id: int,
+    notify_chat_id: int,
+) -> None:
+    try:
+        rebound, already_done, reports_relinked, discussion_resolved, discussion_failed = await _migrate_historical_posts(
+            context,
+            target_channel_id,
+            source_channel_id,
+        )
+        await context.bot.send_message(
+            chat_id=notify_chat_id,
+            text=(
+                "✅ 已关联已克隆历史主帖\n"
+                f"旧频道：{source_channel_id}\n"
+                f"新频道：{target_channel_id}\n"
+                f"新关联帖子：{rebound} 条\n"
+                f"已关联跳过：{already_done} 条\n"
+                f"已重新绑定报告：{reports_relinked} 个\n"
+                f"已恢复讨论组映射：{discussion_resolved} 条\n"
+                f"讨论组映射失败：{discussion_failed} 条\n\n"
+                "已同时校验 history_forward_state 中的旧频道和新频道 ID；"
+                "没有访问或复制已经失效的旧频道。"
+            ),
+        )
+    finally:
+        context.application.bot_data["history_post_migration_in_progress"] = False
+
+
+def _migration_source_counts(target_channel_id: int) -> dict[int, int]:
+    counts: dict[int, int] = {}
+    for source_channel_id, _source_message_id in _collect_cloned_history_mappings(target_channel_id):
+        counts[source_channel_id] = counts.get(source_channel_id, 0) + 1
+    return counts
+
+
+def _migration_source_keyboard(source_counts: dict[int, int]) -> InlineKeyboardMarkup:
+    rows = []
+    for source_channel_id, count in sorted(source_counts.items()):
+        rows.append([
+            InlineKeyboardButton(
+                f"旧频道 {source_channel_id}（{count} 条映射）",
+                callback_data=f"publish:migrate_history_source:{source_channel_id}",
+            )
+        ])
+    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="publish:back")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _start_historical_post_migration(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    source_channel_id: int,
+    target_channel_id: int,
+) -> None:
+    total = _count_migratable_history_posts(target_channel_id, source_channel_id)
+    if total <= 0:
+        await query.answer("这组旧/新频道没有待关联的消息映射。", show_alert=True)
+        return
+    context.application.bot_data["history_post_migration_in_progress"] = True
+    notify_chat_id = query.message.chat_id if query.message else query.from_user.id
+    context.application.create_task(
+        _run_historical_post_migration_task(
+            context,
+            source_channel_id,
+            target_channel_id,
+            notify_chat_id,
+        ),
+        name=f"history-post-rebind:{source_channel_id}:{target_channel_id}",
+    )
+    await query.answer("已开始自动关联。", show_alert=False)
+    await query.edit_message_text(
+        f"🔄 已确认频道变更并开始关联 {total} 条历史主帖。\n"
+        f"旧频道：{source_channel_id}\n新频道：{target_channel_id}\n"
+        "消息映射来自 history_forward_state，无需访问旧频道。"
+    )
 
 
 def _report_subjects(report: dict) -> list[dict]:
@@ -1302,11 +1743,31 @@ async def _publish_comment_and_forward(
     if forward_channel_id is None:
         raise RuntimeError("未设置转发频道")
 
-    mapping = _load_comment_map().get(_comment_map_key(main_channel_id, main_message_id))
+    comment_map = _load_comment_map()
+    mapping = comment_map.get(_comment_map_key(main_channel_id, main_message_id))
     if not isinstance(mapping, dict):
-        raise RuntimeError(
-            "未找到主频道帖子的讨论组映射。请确认主频道已绑定讨论组，机器人是讨论组管理员。"
+        # A post copied into a replacement channel may have entered its linked
+        # discussion group before that channel became the configured main
+        # channel, so the normal update listener had no reason to store it.
+        # Resolve it on demand through the configured protocol account.
+        keyword_data = _load_keyword_map()
+        resolved, _failed, changed = await _restore_cloned_discussion_mappings(
+            context,
+            config=config,
+            target_channel_id=main_channel_id,
+            target_message_ids=[main_message_id],
+            comment_map=comment_map,
+            keyword_data=keyword_data,
         )
+        if changed:
+            _save_comment_map(comment_map)
+            _save_keyword_map(keyword_data)
+        mapping = comment_map.get(_comment_map_key(main_channel_id, main_message_id))
+        if not isinstance(mapping, dict):
+            raise RuntimeError(
+                "未找到主频道帖子的讨论组映射。请确认新频道已绑定讨论组、"
+                "协议号可访问该频道及讨论组，且机器人是讨论组管理员。"
+            )
 
     discussion_chat_id = mapping.get("discussion_chat_id")
     discussion_message_id = mapping.get("discussion_message_id")
@@ -1917,6 +2378,10 @@ def publish_setting_keyboard(config: dict):
             "🔄 一键迁移历史评论到当前转发频道",
             callback_data="publish:migrate_forward_comments",
         )],
+        [InlineKeyboardButton(
+            "🔗 关联已克隆历史主帖到当前发布频道",
+            callback_data="publish:migrate_history_posts",
+        )],
         [
             InlineKeyboardButton(
                 f"{'✅' if template_publish_enabled else '🚫'} 模板发布",
@@ -2456,6 +2921,55 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"评论并转发已{'开启' if config['comment_forward_enabled'] else '关闭'}。"
             "开启后，管理员发布到主频道的帖子会显示评论按钮。",
             reply_markup=publish_setting_keyboard(config),
+        )
+
+    if action == "migrate_history_posts":
+        target_channel_id = _as_int(config.get("channel_id"))
+        if target_channel_id is None:
+            return await query.answer("请先将“发布频道”设置为新的目标频道。", show_alert=True)
+        if context.application.bot_data.get("history_post_migration_in_progress"):
+            return await query.answer("历史主帖正在关联，请稍候。", show_alert=True)
+
+        source_counts = _migration_source_counts(target_channel_id)
+        pending = config.get("pending_history_post_migration")
+        recorded_source = (
+            _as_int(pending.get("old_channel_id"))
+            if isinstance(pending, dict)
+            and _as_int(pending.get("new_channel_id")) == target_channel_id
+            else None
+        )
+        if recorded_source is not None and source_counts.get(recorded_source):
+            return await _start_historical_post_migration(
+                query, context, recorded_source, target_channel_id
+            )
+        if len(source_counts) == 1:
+            source_channel_id = next(iter(source_counts))
+            return await _start_historical_post_migration(
+                query, context, source_channel_id, target_channel_id
+            )
+        if not source_counts:
+            return await query.answer(
+                "未在 history_forward_state 中找到当前新频道的消息映射。",
+                show_alert=True,
+            )
+        await query.answer()
+        return await query.edit_message_text(
+            "当前新频道对应多个旧频道来源，请选择要关联的旧频道：",
+            reply_markup=_migration_source_keyboard(source_counts),
+        )
+
+    if action == "migrate_history_source":
+        try:
+            source_channel_id = int(query.data.split(":", 2)[2])
+        except (ValueError, IndexError):
+            return await query.answer("旧频道数据无效。", show_alert=True)
+        target_channel_id = _as_int(config.get("channel_id"))
+        if target_channel_id is None:
+            return await query.answer("当前发布频道无效。", show_alert=True)
+        if context.application.bot_data.get("history_post_migration_in_progress"):
+            return await query.answer("历史主帖正在关联，请稍候。", show_alert=True)
+        return await _start_historical_post_migration(
+            query, context, source_channel_id, target_channel_id
         )
 
     if action == "migrate_forward_comments":
@@ -3716,14 +4230,26 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if context.user_data.get("waiting_channel_id"):
         context.user_data["waiting_channel_id"] = False
+        try:
+            new_channel_id = int(update.message.text.strip())
+        except (TypeError, ValueError):
+            return await update.message.reply_text(
+                "❗ 频道 ID 格式错误，例如：-1001234567890"
+            )
 
-        channel_id = update.message.text.strip()
-        config["channel_id"] = int(channel_id)
-
+        old_channel_id = _as_int(config.get("channel_id"))
+        _record_publish_channel_change(config, old_channel_id, new_channel_id)
+        config["channel_id"] = new_channel_id
         save_publish_config(config)
 
+        note = ""
+        if old_channel_id is not None and old_channel_id != new_channel_id:
+            note = (
+                f"\n已记录频道变更：{old_channel_id} → {new_channel_id}。"
+                "之后可自动关联已克隆历史主帖。"
+            )
         return await update.message.reply_text(
-            f"✅ 已保存频道：{channel_id}"
+            f"✅ 已保存频道：{new_channel_id}{note}"
         )
 
     if context.user_data.get("waiting_limit"):

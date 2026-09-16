@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 import os
 from typing import Dict, List, Any, TYPE_CHECKING
 import re
@@ -186,18 +188,19 @@ async def _send_album_with_caption(client, target_id, files, *, caption: str = "
                 caption=parsed_caption,
                 parse_mode=parse_mode,
             )
-    await _send_file_safe(client, target_id, files, caption=caption or "", entities=normalized)
+    return await _send_file_safe(client, target_id, files, caption=caption or "", entities=normalized)
 
 
 async def _send_text_split(client, target_id, text: str, *, entities=None, limit: int = 4096):
     payload = text or ""
     if len(payload) <= limit:
-        await _send_message_safe(client, target_id, payload, entities=entities)
-        return
+        return [await _send_message_safe(client, target_id, payload, entities=entities)]
     first = payload[:limit]
     rest = payload[limit:]
-    await _send_message_safe(client, target_id, first, entities=entities)
-    await _send_message_safe(client, target_id, rest)
+    return [
+        await _send_message_safe(client, target_id, first, entities=entities),
+        await _send_message_safe(client, target_id, rest),
+    ]
 
 
 def _load_session_owners() -> dict:
@@ -214,8 +217,10 @@ def _can_use_rule(user_id: str, username: str) -> bool:
 
 
 def _is_owner_for_session(owners: dict, session_name: str, user_id: str, username: str) -> bool:
+    # ``main`` is a shared protocol session. It has no normal owner record,
+    # so only a super administrator may use it in a forwarding rule.
     if is_shared_session_name(session_name):
-        return False
+        return is_super_admin(user_id)
     sessions = owners.get("sessions", {}) if isinstance(owners, dict) else {}
     record = sessions.get(session_name)
     if not isinstance(record, dict):
@@ -723,6 +728,7 @@ def _load_history_state() -> dict:
     if not isinstance(data, dict):
         data = {}
     data.setdefault("keys", {})
+    data.setdefault("message_maps", {})
     return data
 
 
@@ -771,6 +777,134 @@ def _set_history_max_id(state: dict, key: str, msg_id: int):
     keys[key] = record
 
 
+def _rule_message_map_key(session_name: str, source_id, target_id, rule: dict) -> str:
+    """Build a stable mapping key for one source/target/rule combination."""
+    try:
+        payload = json.dumps(rule or {}, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        payload = repr(rule)
+    digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+    return f"{session_name}:{source_id}:{target_id}:{digest}"
+
+
+def _sent_message_ids(result, *, first_only: bool = False) -> list[int]:
+    """Extract destination message IDs from Telethon send return values."""
+    if result is None:
+        return []
+    values = result if isinstance(result, (list, tuple)) else [result]
+    message_ids = []
+    for value in values:
+        try:
+            message_id = int(getattr(value, "id", value))
+        except (TypeError, ValueError):
+            continue
+        if message_id > 0 and message_id not in message_ids:
+            message_ids.append(message_id)
+    return message_ids[:1] if first_only else message_ids
+
+
+def _record_message_mapping(
+    state: dict,
+    mapping_key: str,
+    source_message_id: int,
+    sent_result,
+    *,
+    first_only: bool = False,
+    max_keep: int = 2000,
+) -> None:
+    """Remember the destination post(s) needed to sync a later source edit."""
+    target_ids = _sent_message_ids(sent_result, first_only=first_only)
+    if not target_ids:
+        return
+    maps = state.setdefault("message_maps", {})
+    record = maps.setdefault(mapping_key, {})
+    messages = record.setdefault("messages", {})
+    source_key = str(int(source_message_id))
+    current = messages.get(source_key, [])
+    if not isinstance(current, list):
+        current = []
+    current = [int(item) for item in current if str(item).lstrip("-").isdigit()]
+    for target_id in target_ids:
+        if target_id not in current:
+            current.append(target_id)
+    messages[source_key] = current[-10:]
+    # Dict insertion order lets us trim old source mappings cheaply.
+    while len(messages) > max_keep:
+        messages.pop(next(iter(messages)))
+    record["messages"] = messages
+    maps[mapping_key] = record
+
+
+def _mapped_target_message_ids(state: dict, mapping_key: str, source_message_id: int) -> list[int]:
+    record = (state.get("message_maps", {}) or {}).get(mapping_key, {})
+    messages = record.get("messages", {}) if isinstance(record, dict) else {}
+    target_ids = messages.get(str(int(source_message_id)), []) if isinstance(messages, dict) else []
+    result = []
+    for value in target_ids if isinstance(target_ids, list) else []:
+        try:
+            message_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if message_id > 0 and message_id not in result:
+            result.append(message_id)
+    return result
+
+
+async def _edit_message_safe(client, target_id, message_id: int, text: str, *, entities=None):
+    """Edit a copied text or media caption while preserving entities when possible."""
+    normalized = _normalize_entities(entities)
+    try:
+        if normalized:
+            return await client.edit_message(
+                target_id,
+                message_id,
+                text or "",
+                formatting_entities=normalized,
+            )
+        return await client.edit_message(target_id, message_id, text or "")
+    except TypeError as exc:
+        if normalized and _is_subscripted_generics_error(exc):
+            return await client.edit_message(target_id, message_id, text or "")
+        raise
+
+
+def _render_rule_text(message, rule: dict):
+    """Return the edited text/caption as it should appear under one rule.
+
+    ``None`` means the edit should not be synced: it no longer matches the
+    rule, or processing removed it. Existing target posts are intentionally
+    left untouched rather than deleted automatically.
+    """
+    raw_text = _get_message_text(message)
+    if not _match_filter(message, rule.get("filter", "all")):
+        return None
+    if _has_fold_entities(message.entities):
+        processed_text, processed_entities = _process_text_preserve_folds(
+            raw_text, rule, message.entities
+        )
+    elif message.entities:
+        processed_text, processed_entities = _process_text_with_entities(
+            raw_text, rule, message.entities
+        )
+    else:
+        processed_text = _process_text(raw_text, rule)
+        processed_entities = None
+
+    if rule.get("skip_links") and _has_link(processed_text or "", processed_entities):
+        return None
+    if processed_text == "":
+        if not getattr(message, "media", None) or raw_text:
+            return None
+    if processed_text is None:
+        if not getattr(message, "media", None):
+            return None
+        processed_text = ""
+
+    if _needs_processing(rule):
+        return processed_text or "", processed_entities
+    return raw_text or "", getattr(message, "entities", None)
+
+
 FORWARD_USER_CONFIG_FILE = "config_data/forward_config_users_telethon.json"
 
 
@@ -803,7 +937,7 @@ def _collect_rules() -> Dict[str, List[dict]]:
             session_name = str(rule.get("session_name", "") or "").strip()
             if not session_name:
                 continue
-            if is_shared_session_name(session_name):
+            if is_shared_session_name(session_name) and not is_super_admin(user_id):
                 continue
             if not _is_owner_for_session(owners, session_name, str(user_id), username):
                 continue
@@ -911,19 +1045,20 @@ async def _ensure_client(
             apply_processing = _needs_processing(rule)
             for target_id in targets:
                 key = f"{session_name}:{chat_id}:{target_id}"
+                mapping_key = _rule_message_map_key(session_name, chat_id, target_id, rule)
                 try:
                     if message.media:
                         if apply_processing:
                             if processed_text and len(processed_text) > 1024:
                                 # 方案1/3：单条文本（若文本里有链接，Telegram 会出预览）
-                                await _send_message_safe(
+                                sent_result = await _send_message_safe(
                                     client,
                                     target_id,
                                     processed_text,
                                     entities=processed_entities,
                                 )
                             else:
-                                await _send_message_safe(
+                                sent_result = await _send_message_safe(
                                     client,
                                     target_id,
                                     processed_text or "",
@@ -932,14 +1067,14 @@ async def _ensure_client(
                                 )
                         else:
                             if raw_text and len(raw_text) > 1024:
-                                await _send_message_safe(
+                                sent_result = await _send_message_safe(
                                     client,
                                     target_id,
                                     raw_text,
                                     entities=message.entities,
                                 )
                             else:
-                                await _send_message_safe(
+                                sent_result = await _send_message_safe(
                                     client,
                                     target_id,
                                     raw_text,
@@ -948,19 +1083,25 @@ async def _ensure_client(
                                 )
                     else:
                         if apply_processing:
-                            await _send_message_safe(
+                            sent_result = await _send_message_safe(
                                 client,
                                 target_id,
                                 processed_text,
                                 entities=processed_entities,
                             )
                         else:
-                            await _send_message_safe(
+                            sent_result = await _send_message_safe(
                                 client,
                                 target_id,
                                 raw_text,
                                 entities=message.entities,
                             )
+                    _record_message_mapping(
+                        state,
+                        mapping_key,
+                        int(message.id),
+                        sent_result,
+                    )
                     _append_recent_id(state, key, int(message.id))
                     _set_history_max_id(state, key, int(message.id))
                     state_changed = True
@@ -971,6 +1112,72 @@ async def _ensure_client(
                     print(f"⚠️ 协议号转发失败: {e} (来源: {chat_id} → 目标: {target_id})")
         if state_changed:
             _save_history_state(state)
+
+    @client.on(events.MessageEdited)
+    async def _on_message_edited(event):
+        """Synchronize text/caption edits for posts forwarded after this release.
+
+        Source-to-target IDs are recorded at initial forwarding time. Posts sent
+        before that have no mapping and are deliberately ignored rather than
+        risking an edit to the wrong destination message.
+        """
+        if getattr(event, "out", False):
+            return
+        if not getattr(event, "is_channel", False) or getattr(event, "is_group", False):
+            return
+        message = getattr(event, "message", None)
+        chat_id = getattr(event, "chat_id", None)
+        if not message or chat_id is None or not getattr(message, "id", None):
+            return
+        rules = SESSION_RULES_BY_BOT.get(bot_name, {}).get(session_name, [])
+        if not rules:
+            return
+
+        state = _load_history_state()
+        for rule in rules:
+            sources = set(rule.get("sources", []) or [])
+            if sources and int(chat_id) not in sources:
+                continue
+            for target_id in rule.get("targets", []) or []:
+                mapping_key = _rule_message_map_key(session_name, chat_id, target_id, rule)
+                target_message_ids = _mapped_target_message_ids(
+                    state, mapping_key, int(message.id)
+                )
+                if not target_message_ids:
+                    continue
+
+                rendered = _render_rule_text(message, rule)
+                if rendered is None:
+                    if DEBUG_FORWARD:
+                        print(
+                            f"⛔ 编辑未同步：编辑内容不再满足规则 "
+                            f"(session={session_name} source={chat_id} message={message.id})"
+                        )
+                    continue
+                text, entities = rendered
+                for target_message_id in target_message_ids:
+                    try:
+                        await _edit_message_safe(
+                            client,
+                            target_id,
+                            target_message_id,
+                            text,
+                            entities=entities,
+                        )
+                        if DEBUG_FORWARD:
+                            print(
+                                f"✏️ 已同步频道编辑: session={session_name} "
+                                f"{chat_id}/{message.id} -> {target_id}/{target_message_id}"
+                            )
+                    except Exception as exc:
+                        # Telegram reports an error when an edit has no actual
+                        # change; it is harmless and should not flood logs.
+                        if "message is not modified" not in str(exc).lower():
+                            print(
+                                f"⚠️ 同步频道编辑失败: {exc} "
+                                f"(来源: {chat_id}/{message.id} → 目标: {target_id}/{target_message_id})"
+                            )
+
 
     @client.on(events.Album)
     async def _on_album(event):
@@ -1051,17 +1258,18 @@ async def _ensure_client(
                 continue
             for target_id in targets:
                 key = f"{session_name}:{chat_id}:{target_id}"
+                mapping_key = _rule_message_map_key(session_name, chat_id, target_id, rule)
                 try:
                     if apply_processing:
                         if processed_caption and len(processed_caption) > 1024:
-                            await _send_message_safe(
+                            sent_result = await _send_message_safe(
                                 client,
                                 target_id,
                                 processed_caption,
                                 entities=processed_caption_entities,
                             )
                         else:
-                            await _send_album_with_caption(
+                            sent_result = await _send_album_with_caption(
                                 client,
                                 target_id,
                                 files,
@@ -1070,20 +1278,28 @@ async def _ensure_client(
                             )
                     else:
                         if raw_caption and len(raw_caption) > 1024:
-                            await _send_message_safe(
+                            sent_result = await _send_message_safe(
                                 client,
                                 target_id,
                                 raw_caption,
                                 entities=caption_msg.entities,
                             )
                         else:
-                            await _send_album_with_caption(
+                            sent_result = await _send_album_with_caption(
                                 client,
                                 target_id,
                                 files,
                                 caption=raw_caption,
                                 entities=caption_msg.entities,
                             )
+                    # Telegram stores an album caption on its first target item.
+                    _record_message_mapping(
+                        state,
+                        mapping_key,
+                        int(caption_msg.id),
+                        sent_result,
+                        first_only=True,
+                    )
                     _append_recent_id(state, key, int(caption_msg.id))
                     _set_history_max_id(state, key, int(caption_msg.id))
                     state_changed = True
@@ -1205,7 +1421,11 @@ async def _refresh_sessions(app):
             session_name,
             api_id,
             api_hash,
-            allow_shared_session=session_name in ai_sessions,
+            # A shared main session can appear in forwarding rules only after
+            # _collect_rules has verified that its rule belongs to a super admin.
+            allow_shared_session=(
+                session_name in ai_sessions or is_shared_session_name(session_name)
+            ),
         )
         if client and session_name in ai_sessions and not was_running:
             print(f"✅ 协议号 AI 群消息监听已启动: session={session_name}")
@@ -1235,11 +1455,21 @@ async def _process_history_requests():
             session_name = str(rule.get("session_name", "") or "").strip()
             if not session_name:
                 continue
+            requester_id = str(req.get("user_id", "") or "") if isinstance(req, dict) else ""
+            if is_shared_session_name(session_name) and not is_super_admin(requester_id):
+                print("⚠️ 已跳过非超级管理员使用 main 协议号的历史转发请求")
+                continue
             api_id, api_hash = _get_api_creds()
             if not api_id or not api_hash:
                 continue
             bot_name = get_runtime_bot_name() or ""
-            client = await _ensure_client(bot_name, session_name, api_id, api_hash)
+            client = await _ensure_client(
+                bot_name,
+                session_name,
+                api_id,
+                api_hash,
+                allow_shared_session=is_shared_session_name(session_name),
+            )
             if not client:
                 continue
             sources = rule.get("sources", []) or []
@@ -1256,6 +1486,7 @@ async def _process_history_requests():
             # print(f"🚀 开始历史转发: session={session_name} source={source_id} targets={targets}")
             for target_id in targets:
                 key = f"{session_name}:{source_id}:{target_id}"
+                mapping_key = _rule_message_map_key(session_name, source_id, target_id, rule)
                 history_max_id = _get_history_max_id(state, key)
                 effective_min_id = min_id
                 if history_max_id:
@@ -1302,20 +1533,27 @@ async def _process_history_requests():
                         if processed_caption is None:
                             processed_caption = ""
                         if processed_caption and len(processed_caption) > 1024:
-                            await _send_message_safe(
+                            sent_result = await _send_message_safe(
                                 client,
                                 target_id,
                                 processed_caption,
                                 entities=processed_caption_entities,
                             )
                         else:
-                            await _send_album_with_caption(
+                            sent_result = await _send_album_with_caption(
                                 client,
                                 target_id,
                                 files,
                                 caption=processed_caption or "",
                                 entities=processed_caption_entities,
                             )
+                        _record_message_mapping(
+                            state,
+                            mapping_key,
+                            int(caption_msg.id),
+                            sent_result,
+                            first_only=True,
+                        )
                         max_id = max(int(m.id) for m in group_msgs)
                         for m in group_msgs:
                             mid = int(m.id)
@@ -1367,18 +1605,19 @@ async def _process_history_requests():
                     try:
                         if message.media:
                             if processed_text and len(processed_text) > 1024:
-                                await _send_text_split(
+                                text_results = await _send_text_split(
                                     client,
                                     target_id,
                                     processed_text,
                                     entities=processed_entities,
                                     limit=4096,
                                 )
-                                await _send_message_safe(
+                                media_result = await _send_message_safe(
                                     client, target_id, "", file=message.media
                                 )
+                                sent_result = [*text_results, media_result]
                             else:
-                                await _send_message_safe(
+                                sent_result = await _send_message_safe(
                                     client,
                                     target_id,
                                     processed_text or "",
@@ -1386,13 +1625,19 @@ async def _process_history_requests():
                                     entities=processed_entities,
                                 )
                         else:
-                            await _send_text_split(
+                            sent_result = await _send_text_split(
                                 client,
                                 target_id,
                                 processed_text or "",
                                 entities=processed_entities,
                                 limit=4096,
                             )
+                        _record_message_mapping(
+                            state,
+                            mapping_key,
+                            int(message.id),
+                            sent_result,
+                        )
                         _append_recent_id(state, key, int(message.id))
                         recent_ids.add(int(message.id))
                         _set_history_max_id(state, key, int(message.id))

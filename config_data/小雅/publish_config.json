@@ -1,5 +1,5 @@
 {
-    "channel_id": -1003585759564,
+    "channel_id": -1004426822084,
     "review_enabled": true,
     "daily_limit": 0,
     "ads_enabled": false,
@@ -110,6 +110,23 @@
             "format": "plain",
             "buttons": [],
             "button_columns": 1
+        }
+    ],
+    "pending_history_post_migration": {
+        "old_channel_id": -1003585759564,
+        "new_channel_id": -1004426822084,
+        "changed_at": 1789567821
+    },
+    "channel_change_history": [
+        {
+            "old_channel_id": -1004426822084,
+            "new_channel_id": -1003585759564,
+            "changed_at": 1789567288
+        },
+        {
+            "old_channel_id": -1003585759564,
+            "new_channel_id": -1004426822084,
+            "changed_at": 1789567821
         }
     ]
 }

@@ -16,6 +16,7 @@ from channel.access_control import (
 )
 from utils import (
     BOT_USER_FILE,
+    SHARED_SESSION_NAME,
     get_sessions_dir,
     is_shared_session_name,
     is_super_admin,
@@ -255,16 +256,28 @@ def _get_sessions_dir(
 
 def _list_accessible_sessions(context: ContextTypes.DEFAULT_TYPE, user) -> list[str]:
     base = _get_sessions_dir(context)
-    if not os.path.isdir(base):
-        return []
     names = []
-    for name in os.listdir(base):
-        if not name.endswith(".session"):
-            continue
-        raw = name[: -len(".session")]
-        if raw:
-            names.append(raw)
-    names = sorted(names)
+    if os.path.isdir(base):
+        for name in os.listdir(base):
+            if not name.endswith(".session"):
+                continue
+            raw = name[: -len(".session")]
+            if raw:
+                names.append(raw)
+
+    # ``main`` lives in the shared sessions/ directory rather than the
+    # current bot's sessions/<bot>/ directory. Only super administrators may
+    # see and use it for channel-clone rules.
+    is_super = bool(user and is_super_admin(getattr(user, "id", None)))
+    if is_super:
+        shared_base = _get_sessions_dir(context, SHARED_SESSION_NAME)
+        main_path = os.path.join(shared_base, f"{SHARED_SESSION_NAME}.session")
+        if os.path.exists(main_path):
+            names.append(SHARED_SESSION_NAME)
+
+    names = sorted(set(names))
+    if is_super:
+        return names
     if not user or has_admin_permission(context, user.id, "channel_config"):
         return [n for n in names if not is_shared_session_name(n)]
     return [n for n in names if _is_session_owner(user, n) and not is_shared_session_name(n)]
@@ -1097,7 +1110,9 @@ def _update_rule_field(context: ContextTypes.DEFAULT_TYPE, user_id: str, index: 
         rule["replace_submit_user"] = value
     elif field == "session_name":
         session_name = str(value or "").strip()
-        if is_shared_session_name(session_name):
+        # The shared main protocol account is reserved for super admins. It
+        # remains unavailable to owners and delegated channel administrators.
+        if is_shared_session_name(session_name) and not is_super_admin(user_id):
             return False
         rule["session_name"] = session_name
     else:
