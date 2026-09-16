@@ -21,5 +21,7 @@
     },
     "submission_enabled": false,
     "random_view_enabled": false,
-    "report_link_enabled": false
+    "report_link_enabled": false,
+    "template_publish_enabled": false,
+    "publish_templates": []
 }

@@ -24,5 +24,7 @@
         "group_config": false,
         "global_ad_config": false
     },
-    "report_link_enabled": true
+    "report_link_enabled": true,
+    "template_publish_enabled": true,
+    "publish_templates": []
 }

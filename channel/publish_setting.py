@@ -1541,23 +1541,56 @@ def _render_template_value(value: str, values: dict, *, html_mode: bool) -> str:
     return TEMPLATE_KEY_PATTERN.sub(replace, str(value or ""))
 
 
+# def _template_keyboard(template: dict, values: dict):
+#     rows = []
+#     for button in template.get("buttons", []) or []:
+#         if not isinstance(button, dict):
+#             continue
+#         text = _render_template_value(str(button.get("text") or ""), values, html_mode=False).strip()
+#         url = _render_template_value(str(button.get("url") or ""), values, html_mode=False).strip()
+#         if text and _normalize_button_url(url):
+#             rows.append([InlineKeyboardButton(text[:64], url=_normalize_button_url(url))])
+#     return InlineKeyboardMarkup(rows) if rows else None
+
+
 def _template_keyboard(template: dict, values: dict):
-    rows = []
+    links = []
+
     for button in template.get("buttons", []) or []:
         if not isinstance(button, dict):
             continue
-        text = _render_template_value(str(button.get("text") or ""), values, html_mode=False).strip()
-        url = _render_template_value(str(button.get("url") or ""), values, html_mode=False).strip()
-        if text and _normalize_button_url(url):
-            rows.append([InlineKeyboardButton(text[:64], url=_normalize_button_url(url))])
-    return InlineKeyboardMarkup(rows) if rows else None
+
+        text = _render_template_value(
+            str(button.get("text") or ""),
+            values,
+            html_mode=False
+        ).strip()
+
+        url = _render_template_value(
+            str(button.get("url") or ""),
+            values,
+            html_mode=False
+        ).strip()
+
+        url = _normalize_button_url(url)
+
+        if text and url:
+            links.append(f'<a href="{url}">{text[:64]}</a>')
+
+    return "\n".join(links) if links else None
 
 
 def _render_template(template: dict, values: dict):
     html_mode = str(template.get("format") or "plain") == "html"
     text = _render_template_value(str(template.get("text") or ""), values, html_mode=html_mode)
-    markup = _template_keyboard(template, values)
-    return text, markup, "HTML" if html_mode else None
+    # markup = _template_keyboard(template, values)
+    
+    link_text = _template_keyboard(template, values)
+
+    if link_text:
+        text = f"{text.rstrip()}\n\n{link_text}"
+    
+    return text, None, "HTML" if html_mode else None
 
 
 def _template_flow_preview(template: dict, values: dict) -> str:
