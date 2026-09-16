@@ -12,10 +12,15 @@ from datetime import datetime, timedelta
 import calendar
 from command_router import register_command
 from tool.pagination_helper import generic_pagination_callback, send_paginated_list
-from utils import get_group_whitelist, is_admin, is_bot_admin, load_json, save_json, safe_reply
+from utils import get_bot_path, get_group_whitelist, is_admin, is_bot_admin, load_json, save_json, safe_reply
 from group.points_rules import award_talk_points
 
-DATA_FILE = "data/talk_count.json"
+# Version 1 stored every group in one growing JSON file. Version 2 keeps one
+# JSON file per group so recording a message only reads/writes that group.
+LEGACY_DATA_FILE = "data/talk_count.json"
+DATA_DIR = "data/talk_count"
+MIGRATION_FILE = f"{DATA_DIR}/_migration.json"
+STORAGE_VERSION = 2
 FREQ_SHORT_WINDOW_SECONDS = 10
 FREQ_LONG_WINDOW_SECONDS = 60
 DEFAULT_MAX_MSG_PER_MINUTE = 10  # 默认每分钟最多 10 条
@@ -31,8 +36,9 @@ USER_FREQ_CACHE = {}  # key: f"{chat_id}:{user_id}" -> deque[timestamp]
 SPAM_WARN_CACHE = {}  # key: f"{chat_id}:{user_id}" -> last_warn_ts
 SPAM_MUTE_UNTIL = {}  # key: f"{chat_id}:{user_id}" -> ts
 SEEN_MESSAGES = {}  # key: f"{chat_id}:{message_id}" -> ts
-TALK_SAVE_DIRTY_COUNT = 0
-TALK_LAST_SAVE_TS = 0.0
+TALK_SAVE_DIRTY_COUNT = {}  # chat_id -> number of unsaved updates
+TALK_LAST_SAVE_TS = {}  # chat_id -> last persisted timestamp
+MIGRATION_CHECKED_PATHS = set()
 SEEN_LAST_CLEANUP_TS = 0.0
 FREQ_CACHE_LAST_CLEANUP_TS = 0.0
 
@@ -96,28 +102,104 @@ def _cleanup_freq_cache(now_ts: float):
         SPAM_MUTE_UNTIL.pop(key, None)
     FREQ_CACHE_LAST_CLEANUP_TS = now_ts
 
-# 加载数据
-def load_talk_data():
-    data = load_json(DATA_FILE)
+def _talk_file(chat_id: str) -> str:
+    """Return the isolated JSON path for one Telegram group."""
+    try:
+        safe_chat_id = str(int(chat_id))
+    except (TypeError, ValueError):
+        raise ValueError(f"无效群 ID：{chat_id!r}")
+    return f"{DATA_DIR}/{safe_chat_id}.json"
+
+
+def _migration_path(context: ContextTypes.DEFAULT_TYPE) -> str:
+    return get_bot_path(context, MIGRATION_FILE)
+
+
+def _migrate_legacy_talk_data(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Move legacy all-group talk data into per-group files once.
+
+    The old file is deleted *only after* all group files have been written and
+    the migration marker is persisted. This prevents the 9MB+ aggregate file
+    from being read and rewritten for every group message after upgrade.
+    """
+    marker_path = _migration_path(context)
+    if marker_path in MIGRATION_CHECKED_PATHS:
+        return
+
+    marker = load_json(marker_path)
+    if isinstance(marker, dict) and marker.get("storage_version") == STORAGE_VERSION:
+        MIGRATION_CHECKED_PATHS.add(marker_path)
+        return
+
+    legacy_path = get_bot_path(context, LEGACY_DATA_FILE)
+    if not os.path.exists(legacy_path):
+        save_json(marker_path, {"storage_version": STORAGE_VERSION, "migrated_groups": 0})
+        MIGRATION_CHECKED_PATHS.add(marker_path)
+        return
+
+    legacy_data = load_json(legacy_path)
+    if not isinstance(legacy_data, dict):
+        print(f"⚠️ 发言统计旧文件格式无效，未迁移：{legacy_path}")
+        return
+
+    migrated_groups = 0
+    for chat_id, group_data in legacy_data.items():
+        if not isinstance(group_data, dict):
+            continue
+        try:
+            group_path = get_bot_path(context, _talk_file(str(chat_id)))
+        except ValueError:
+            continue
+        # Migration runs before the new writer begins using this file. If a
+        # previous interrupted migration already produced it, preserve that
+        # file rather than overwrite it with stale data.
+        existing = load_json(group_path)
+        if not isinstance(existing, dict) or not existing:
+            save_json(group_path, group_data)
+        migrated_groups += 1
+
+    # The user explicitly wants the oversized aggregate replaced by split
+    # files. Remove it only after all individual files were successfully saved.
+    try:
+        os.remove(legacy_path)
+    except OSError as exc:
+        print(f"⚠️ 发言统计已分群保存，但无法删除旧文件 {legacy_path}: {exc}")
+
+    save_json(marker_path, {
+        "storage_version": STORAGE_VERSION,
+        "migrated_groups": migrated_groups,
+        "migrated_at": int(time.time()),
+    })
+    MIGRATION_CHECKED_PATHS.add(marker_path)
+    print(f"✅ 发言统计已迁移为分群文件：{migrated_groups} 个群")
+
+
+# 加载单个群的数据
+def load_talk_data(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> dict:
+    _migrate_legacy_talk_data(context)
+    data = load_json(get_bot_path(context, _talk_file(chat_id)))
     return data if isinstance(data, dict) else {}
 
 
-# 保存数据
-def save_talk_data(data):
-    save_json(DATA_FILE, data)
+# 保存单个群的数据
+def save_talk_data(context: ContextTypes.DEFAULT_TYPE, chat_id: str, data: dict) -> None:
+    save_json(get_bot_path(context, _talk_file(chat_id)), data)
 
 
-def maybe_save_talk_data(data, now_ts: float):
-    global TALK_SAVE_DIRTY_COUNT, TALK_LAST_SAVE_TS
-    TALK_SAVE_DIRTY_COUNT += 1
+def maybe_save_talk_data(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: str, data: dict, now_ts: float
+) -> None:
+    dirty_count = int(TALK_SAVE_DIRTY_COUNT.get(chat_id, 0)) + 1
+    last_save_ts = float(TALK_LAST_SAVE_TS.get(chat_id, 0.0))
+    TALK_SAVE_DIRTY_COUNT[chat_id] = dirty_count
     if (
-        TALK_SAVE_DIRTY_COUNT < TALK_SAVE_DIRTY_LIMIT
-        and now_ts - TALK_LAST_SAVE_TS < TALK_SAVE_INTERVAL_SECONDS
+        dirty_count < TALK_SAVE_DIRTY_LIMIT
+        and now_ts - last_save_ts < TALK_SAVE_INTERVAL_SECONDS
     ):
         return
-    save_talk_data(data)
-    TALK_SAVE_DIRTY_COUNT = 0
-    TALK_LAST_SAVE_TS = now_ts
+    save_talk_data(context, chat_id, data)
+    TALK_SAVE_DIRTY_COUNT[chat_id] = 0
+    TALK_LAST_SAVE_TS[chat_id] = now_ts
 
 
 # 消息计数
@@ -141,15 +223,12 @@ async def count_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     month_key = now.strftime("%Y-%m")
     group_config = get_group_whitelist(context).get(chat_id, {})
 
-    data = load_talk_data()
+    data = load_talk_data(context, chat_id)
     # print(f"📊 记录发言：{chat_id} - {user.full_name}")
-    if chat_id not in data:
-        data[chat_id] = {}
+    if user_id not in data:
+        data[user_id] = {"name": user.full_name, "daily": {}, "monthly": {}}
 
-    if user_id not in data[chat_id]:
-        data[chat_id][user_id] = {"name": user.full_name, "daily": {}, "monthly": {}}
-
-    user_data = data[chat_id][user_id]
+    user_data = data[user_id]
     user_data["name"] = user.full_name  # 更新最新名字
 
     # 增加每日计数
@@ -167,7 +246,7 @@ async def count_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data["monthly"][month_key] = user_data["monthly"].get(month_key, 0) + 1
     
 
-    maybe_save_talk_data(data, now_ts)
+    maybe_save_talk_data(context, chat_id, data, now_ts)
 
     if update.message.text:
         try:
@@ -260,7 +339,7 @@ async def count_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #         return
 
 #     counts = []
-#     for user_id, user_data in data[chat_id].items():
+#     for user_id, user_data in data.items():
 #         name = user_data["name"]
 #         count = 0
 
@@ -333,9 +412,9 @@ async def talk_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = str(update.effective_chat.id)
     is_silent = _is_chat_silent(context, chat_id)
-    data = load_talk_data()  # 你的原始数据加载函数
+    data = load_talk_data(context, chat_id)
 
-    if chat_id not in data:
+    if not data:
         output = "暂无发言记录。"
         if update.message:
             await update.message.reply_text(output)
