@@ -768,17 +768,17 @@ def _group_list_text(data: dict, page: int = 1) -> str:
 def _ai_reply_settings_values(cfg: dict) -> tuple[bool, int, int, int]:
     """Return safe AI reply settings stored for one group."""
     try:
-        probability = int(cfg.get("ai_reply_probability", 100))
+        probability = int(cfg.get("ai_reply_probability", 50))
     except (TypeError, ValueError):
-        probability = 100
+        probability = 50
     try:
-        max_per_hour = int(cfg.get("ai_reply_max_per_hour", 1000))
+        max_per_hour = int(cfg.get("ai_reply_max_per_hour", 100))
     except (TypeError, ValueError):
-        max_per_hour = 1000
+        max_per_hour = 100
     try:
-        min_interval = int(cfg.get("ai_reply_min_interval_sec", 3))
+        min_interval = int(cfg.get("ai_reply_min_interval_sec", 60))
     except (TypeError, ValueError):
-        min_interval = 3
+        min_interval = 60
     return (
         bool(cfg.get("ai_reply_enabled", False)),
         max(AI_REPLY_PROBABILITY_MIN, min(AI_REPLY_PROBABILITY_MAX, probability)),

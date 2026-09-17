@@ -27,5 +27,11 @@
     "pending_history_post_migration": null,
     "channel_change_history": [],
     "keyword_group_reply_enabled": false,
-    "keyword_group_reply_rules": []
+    "keyword_group_reply_rules": [],
+    "backup_channel_id": null,
+    "keyword_post_search_display_mode": "main",
+    "backup_channel_use_telethon": false,
+    "backup_channel_session": "",
+    "backup_channel_listen_session": "",
+    "backup_channel_forward_session": ""
 }

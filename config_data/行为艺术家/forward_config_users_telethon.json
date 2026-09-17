@@ -4,39 +4,7 @@
             "forward_rules": []
         },
         "7357117687": {
-            "forward_rules": [
-                {
-                    "name": "未命名",
-                    "sources": [
-                        -1002934622997
-                    ],
-                    "targets": [
-                        -1004406059633
-                    ],
-                    "source_title": "主频道1",
-                    "target_title": "备用频道",
-                    "enabled": true,
-                    "mode": "listen",
-                    "filter": "all",
-                    "exclude_channels": [],
-                    "show_contact": true,
-                    "replace_channel_user": "",
-                    "replace_group_name": "",
-                    "replace_submit_user": "",
-                    "clear_links": false,
-                    "skip_links": false,
-                    "start_id": "",
-                    "end_id": "",
-                    "include_words": [],
-                    "replace_words": [],
-                    "block_words": [],
-                    "cut_words": "",
-                    "suffix": "",
-                    "media_replace": "",
-                    "speed": "",
-                    "session_name": "+13218329173"
-                }
-            ]
+            "forward_rules": []
         }
     }
 }

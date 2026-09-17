@@ -111,9 +111,15 @@
             "input_label": "艺名",
             "reply_label": "联系",
             "display_text": "点击联系美丽的“{keyword}”老师",
-            "default_text": "你好啊",
+            "default_text": "艺术展推荐的老师可以约课吗！",
             "button_text": "点击约课{keyword}",
             "enabled": true
         }
-    ]
+    ],
+    "backup_channel_id": -1002624218219,
+    "keyword_post_search_display_mode": "main",
+    "backup_channel_use_telethon": true,
+    "backup_channel_session": "+13218329173",
+    "backup_channel_listen_session": "",
+    "backup_channel_forward_session": ""
 }

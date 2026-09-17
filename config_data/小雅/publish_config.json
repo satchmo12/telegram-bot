@@ -140,5 +140,11 @@
             "button_text": "点击约课{keyword}",
             "enabled": true
         }
-    ]
+    ],
+    "backup_channel_id": -1004426822084,
+    "keyword_post_search_display_mode": "main",
+    "backup_channel_use_telethon": false,
+    "backup_channel_session": "",
+    "backup_channel_listen_session": "",
+    "backup_channel_forward_session": ""
 }

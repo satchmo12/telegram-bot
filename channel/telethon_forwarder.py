@@ -70,6 +70,7 @@ REFRESH_EVENTS: Dict[str, asyncio.Event] = {}
 DEBUG_FORWARD = False
 HISTORY_REQUESTS_FILE = "data/history_forward_requests.json"
 HISTORY_STATE_FILE = "data/history_forward_state.json"
+PUBLISH_CONFIG_FILE = "config_data/publish_config.json"
 
 LINK_RE = re.compile(r"(?i)(https?://[^\s)\]}>]+|t\.me/[^\s)\]}>]+|www\.[^\s)\]}>]+)")
 
@@ -1403,6 +1404,36 @@ async def _ensure_client(
     return client
 
 
+def _backup_transport_sessions() -> set[str]:
+    """Return protocol accounts needed for backup-channel copy transport."""
+    config = load_json(PUBLISH_CONFIG_FILE)
+    if not isinstance(config, dict) or not bool(config.get("backup_channel_use_telethon", False)):
+        return set()
+    forward_session = str(
+        config.get("backup_channel_forward_session")
+        or config.get("backup_channel_session")
+        or ""
+    ).strip()
+    listen_session = str(
+        config.get("backup_channel_listen_session")
+        or forward_session
+        or ""
+    ).strip()
+    return {name for name in (listen_session, forward_session) if name}
+
+
+def _discussion_mapping_session() -> str:
+    """Return the protocol account used to resolve channel discussion posts."""
+    config = load_json(PUBLISH_CONFIG_FILE)
+    if not isinstance(config, dict) or not bool(config.get("comment_forward_enabled", False)):
+        return ""
+    return str(
+        config.get("discussion_mapping_session")
+        or config.get("backup_channel_session")
+        or "main"
+    ).strip()
+
+
 async def _refresh_sessions(app):
     bot_name = app.bot_data.get("name", "") or ""
     set_runtime_bot_name(bot_name)
@@ -1419,7 +1450,10 @@ async def _refresh_sessions(app):
     SESSION_RULES_BY_BOT[bot_name] = rules_by_session
 
     ai_sessions = get_enabled_sessions(bot_name)
-    active_sessions = set(rules_by_session.keys()) | ai_sessions
+    discussion_session = _discussion_mapping_session()
+    active_sessions = set(rules_by_session.keys()) | ai_sessions | _backup_transport_sessions()
+    if discussion_session:
+        active_sessions.add(discussion_session)
     for session_name in active_sessions:
         was_running = session_name in SESSION_CLIENTS_BY_BOT.get(bot_name, {})
         client = await _ensure_client(

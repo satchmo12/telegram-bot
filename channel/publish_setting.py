@@ -33,6 +33,7 @@ COMMENT_MAP_FILE = "data/publish_comment_map.json"
 KEYWORD_MAP_FILE = "data/publish_keyword_map.json"
 COMMENT_REPORTS_FILE = "data/comment_reports.json"
 POST_MIGRATION_STATE_FILE = "data/publish_post_migrations.json"
+BACKUP_POST_MAP_FILE = "data/publish_backup_post_map.json"
 HISTORY_FORWARD_STATE_FILE = "data/history_forward_state.json"
 KEYWORD_INPUT_KEY = "publish_keyword_search"
 KEYWORD_RESULTS_KEY = "publish_keyword_results"
@@ -52,6 +53,16 @@ TEMPLATE_KEY_PATTERN = re.compile(r"\{([\w\-一-鿿]+)\}")
 def load_publish_config():
     default = {
         "channel_id": None,
+        # Optional mirror for every main-channel post. It is never used for
+        # keyword indexing/search, which always stays on channel_id.
+        "backup_channel_id": None,
+        # Default mirror transport is the Bot API; optionally use a selected
+        # protocol account when the backup channel requires that identity.
+        "backup_channel_use_telethon": False,
+        # Compatibility alias for the forwarding protocol account.
+        "backup_channel_session": "",
+        "backup_channel_listen_session": "",
+        "backup_channel_forward_session": "",
         # When the owner switches to a cloned replacement channel, remember
         # the old/new pair so historical report migration needs no old ID input.
         "pending_history_post_migration": None,
@@ -82,6 +93,8 @@ def load_publish_config():
         # Group lookup: input label (e.g. 艺名) -> response label (e.g. 联系方式).
         "keyword_group_reply_enabled": False,
         "keyword_group_reply_rules": [],
+        # Private “查找收录” result source: main / backup / all.
+        "keyword_post_search_display_mode": "main",
         # Preserve the existing behavior: one 投稿 action can send multiple posts.
         "continuous_submission_enabled": True,
         # Visibility of normal start-panel buttons controlled by the owner.
@@ -115,6 +128,377 @@ def load_publish_config():
 
 def save_publish_config(data):
     save_json(PUBLISH_CONFIG_FILE, data)
+
+
+def _backup_channel_id(config: dict, main_channel_id=None):
+    backup = _as_int((config or {}).get("backup_channel_id"))
+    main = _as_int(main_channel_id if main_channel_id is not None else (config or {}).get("channel_id"))
+    if backup is None or backup == main:
+        return None
+    return backup
+
+
+def _load_backup_post_map() -> dict:
+    data = load_json(BACKUP_POST_MAP_FILE)
+    if not isinstance(data, dict):
+        data = {}
+    mappings = data.get("mappings")
+    if not isinstance(mappings, dict):
+        mappings = {}
+    data["mappings"] = mappings
+    return data
+
+
+def _save_backup_post_map(data: dict) -> None:
+    mappings = data.get("mappings", {}) if isinstance(data, dict) else {}
+    if isinstance(mappings, dict) and len(mappings) > 10000:
+        oldest = sorted(
+            mappings.items(),
+            key=lambda item: int((item[1] or {}).get("created_at", 0) or 0),
+        )[: len(mappings) - 10000]
+        for key, _ in oldest:
+            mappings.pop(key, None)
+    save_json(BACKUP_POST_MAP_FILE, data)
+
+
+def _record_backup_post_mapping(
+    main_channel_id: int,
+    main_message_id: int,
+    backup_channel_id: int,
+    backup_message_id: int,
+) -> None:
+    data = _load_backup_post_map()
+    data["mappings"][_comment_map_key(main_channel_id, main_message_id)] = {
+        "backup_channel_id": int(backup_channel_id),
+        "backup_message_id": int(backup_message_id),
+        "created_at": int(time.time()),
+    }
+    _save_backup_post_map(data)
+
+
+def _backup_post_mapping(main_channel_id: int, main_message_id: int) -> dict:
+    mapping = _load_backup_post_map().get("mappings", {}).get(
+        _comment_map_key(main_channel_id, main_message_id)
+    )
+    return mapping if isinstance(mapping, dict) else {}
+
+
+def _backup_channel_use_telethon(config: dict) -> bool:
+    return bool((config or {}).get("backup_channel_use_telethon", False))
+
+
+def _backup_channel_forward_session(config: dict) -> str:
+    """Protocol account that posts the copy into the backup channel."""
+    return str(
+        (config or {}).get("backup_channel_forward_session")
+        or (config or {}).get("backup_channel_session")
+        or ""
+    ).strip()
+
+
+def _backup_channel_listen_session(config: dict) -> str:
+    """Protocol account used to read the primary channel post."""
+    return str(
+        (config or {}).get("backup_channel_listen_session")
+        or _backup_channel_forward_session(config)
+        or ""
+    ).strip()
+
+
+def _backup_transport_label(config: dict) -> str:
+    if not _backup_channel_use_telethon(config):
+        return "🤖 机器人"
+    listen_session = _backup_channel_listen_session(config)
+    forward_session = _backup_channel_forward_session(config)
+    if not forward_session:
+        return "📱 协议号：未选择"
+    if listen_session == forward_session:
+        return f"📱 协议号：{forward_session}"
+    return f"📱 监听 {listen_session} → 转发 {forward_session}"
+
+
+async def _get_backup_telethon_client(
+    context: ContextTypes.DEFAULT_TYPE,
+    config: dict,
+    *,
+    role: str,
+):
+    if role not in {"listen", "forward"}:
+        raise RuntimeError("备用频道协议号角色无效")
+    session_name = (
+        _backup_channel_listen_session(config)
+        if role == "listen"
+        else _backup_channel_forward_session(config)
+    )
+    if not session_name:
+        raise RuntimeError(f"备用频道{('监听' if role == 'listen' else '转发')}协议号未选择")
+    try:
+        from channel.telethon_forwarder import SESSION_CLIENTS_BY_BOT, request_telethon_refresh
+    except Exception as exc:
+        raise RuntimeError(f"无法加载协议号组件：{exc}") from exc
+    bot_name = str(context.application.bot_data.get("name", "") or "")
+    client = SESSION_CLIENTS_BY_BOT.get(bot_name, {}).get(session_name)
+    if client is None:
+        # Do not open a second Telethon client against the same SQLite session.
+        # The central forwarder owns those clients and will start this session
+        # after a refresh request.
+        request_telethon_refresh(bot_name)
+        raise RuntimeError(
+            f"协议号 {session_name} 尚未就绪，已请求协议号转发器刷新，请稍后重试"
+        )
+    return client
+
+
+async def _mirror_main_post_via_telethon(
+    context: ContextTypes.DEFAULT_TYPE,
+    config: dict,
+    main_channel_id: int,
+    main_message_id: int,
+    backup_channel_id: int,
+):
+    """Copy content between protocol accounts without Telegram forward source."""
+    listen_client = await _get_backup_telethon_client(context, config, role="listen")
+    forward_client = await _get_backup_telethon_client(context, config, role="forward")
+    try:
+        from channel.telethon_forwarder import _send_message_safe
+    except Exception as exc:
+        raise RuntimeError(f"无法加载协议号发送工具：{exc}") from exc
+
+    source_message = await listen_client.get_messages(main_channel_id, ids=main_message_id)
+    if source_message is None:
+        raise RuntimeError("监听协议号未找到主频道原消息")
+    text = getattr(source_message, "message", None) or ""
+    entities = getattr(source_message, "entities", None)
+    media = getattr(source_message, "media", None)
+    # send_message/send_file is a true copy: unlike forward_messages it does
+    # not display “转发自 …” in the backup channel.
+    return await _send_message_safe(
+        forward_client,
+        backup_channel_id,
+        text,
+        entities=entities,
+        file=media,
+    )
+
+
+async def _edit_backup_post_via_telethon(
+    context: ContextTypes.DEFAULT_TYPE,
+    config: dict,
+    backup_channel_id: int,
+    backup_message_id: int,
+    source_message,
+) -> None:
+    client = await _get_backup_telethon_client(context, config, role="forward")
+    if getattr(source_message, "text", None) is not None:
+        html_text = getattr(source_message, "text_html", None)
+        await client.edit_message(
+            backup_channel_id,
+            backup_message_id,
+            html_text if html_text is not None else (source_message.text or ""),
+            parse_mode="html" if html_text is not None else None,
+        )
+    elif getattr(source_message, "caption", None) is not None:
+        html_caption = getattr(source_message, "caption_html", None)
+        await client.edit_message(
+            backup_channel_id,
+            backup_message_id,
+            html_caption if html_caption is not None else (source_message.caption or ""),
+            parse_mode="html" if html_caption is not None else None,
+        )
+    else:
+        raise RuntimeError("主频道编辑内容为空")
+
+
+async def _mirror_main_post_to_backup(
+    context: ContextTypes.DEFAULT_TYPE,
+    config: dict,
+    main_channel_id: int,
+    main_message_id: int,
+):
+    """Copy a finalized main post to its optional backup channel.
+
+    A backup failure must not roll back the successfully published primary post.
+    Keyword/report routing remains bound to the primary channel only.
+    """
+    backup_channel_id = _backup_channel_id(config, main_channel_id)
+    if backup_channel_id is None:
+        return None
+    try:
+        if _backup_channel_use_telethon(config):
+            copied = await _mirror_main_post_via_telethon(
+                context,
+                config,
+                main_channel_id,
+                main_message_id,
+                backup_channel_id,
+            )
+        else:
+            copied = await context.bot.copy_message(
+                chat_id=backup_channel_id,
+                from_chat_id=main_channel_id,
+                message_id=main_message_id,
+            )
+        backup_message_id = _as_int(
+            getattr(copied, "message_id", None) or getattr(copied, "id", None)
+        )
+        if backup_message_id is None:
+            raise RuntimeError("备用频道同步没有返回消息 ID")
+        _record_backup_post_mapping(
+            main_channel_id,
+            main_message_id,
+            backup_channel_id,
+            backup_message_id,
+        )
+        return copied
+    except Exception as exc:
+        print(
+            "备用频道同步失败 "
+            f"main={main_channel_id}/{main_message_id} backup={backup_channel_id}: {exc}"
+        )
+        return None
+
+
+async def _sync_main_post_edit_to_backup(
+    context: ContextTypes.DEFAULT_TYPE,
+    source_message,
+    config: dict,
+    *,
+    main_channel_id=None,
+    main_message_id=None,
+) -> bool:
+    """Synchronize an edited primary post's text/caption to its backup copy."""
+    main_channel_id = _as_int(
+        main_channel_id if main_channel_id is not None else config.get("channel_id")
+    )
+    main_message_id = _as_int(
+        main_message_id if main_message_id is not None else getattr(source_message, "message_id", None)
+    )
+    backup_channel_id = _backup_channel_id(config, main_channel_id)
+    if main_channel_id is None or main_message_id is None or backup_channel_id is None:
+        return False
+    mapping = _backup_post_mapping(main_channel_id, main_message_id)
+    if (
+        _as_int(mapping.get("backup_channel_id")) != backup_channel_id
+        or _as_int(mapping.get("backup_message_id")) is None
+    ):
+        # Posts cloned by the protocol forwarder before backup mirroring was
+        # added already have their exact old→new IDs in history_forward_state.
+        # Recover that mapping on demand so their future edits can sync too.
+        historic = _collect_cloned_history_mappings(backup_channel_id, main_channel_id)
+        historic_item = historic.get((main_channel_id, main_message_id), {})
+        historic_backup_message_id = _as_int(historic_item.get("target_message_id"))
+        if historic_backup_message_id is None:
+            return False
+        _record_backup_post_mapping(
+            main_channel_id,
+            main_message_id,
+            backup_channel_id,
+            historic_backup_message_id,
+        )
+        mapping = {
+            "backup_channel_id": backup_channel_id,
+            "backup_message_id": historic_backup_message_id,
+        }
+    backup_message_id = int(mapping["backup_message_id"])
+    try:
+        if _backup_channel_use_telethon(config):
+            await _edit_backup_post_via_telethon(
+                context,
+                config,
+                backup_channel_id,
+                backup_message_id,
+                source_message,
+            )
+        elif getattr(source_message, "text", None) is not None:
+            await context.bot.edit_message_text(
+                chat_id=backup_channel_id,
+                message_id=backup_message_id,
+                text=source_message.text or "",
+                entities=getattr(source_message, "entities", None),
+                disable_web_page_preview=True,
+            )
+        elif getattr(source_message, "caption", None) is not None:
+            await context.bot.edit_message_caption(
+                chat_id=backup_channel_id,
+                message_id=backup_message_id,
+                caption=source_message.caption or "",
+                caption_entities=getattr(source_message, "caption_entities", None),
+            )
+        else:
+            return False
+        return True
+    except Exception as exc:
+        if "message is not modified" not in str(exc).lower():
+            print(
+                "备用频道主帖编辑同步失败 "
+                f"main={main_channel_id}/{main_message_id} backup={backup_channel_id}/{backup_message_id}: {exc}"
+            )
+        return False
+
+
+async def _publish_comment_to_backup_discussion(
+    context: ContextTypes.DEFAULT_TYPE,
+    submission: dict,
+    config: dict,
+    main_channel_id: int,
+    main_message_id: int,
+) -> bool:
+    """Reply below the backup channel's matching post, never as a standalone post."""
+    backup_channel_id = _backup_channel_id(config, main_channel_id)
+    if backup_channel_id is None:
+        return False
+    backup_post = _backup_post_mapping(main_channel_id, main_message_id)
+    backup_message_id = _as_int(backup_post.get("backup_message_id"))
+    if _as_int(backup_post.get("backup_channel_id")) != backup_channel_id or backup_message_id is None:
+        print(
+            "备用频道评论跳过：未找到主帖镜像映射 "
+            f"main={main_channel_id}/{main_message_id} backup={backup_channel_id}"
+        )
+        return False
+
+    comment_map = _load_comment_map()
+    mapping = comment_map.get(_comment_map_key(backup_channel_id, backup_message_id))
+    if not isinstance(mapping, dict):
+        keyword_data = _load_keyword_map()
+        _resolved, _failed, changed = await _restore_cloned_discussion_mappings(
+            context,
+            config=config,
+            target_channel_id=backup_channel_id,
+            target_message_ids=[backup_message_id],
+            comment_map=comment_map,
+            keyword_data=keyword_data,
+        )
+        if changed:
+            _save_comment_map(comment_map)
+            _save_keyword_map(keyword_data)
+        mapping = comment_map.get(_comment_map_key(backup_channel_id, backup_message_id))
+    if not isinstance(mapping, dict):
+        print(
+            "备用频道评论跳过：未找到备用帖讨论组映射 "
+            f"backup={backup_channel_id}/{backup_message_id}"
+        )
+        return False
+
+    discussion_chat_id = _as_int(mapping.get("discussion_chat_id"))
+    discussion_message_id = _as_int(mapping.get("discussion_message_id"))
+    if discussion_chat_id is None or discussion_message_id is None:
+        return False
+    try:
+        copied = await context.bot.copy_message(
+            chat_id=discussion_chat_id,
+            from_chat_id=submission["user_chat_id"],
+            message_id=submission["user_message_id"],
+            reply_to_message_id=discussion_message_id,
+        )
+        submission["backup_discussion_chat_id"] = discussion_chat_id
+        submission["backup_discussion_message_id"] = copied.message_id
+        return True
+    except Exception as exc:
+        print(
+            "备用频道评论发布失败 "
+            f"discussion={discussion_chat_id}/{discussion_message_id}: {exc}"
+        )
+        return False
 
 
 def _record_publish_channel_change(config: dict, old_channel_id, new_channel_id) -> None:
@@ -643,31 +1027,31 @@ async def _restore_cloned_discussion_mappings(
 
     try:
         from telethon import utils as telethon_utils
-        from channel.telethon_forwarder import SESSION_CLIENTS_BY_BOT, _ensure_client
-        from channel.telethon_login import _get_api_creds
+        from channel.telethon_forwarder import SESSION_CLIENTS_BY_BOT, request_telethon_refresh
     except Exception as exc:
         print(f"[历史主帖关联] Telethon 讨论组映射组件不可用: {exc}")
         return 0, len(unresolved), False
 
-    session_name = str(config.get("discussion_mapping_session") or "main").strip()
+    # Prefer an explicitly configured discussion resolver. For a bot that
+    # mirrors to a backup through a dedicated protocol account, that account is
+    # the safest fallback; only then use the legacy shared main session.
+    session_name = str(
+        config.get("discussion_mapping_session")
+        or config.get("backup_channel_session")
+        or "main"
+    ).strip()
     bot_name = str(context.application.bot_data.get("name", "") or "")
     client = SESSION_CLIENTS_BY_BOT.get(bot_name, {}).get(session_name)
     if client is None:
-        api_id, api_hash = _get_api_creds()
-        if not api_id or not api_hash:
-            return 0, len(unresolved), False
-        try:
-            client = await _ensure_client(
-                bot_name,
-                session_name,
-                api_id,
-                api_hash,
-                allow_shared_session=is_shared_session_name(session_name),
-            )
-        except Exception as exc:
-            print(f"[历史主帖关联] 启动讨论组映射协议号失败: {exc}")
-            return 0, len(unresolved), False
-    if client is None:
+        # Never open a second TelegramClient against the same SQLite .session
+        # file here: Telethon will try to write session state and can produce
+        # "database is locked" plus orphaned send/receive tasks. Ask the shared
+        # forwarder loop to start the configured session instead.
+        request_telethon_refresh(bot_name)
+        print(
+            "[历史主帖关联] 讨论组映射协议号尚未就绪，已请求协议号转发器刷新 "
+            f"bot={bot_name} session={session_name}"
+        )
         return 0, len(unresolved), False
 
     resolved = failed = 0
@@ -1233,7 +1617,88 @@ def _find_keyword_routes(query: str, *, require_discussion: bool = True) -> list
             if record.get("channel_id") and record.get("channel_message_id"):
                 matches.append({**record, "key": stored_key})
     matches.sort(key=lambda item: int(item.get("created_at", 0) or 0), reverse=True)
-    return matches[:10]
+    return matches[:30]
+
+
+KEYWORD_SEARCH_DISPLAY_OPTIONS = {
+    "main": "主频道帖子",
+    "backup": "备用频道帖子",
+    "all": "主频道 + 备用频道",
+}
+
+
+def _keyword_post_search_display_mode(config: dict) -> str:
+    mode = str((config or {}).get("keyword_post_search_display_mode") or "main").lower()
+    return mode if mode in KEYWORD_SEARCH_DISPLAY_OPTIONS else "main"
+
+
+def _keyword_post_search_display_keyboard(config: dict) -> InlineKeyboardMarkup:
+    current = _keyword_post_search_display_mode(config)
+    rows = []
+    for mode, label in KEYWORD_SEARCH_DISPLAY_OPTIONS.items():
+        rows.append([InlineKeyboardButton(
+            f"{'✅' if mode == current else '⚪'} {label}",
+            callback_data=f"publish:keyword_search_display_set:{mode}",
+        )])
+    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="publish:back")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _backup_keyword_route(route: dict, config: dict):
+    source_channel_id = _as_int(route.get("channel_id"))
+    source_message_id = _as_int(route.get("channel_message_id"))
+    backup_channel_id = _backup_channel_id(config, source_channel_id)
+    if source_channel_id is None or source_message_id is None or backup_channel_id is None:
+        return None
+    mapping = _backup_post_mapping(source_channel_id, source_message_id)
+    backup_message_id = _as_int(mapping.get("backup_message_id"))
+    if _as_int(mapping.get("backup_channel_id")) != backup_channel_id or backup_message_id is None:
+        historic = _collect_cloned_history_mappings(backup_channel_id, source_channel_id)
+        historic_item = historic.get((source_channel_id, source_message_id), {})
+        backup_message_id = _as_int(historic_item.get("target_message_id"))
+    if backup_message_id is None:
+        return None
+    return {
+        **route,
+        "channel_id": backup_channel_id,
+        "channel_message_id": backup_message_id,
+        "display_channel": "备用频道",
+        "source_channel_id": source_channel_id,
+        "source_message_id": source_message_id,
+    }
+
+
+def _keyword_post_display_routes(routes: list[dict], config: dict) -> list[dict]:
+    """Turn primary keyword index records into main/backup/all view routes."""
+    mode = _keyword_post_search_display_mode(config)
+    main_channel_id = _as_int(config.get("channel_id"))
+    primary = [
+        {**route, "display_channel": "主频道"}
+        for route in routes
+        if main_channel_id is None or _as_int(route.get("channel_id")) == main_channel_id
+    ]
+    if mode == "main":
+        return primary[:10]
+
+    result = []
+    for route in primary:
+        backup_route = _backup_keyword_route(route, config)
+        if mode == "backup":
+            if backup_route:
+                result.append(backup_route)
+        else:
+            result.append(route)
+            if backup_route:
+                result.append(backup_route)
+    deduped = []
+    seen = set()
+    for route in result:
+        key = (_as_int(route.get("channel_id")), _as_int(route.get("channel_message_id")))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(route)
+    return deduped[:20]
 
 
 def _fallback_channel_message_link(channel_id, message_id):
@@ -1322,7 +1787,11 @@ async def _handle_keyword_post_search_input(update: Update, context: ContextType
         await msg.reply_text("❗ 请发送一个不含空格的关键词，例如：悠悠 或 @youyouabc。")
         return True
 
-    routes = _find_keyword_routes(query, require_discussion=False)
+    config = load_publish_config()
+    routes = _keyword_post_display_routes(
+        _find_keyword_routes(query, require_discussion=False),
+        config,
+    )
     if not routes:
         await msg.reply_text("❗ 未找到对应收录帖子。你可以继续输入其他关键词，或发送“取消”。")
         return True
@@ -1337,9 +1806,10 @@ async def _handle_keyword_post_search_input(update: Update, context: ContextType
     for index, route in enumerate(routes):
         label = str(route.get("label", "关键词"))[:12]
         value = str(route.get("raw", route.get("key", "")))[:30]
+        channel_label = str(route.get("display_channel") or "主频道")
         rows.append([
             InlineKeyboardButton(
-                f"查看 {label}：{value}",
+                f"查看 {channel_label} · {label}：{value}",
                 callback_data=f"publish:keyword_post_pick:{index}",
             )
         ])
@@ -1833,6 +2303,7 @@ async def _capture_comment_source_message(
             "✅ 已更新编辑后频道帖关键词 "
             f"channel={main_channel_id} message={msg.message_id} keywords={count}"
         )
+        await _sync_main_post_edit_to_backup(context, msg, config)
         return
 
     sender_chat = getattr(msg, "sender_chat", None)
@@ -1865,6 +2336,13 @@ async def _capture_comment_source_message(
         print(
             "✅ 已通过讨论组编辑更新频道帖关键词 "
             f"channel={channel_id} message={channel_message_id} keywords={count}"
+        )
+        await _sync_main_post_edit_to_backup(
+            context,
+            msg,
+            config,
+            main_channel_id=channel_id,
+            main_message_id=channel_message_id,
         )
 
     records = _load_comment_map()
@@ -1980,6 +2458,7 @@ async def _copy_submission_to_channel(
     config: dict,
     *,
     add_comment_button: bool = False,
+    register_keywords: bool = True,
 ):
     """Copy original user content to a channel and optionally append comment action."""
     # The main post cannot have inline markup: Telegram otherwise hides its
@@ -1992,7 +2471,7 @@ async def _copy_submission_to_channel(
         # its native discussion button with this inline keyboard.
         reply_markup=None if add_comment_button else publish_buttons_keyboard(config),
     )
-    if submission.get("keyword_entries"):
+    if register_keywords and submission.get("keyword_entries"):
         _register_post_keywords(
             submission["keyword_entries"],
             target_channel_id,
@@ -2068,6 +2547,13 @@ async def _publish_comment_and_forward(
         config,
     )
     _append_report_comment(submission, forwarded)
+    await _publish_comment_to_backup_discussion(
+        context,
+        submission,
+        config,
+        main_channel_id,
+        main_message_id,
+    )
     return forwarded
 
 
@@ -2129,6 +2615,12 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
                     submission,
                     target_channel_id,
                     config,
+                )
+                await _mirror_main_post_to_backup(
+                    context,
+                    config,
+                    int(target_channel_id),
+                    published.message_id,
                 )
         except Exception as exc:
             submission["status"] = "pending"
@@ -2615,6 +3107,10 @@ def publish_setting_keyboard(config: dict):
             InlineKeyboardButton("🔑 关键词设置", callback_data="publish:keywords"),
             InlineKeyboardButton("💬 群关键词回复", callback_data="publish:group_keyword_reply"),
         ],
+        [InlineKeyboardButton(
+            f"🔎 搜索展示：{KEYWORD_SEARCH_DISPLAY_OPTIONS[_keyword_post_search_display_mode(config)]}",
+            callback_data="publish:keyword_search_display",
+        )],
         [
             
             InlineKeyboardButton("🔘 底部按钮设置", callback_data="publish:buttons"),
@@ -2655,11 +3151,11 @@ def publish_setting_keyboard(config: dict):
             callback_data="publish:toggle_report_link",
         )],
         [InlineKeyboardButton(
-            "🔄 一键迁移历史评论到当前转发频道",
+            "🔄 一键迁移历史评论到当前转发频道(防止转发频道炸了)",
             callback_data="publish:migrate_forward_comments",
         )],
         [InlineKeyboardButton(
-            "🔗 关联已克隆历史主帖到当前发布频道",
+            "🔗 关联已克隆历史主帖到当前发布频道(防止主频道炸了,目前模式不需要)",
             callback_data="publish:migrate_history_posts",
         )],
         [
@@ -2673,11 +3169,32 @@ def publish_setting_keyboard(config: dict):
     ])
 
 
-def publish_channel_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✏️ 修改频道", callback_data="publish:set_channel")],
-        [InlineKeyboardButton("⬅️ 返回", callback_data="publish:back")]
-    ])
+def publish_channel_keyboard(config: dict):
+    backup_channel_id = _backup_channel_id(config)
+    rows = [
+        [InlineKeyboardButton("✏️ 修改主频道", callback_data="publish:set_channel")],
+        [InlineKeyboardButton(
+            "✏️ 设置备用频道" if backup_channel_id is None else "✏️ 修改备用频道",
+            callback_data="publish:set_backup_channel",
+        )],
+    ]
+    if backup_channel_id is not None:
+        rows.append([InlineKeyboardButton("🗑 清除备用频道", callback_data="publish:clear_backup_channel")])
+        rows.append([InlineKeyboardButton(
+            f"备用同步方式：{_backup_transport_label(config)}",
+            callback_data="publish:backup_transport_toggle",
+        )])
+        if _backup_channel_use_telethon(config):
+            rows.append([InlineKeyboardButton(
+                f"📡 监听协议号：{_backup_channel_listen_session(config) or '未选择'}",
+                callback_data="publish:backup_transport_listen_session",
+            )])
+            rows.append([InlineKeyboardButton(
+                f"📤 转发协议号：{_backup_channel_forward_session(config) or '未选择'}",
+                callback_data="publish:backup_transport_forward_session",
+            )])
+    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="publish:back")])
+    return InlineKeyboardMarkup(rows)
 
 
 def publish_review_keyboard(enabled):
@@ -3122,6 +3639,12 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 report_id,
                 subject_entries=entries,
             )
+        await _mirror_main_post_to_backup(
+            context,
+            config,
+            channel_id_int,
+            published.message_id,
+        )
         context.user_data.pop(TEMPLATE_FLOW_KEY, None)
         await query.answer("✅ 模板已发布。")
         return await query.edit_message_text(
@@ -3417,6 +3940,26 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=_group_keyword_reply_settings_keyboard(config),
         )
 
+    if action == "keyword_search_display":
+        return await query.edit_message_text(
+            "🔎 设置“查找收录”显示来源：\n\n"
+            "主频道：只展示关键词索引绑定的主频道帖子。\n"
+            "备用频道：仅展示有主备映射的备用频道镜像帖。\n"
+            "全部展示：主频道和备用频道都展示。",
+            reply_markup=_keyword_post_search_display_keyboard(config),
+        )
+
+    if action == "keyword_search_display_set":
+        mode = query.data.split(":", 2)[2] if len(query.data.split(":", 2)) == 3 else ""
+        if mode not in KEYWORD_SEARCH_DISPLAY_OPTIONS:
+            return await query.answer("展示模式无效。", show_alert=True)
+        config["keyword_post_search_display_mode"] = mode
+        save_publish_config(config)
+        return await query.edit_message_text(
+            f"✅ 已设置搜索展示：{KEYWORD_SEARCH_DISPLAY_OPTIONS[mode]}",
+            reply_markup=_keyword_post_search_display_keyboard(config),
+        )
+
     if action == "keywords":
         return await query.edit_message_text(
             _keyword_settings_text(config),
@@ -3453,23 +3996,145 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     if action == "channel":
-
-        text = (
-            f"📢 当前频道：\n{channel_id}"
-            if channel_id
-            else "📢 当前未设置发布频道。请将频道任意一条消息转发给机器人，获取频道 ID 后输入即可设置。"
-        )
-
+        main_channel_id = _as_int(config.get("channel_id"))
+        backup_channel_id = _backup_channel_id(config, main_channel_id)
+        text = "\n".join([
+            "📢 发布频道设置",
+            "",
+            f"主频道：{main_channel_id if main_channel_id is not None else '未设置'}",
+            f"备用频道：{backup_channel_id if backup_channel_id is not None else '未设置'}",
+            f"备用同步方式：{_backup_transport_label(config) if backup_channel_id is not None else '未设置'}",
+            "",
+            "发布主帖时会先发到主频道，再自动镜像到备用频道。",
+            "关键词搜索、评论定位和报告仍只使用主频道。",
+        ])
         return await query.edit_message_text(
             text,
-            reply_markup=publish_channel_keyboard()
+            reply_markup=publish_channel_keyboard(config),
         )
 
     if action == "set_channel":
         context.user_data["waiting_channel_id"] = True
-
         return await query.edit_message_text(
-            "请输入频道ID\n\n例如：\n-1001234567890"
+            "✏️ 设置主发布频道\n\n请输入主频道 ID，例如：\n-1001234567890\n\n"
+            "主频道用于关键词搜索、评论定位和报告。",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ 返回频道设置", callback_data="publish:channel")]]),
+        )
+
+    if action == "set_backup_channel":
+        context.user_data["waiting_backup_channel_id"] = True
+        return await query.edit_message_text(
+            "✏️ 设置备用频道\n\n请输入备用频道 ID，例如：\n-1001234567890\n\n"
+            "之后每条主帖会自动镜像到备用频道；备用频道不会参与关键词搜索或评论定位。",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ 返回频道设置", callback_data="publish:channel")]]),
+        )
+
+    if action == "clear_backup_channel":
+        config["backup_channel_id"] = None
+        config["backup_channel_use_telethon"] = False
+        config["backup_channel_session"] = ""
+        config["backup_channel_listen_session"] = ""
+        config["backup_channel_forward_session"] = ""
+        save_publish_config(config)
+        return await query.edit_message_text(
+            "✅ 已清除备用频道。",
+            reply_markup=publish_channel_keyboard(config),
+        )
+
+    if action == "backup_transport_toggle":
+        if _backup_channel_id(config) is None:
+            return await query.answer("请先设置备用频道。", show_alert=True)
+        enabled = not _backup_channel_use_telethon(config)
+        config["backup_channel_use_telethon"] = enabled
+        if not enabled:
+            save_publish_config(config)
+            return await query.edit_message_text(
+                "✅ 备用频道同步已切换为机器人发送。",
+                reply_markup=publish_channel_keyboard(config),
+            )
+        try:
+            from channel.telethon_login import _list_session_names
+            sessions = _list_session_names(context, query.from_user)
+        except Exception as exc:
+            sessions = []
+            print(f"读取备用同步协议号失败: {exc}")
+        if not sessions:
+            config["backup_channel_use_telethon"] = False
+            save_publish_config(config)
+            return await query.answer("没有可用协议号，已保持机器人发送。", show_alert=True)
+        current = _backup_channel_forward_session(config)
+        if current in sessions:
+            if not _backup_channel_listen_session(config):
+                config["backup_channel_listen_session"] = current
+            save_publish_config(config)
+            return await query.edit_message_text(
+                f"✅ 已启用协议号同步：监听 { _backup_channel_listen_session(config) } → 转发 {current}",
+                reply_markup=publish_channel_keyboard(config),
+            )
+        rows = [[InlineKeyboardButton(
+            f"📤 使用 {session_name} 作为转发协议号",
+            callback_data=f"publish:backup_transport_session_pick:forward:{session_name}",
+        )] for session_name in sessions]
+        rows.append([InlineKeyboardButton("⬅️ 使用机器人", callback_data="publish:backup_transport_toggle")])
+        return await query.edit_message_text(
+            "请选择备用频道的转发协议号。\n"
+            "随后可单独设置监听主频道的协议号。",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    if action in {"backup_transport_listen_session", "backup_transport_forward_session", "backup_transport_session"}:
+        if not _backup_channel_use_telethon(config):
+            return await query.answer("请先开启“协议号同步”。", show_alert=True)
+        role = "listen" if action == "backup_transport_listen_session" else "forward"
+        try:
+            from channel.telethon_login import _list_session_names
+            sessions = _list_session_names(context, query.from_user)
+        except Exception as exc:
+            sessions = []
+            print(f"读取备用同步协议号失败: {exc}")
+        if not sessions:
+            return await query.answer("暂无可用协议号。", show_alert=True)
+        role_label = "监听主频道" if role == "listen" else "转发到备用频道"
+        rows = [[InlineKeyboardButton(
+            f"📱 {session_name}",
+            callback_data=f"publish:backup_transport_session_pick:{role}:{session_name}",
+        )] for session_name in sessions]
+        rows.append([InlineKeyboardButton("⬅️ 返回频道设置", callback_data="publish:channel")])
+        return await query.edit_message_text(
+            f"请选择用于“{role_label}”的协议号：",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    if action == "backup_transport_session_pick":
+        parts = query.data.split(":")
+        # Compatibility with the previous callback format: :pick:<session>
+        if len(parts) == 3:
+            role, session_name = "forward", parts[2]
+        elif len(parts) == 4:
+            role, session_name = parts[2], parts[3]
+        else:
+            return await query.answer("协议号参数无效。", show_alert=True)
+        if role not in {"listen", "forward"}:
+            return await query.answer("协议号角色无效。", show_alert=True)
+        try:
+            from channel.telethon_login import _list_session_names
+            sessions = _list_session_names(context, query.from_user)
+        except Exception:
+            sessions = []
+        if not session_name or session_name not in sessions:
+            return await query.answer("协议号无效或无权限。", show_alert=True)
+        config["backup_channel_use_telethon"] = True
+        if role == "listen":
+            config["backup_channel_listen_session"] = session_name
+        else:
+            config["backup_channel_forward_session"] = session_name
+            config["backup_channel_session"] = session_name
+            if not _backup_channel_listen_session(config):
+                config["backup_channel_listen_session"] = session_name
+        save_publish_config(config)
+        return await query.edit_message_text(
+            f"✅ 已设置备用频道{('监听' if role == 'listen' else '转发')}协议号：{session_name}",
+            reply_markup=publish_channel_keyboard(config),
         )
 
     if action == "review":
@@ -3747,6 +4412,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if (
             bool(config.get("comment_forward_enabled", False))
             and query.from_user.id != owner_id
+            and not is_super_admin(query.from_user.id)
             and not isinstance(context.user_data.get(COMMENT_TARGET_KEY), dict)
         ):
             if not _keyword_labels(config):
@@ -4235,6 +4901,13 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
                     # The report remains available by deep link; failure to
                     # send the fallback companion must not roll back the post.
                     print(f"发送评论报告入口失败: {exc}")
+        if submission_kind == "main":
+            await _mirror_main_post_to_backup(
+                context,
+                config,
+                int(target_channel_id),
+                published.message_id,
+            )
         _append_published_submission(msg, published.message_id, target_channel_id)
         _finish_submission_if_needed(context, config)
         await msg.reply_text("✅ 发送成功")
@@ -4796,6 +5469,22 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return await update.message.reply_text(
             f"✅ 已保存转发频道：{forward_channel_id}",
             reply_markup=publish_setting_keyboard(config),
+        )
+
+    if context.user_data.get("waiting_backup_channel_id"):
+        context.user_data["waiting_backup_channel_id"] = False
+        try:
+            backup_channel_id = int(update.message.text.strip())
+        except (TypeError, ValueError):
+            return await update.message.reply_text("❗ 频道 ID 格式错误，例如：-1001234567890")
+        main_channel_id = _as_int(config.get("channel_id"))
+        if main_channel_id is not None and backup_channel_id == main_channel_id:
+            return await update.message.reply_text("❗ 备用频道不能与主频道相同，请重新输入。")
+        config["backup_channel_id"] = backup_channel_id
+        save_publish_config(config)
+        return await update.message.reply_text(
+            f"✅ 已保存备用频道：{backup_channel_id}\n主帖将同步镜像到该频道。",
+            reply_markup=publish_channel_keyboard(config),
         )
 
     if context.user_data.get("waiting_channel_id"):
