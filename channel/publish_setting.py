@@ -3,7 +3,7 @@ from datetime import datetime
 from types import SimpleNamespace
 import html
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 import os
 import random
 import re
@@ -14,7 +14,7 @@ from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, ContextTy
 from telegram.error import BadRequest, Forbidden
 
 from channel.channel_config import USER_MESSAGE_FILE
-from utils import BOT_USER_FILE, _can_manage, is_shared_session_name, is_super_admin, load_json, save_json
+from utils import BOT_USER_FILE, _can_manage, is_shared_session_name, is_super_admin, load_json, safe_reply, save_json
 from admin_permissions import get_delegated_admin_ids, has_admin_permission
 
 PUBLISH_CONFIG_FILE = "config_data/publish_config.json"
@@ -37,7 +37,9 @@ HISTORY_FORWARD_STATE_FILE = "data/history_forward_state.json"
 KEYWORD_INPUT_KEY = "publish_keyword_search"
 KEYWORD_RESULTS_KEY = "publish_keyword_results"
 KEYWORD_POST_RESULTS_KEY = "publish_keyword_post_results"
+KEYWORD_POST_SEARCH_INPUT_KEY = "publish_keyword_post_search"
 KEYWORD_LABEL_INPUT_KEY = "publish_keyword_label_input"
+GROUP_KEYWORD_REPLY_STAGE_KEY = "publish_group_keyword_reply_stage"
 REPORT_PAGE_SIZE = 6
 TEMPLATE_DRAFT_KEY = "publish_template_draft"
 TEMPLATE_FLOW_KEY = "publish_template_flow"
@@ -77,6 +79,9 @@ def load_publish_config():
         "publish_templates": [],
         # Labels such as 艺名 / 联系方式 used to extract routing keywords.
         "keyword_extract_labels": [],
+        # Group lookup: input label (e.g. 艺名) -> response label (e.g. 联系方式).
+        "keyword_group_reply_enabled": False,
+        "keyword_group_reply_rules": [],
         # Preserve the existing behavior: one 投稿 action can send multiple posts.
         "continuous_submission_enabled": True,
         # Visibility of normal start-panel buttons controlled by the owner.
@@ -1292,46 +1297,38 @@ async def _send_keyword_post_result(message, context: ContextTypes.DEFAULT_TYPE,
         await message.reply_text("❗ 已找到对应帖子，但暂时无法打开或复制该消息。")
 
 
-async def _handle_automatic_keyword_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Look up a directly-sent private keyword before normal text handling.
-
-    A miss deliberately returns ``False`` so the message continues through the
-    bot's existing private forwarding, commands, AI, and other workflows.
-    """
+async def _handle_keyword_post_search_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Handle post lookup only after the user explicitly opened search."""
+    if not (context.user_data or {}).get(KEYWORD_POST_SEARCH_INPUT_KEY):
+        return False
     msg = update.message
     if not msg or not msg.text or not update.effective_chat:
-        return False
+        return True
     if update.effective_chat.type != "private":
         return False
 
-    user_data = context.user_data or {}
-    # Do not hijack content that belongs to an active publish/configuration
-    # flow. Active explicit keyword search is handled just before this helper.
-    if any([
-        user_data.get("waiting_post"),
-        user_data.get(REJECT_REASON_KEY),
-        user_data.get(KEYWORD_INPUT_KEY),
-        user_data.get(KEYWORD_LABEL_INPUT_KEY),
-        user_data.get(TEMPLATE_DRAFT_KEY),
-        user_data.get(TEMPLATE_FLOW_KEY),
-        user_data.get("publish_button_input"),
-        user_data.get("waiting_channel_id"),
-        user_data.get("waiting_forward_channel_id"),
-        user_data.get("waiting_limit"),
-    ]):
-        return False
-
     query = msg.text.strip()
-    # Automatic lookup intentionally accepts only a short, single-line query.
-    # This lets users send “南伊一” directly without stealing normal sentences.
+    if query in {"取消", "返回"}:
+        context.user_data.pop(KEYWORD_POST_SEARCH_INPUT_KEY, None)
+        context.user_data.pop(KEYWORD_POST_RESULTS_KEY, None)
+        await msg.reply_text(
+            "已取消帖子关键词查询。",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ 返回首页", callback_data="start:back")]
+            ]),
+        )
+        return True
     if not query or len(query) > 64 or "\n" in query or any(char.isspace() for char in query):
-        return False
+        await msg.reply_text("❗ 请发送一个不含空格的关键词，例如：悠悠 或 @youyouabc。")
+        return True
 
     routes = _find_keyword_routes(query, require_discussion=False)
     if not routes:
-        return False
+        await msg.reply_text("❗ 未找到对应收录帖子。你可以继续输入其他关键词，或发送“取消”。")
+        return True
 
     if len(routes) == 1:
+        context.user_data.pop(KEYWORD_POST_SEARCH_INPUT_KEY, None)
         await _send_keyword_post_result(msg, context, routes[0])
         return True
 
@@ -1358,6 +1355,287 @@ def _keyword_route_keyboard(route: dict, link: str, enabled: bool):
     return InlineKeyboardMarkup(rows)
 
 
+def _keyword_group_reply_rules(config: dict) -> list[dict]:
+    rules = config.get("keyword_group_reply_rules", []) if isinstance(config, dict) else []
+    if not isinstance(rules, list):
+        return []
+    result = []
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        input_label = str(rule.get("input_label") or "").strip()[:30]
+        reply_label = str(rule.get("reply_label") or "").strip()[:30]
+        if not input_label or not reply_label:
+            continue
+        try:
+            rule_id = int(rule.get("id", 0) or 0)
+        except (TypeError, ValueError):
+            rule_id = 0
+        if rule_id <= 0:
+            continue
+        result.append({
+            "id": rule_id,
+            "input_label": input_label,
+            "reply_label": reply_label,
+            "display_text": str(
+                rule.get("display_text") or f"{reply_label}：{{value}}"
+            )[:500],
+            "default_text": str(rule.get("default_text") or "")[:500],
+            "button_text": str(rule.get("button_text") or "联系 {value}")[:64],
+            "enabled": bool(rule.get("enabled", True)),
+        })
+    return result
+
+
+def _group_keyword_reply_settings_text(config: dict) -> str:
+    rules = _keyword_group_reply_rules(config)
+    lines = [
+        "💬 群关键词回复",
+        "",
+        f"状态：{'✅ 开启' if config.get('keyword_group_reply_enabled', False) else '🚫 关闭'}",
+        f"规则数量：{len(rules)}",
+        "",
+        "群成员发送艺名等关键词时，机器人会从同一收录帖子中查找对应字段，",
+        "把 @用户名显示成 Telegram 联系链接；多个联系方式会显示多个按钮。",
+    ]
+    if rules:
+        lines.extend(["", "当前规则："])
+        for rule in rules:
+            default_text = rule.get("default_text") or "未设置"
+            lines.append(
+                f"#{rule['id']} 输入「{rule['input_label']}」 → 回复「{rule['reply_label']}」\n"
+                f"默认咨询文字：{default_text[:80]}"
+            )
+    return "\n".join(lines)
+
+
+def _group_keyword_reply_settings_keyboard(config: dict) -> InlineKeyboardMarkup:
+    enabled = bool(config.get("keyword_group_reply_enabled", False))
+    rows = [
+        [InlineKeyboardButton(
+            f"{'✅' if enabled else '🚫'} 群关键词回复",
+            callback_data="publish:toggle_group_keyword_reply",
+        )],
+        [InlineKeyboardButton("➕ 添加规则", callback_data="publish:group_keyword_reply_add")],
+    ]
+    for rule in _keyword_group_reply_rules(config):
+        rows.append([InlineKeyboardButton(
+            f"📝 {rule['input_label']} → {rule['reply_label']}",
+            callback_data=f"publish:group_keyword_reply_view:{rule['id']}",
+        )])
+    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="publish:back")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _group_keyword_reply_rule_text(rule: dict) -> str:
+    return "\n".join([
+        "💬 群关键词回复规则",
+        f"输入关键词字段：{rule.get('input_label', '')}",
+        f"回复关键词字段：{rule.get('reply_label', '')}",
+        f"显示文案：{rule.get('display_text') or '{value}'}",
+        f"私聊预填文字：{rule.get('default_text') or '未设置'}",
+        f"联系方式按钮文案：{rule.get('button_text') or '联系 {{value}}'}",
+        f"状态：{'✅ 开启' if rule.get('enabled', True) else '🚫 关闭'}",
+    ])
+
+
+def _group_keyword_reply_rule_keyboard(rule: dict) -> InlineKeyboardMarkup:
+    rule_id = int(rule["id"])
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✏️ 输入字段", callback_data=f"publish:group_keyword_reply_field:input_label:{rule_id}"),
+            InlineKeyboardButton("✏️ 回复字段", callback_data=f"publish:group_keyword_reply_field:reply_label:{rule_id}"),
+        ],
+        [
+            InlineKeyboardButton("📝 显示文案", callback_data=f"publish:group_keyword_reply_field:display_text:{rule_id}"),
+            InlineKeyboardButton("💬 私聊预填", callback_data=f"publish:group_keyword_reply_field:default_text:{rule_id}"),
+        ],
+        [InlineKeyboardButton("🔘 按钮文案", callback_data=f"publish:group_keyword_reply_field:button_text:{rule_id}")],
+        [InlineKeyboardButton(
+            f"{'🚫 关闭' if rule.get('enabled', True) else '✅ 开启'} 此规则",
+            callback_data=f"publish:group_keyword_reply_toggle:{rule_id}",
+        )],
+        [InlineKeyboardButton("🗑 删除规则", callback_data=f"publish:group_keyword_reply_delete:{rule_id}")],
+        [InlineKeyboardButton("⬅️ 返回规则列表", callback_data="publish:group_keyword_reply")],
+    ])
+
+
+def _find_group_keyword_reply_values(query: str, input_label: str, reply_label: str) -> list[dict]:
+    """Find reply-label values from posts matching one configured input label."""
+    query_key = _normalize_routing_keyword(query)
+    if not query_key:
+        return []
+    data = _load_keyword_map()
+    source_posts = set()
+    for stored_key, records in data.items():
+        if query_key != _normalize_routing_keyword(stored_key):
+            continue
+        for record in records if isinstance(records, list) else []:
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("label") or "").strip() != input_label:
+                continue
+            channel_id = _as_int(record.get("channel_id"))
+            message_id = _as_int(record.get("channel_message_id"))
+            if channel_id is not None and message_id is not None:
+                source_posts.add((channel_id, message_id))
+
+    values = []
+    seen = set()
+    for records in data.values():
+        for record in records if isinstance(records, list) else []:
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("label") or "").strip() != reply_label:
+                continue
+            channel_id = _as_int(record.get("channel_id"))
+            message_id = _as_int(record.get("channel_message_id"))
+            if (channel_id, message_id) not in source_posts:
+                continue
+            value = str(record.get("raw") or record.get("key") or "").strip()
+            if value and value not in seen:
+                seen.add(value)
+                values.append({
+                    "value": value,
+                    "channel_id": channel_id,
+                    "message_id": message_id,
+                })
+    return values[:20]
+
+
+def _telegram_contact_buttons(
+    value: str,
+    button_template: str,
+    query: str,
+    default_text_template: str,
+    all_contacts: list[str],
+) -> list[InlineKeyboardButton]:
+    """Build Telegram private-chat links, optionally with a prefilled text."""
+    usernames = re.findall(r"@([A-Za-z0-9_]{5,32})", str(value or ""))
+    if not usernames:
+        return []
+    buttons = []
+    for username in dict.fromkeys(usernames):
+        contact = f"@{username}"
+        try:
+            label = str(button_template or "联系 {value}").format(
+                value=contact,
+                keyword=query,
+            )
+        except Exception:
+            label = f"联系 {contact}"
+        default_text = _render_group_keyword_default_text(
+            default_text_template,
+            query,
+            [contact, *[item for item in all_contacts if item != contact]],
+        )
+        url = f"https://t.me/{username}"
+        if default_text:
+            # Telegram opens the username's private chat and pre-fills this
+            # message in its composer (the same behavior as t.me/name?text=...).
+            url += "?text=" + quote(default_text, safe="")
+        buttons.append(InlineKeyboardButton(label[:64] or contact, url=url))
+    return buttons
+
+
+def _render_group_keyword_display_text(rule: dict, query: str, contacts: list[str]) -> str:
+    template = str(rule.get("display_text") or "{value}")
+    values = "、".join(contacts)
+    try:
+        return template.format(
+            keyword=query,
+            value=contacts[0] if contacts else "",
+            values=values,
+            contacts=values,
+            input_label=rule.get("input_label", ""),
+            reply_label=rule.get("reply_label", ""),
+        )[:500]
+    except Exception:
+        return template[:500]
+
+
+def _render_group_keyword_default_text(template: str, query: str, contacts: list[str]) -> str:
+    if not template:
+        return ""
+    try:
+        return str(template).format(
+            keyword=query,
+            value=contacts[0] if contacts else "",
+            contacts="、".join(contacts),
+        )[:500]
+    except Exception:
+        return str(template)[:500]
+
+
+async def _handle_group_keyword_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    msg = update.message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat or chat.type not in {"group", "supergroup"}:
+        return False
+    if not msg.text or (user and user.is_bot):
+        return False
+    query = msg.text.strip()
+    if not query or len(query) > 64 or "\n" in query or any(char.isspace() for char in query):
+        return False
+
+    config = load_publish_config()
+    if not bool(config.get("keyword_group_reply_enabled", False)):
+        return False
+    rows = []
+    display_messages = []
+    for rule in _keyword_group_reply_rules(config):
+        if not rule.get("enabled", True):
+            continue
+        values = _find_group_keyword_reply_values(
+            query,
+            rule["input_label"],
+            rule["reply_label"],
+        )
+        if not values:
+            continue
+        contacts = []
+        rule_buttons = []
+        for item in values:
+            contacts.append(item["value"])
+        for item in values:
+            rule_buttons.extend(
+                _telegram_contact_buttons(
+                    item["value"],
+                    rule["button_text"],
+                    query,
+                    rule.get("default_text", ""),
+                    contacts,
+                )
+            )
+        if not rule_buttons:
+            continue
+        rows.extend([[button] for button in rule_buttons])
+        display_text = _render_group_keyword_display_text(rule, query, contacts)
+        if display_text and display_text not in display_messages:
+            display_messages.append(display_text)
+
+    if not rows:
+        return False
+    response_text = "\n\n".join(display_messages) or "已找到联系方式："
+    # await msg.reply_text(
+    #     response_text,
+    #     reply_markup=InlineKeyboardMarkup(rows),
+    #     disable_web_page_preview=True,
+    # )
+    
+    #     update: Update,
+    # context: ContextTypes.DEFAULT_TYPE,
+    # text: str,
+    # html: bool = False,
+    # reply_markup=None,
+    # auto_delete_seconds: int = 60,
+    # bot_reply: bool = False,
+    
+    await safe_reply(update, context, response_text, reply_markup=InlineKeyboardMarkup(rows), auto_delete_seconds = 30, bot_reply = True)
+    return True
+
+
 def _keyword_settings_text(config: dict) -> str:
     labels = _keyword_labels(config)
     sample = "【艺名】：#丹丹\n【联系方式】：@dandan"
@@ -1369,7 +1647,6 @@ def _keyword_settings_text(config: dict) -> str:
         f"示例：\n{sample}\n"
         "设置“艺名”可提取丹丹；设置“联系方式”可提取 @dandan。"
     )
-
 
 def _keyword_settings_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -2334,7 +2611,10 @@ def publish_setting_keyboard(config: dict):
         # [InlineKeyboardButton("📊 每日发布上限", callback_data="publish:limit")],
         # [InlineKeyboardButton("📣 广告管理", callback_data="publish:ads")],
         # [InlineKeyboardButton("🔘 底部按钮设置", callback_data="publish:buttons")],
-        [InlineKeyboardButton("🔑 关键词设置", callback_data="publish:keywords")],
+        [
+            InlineKeyboardButton("🔑 关键词设置", callback_data="publish:keywords"),
+            InlineKeyboardButton("💬 群关键词回复", callback_data="publish:group_keyword_reply"),
+        ],
         [
             
             InlineKeyboardButton("🔘 底部按钮设置", callback_data="publish:buttons"),
@@ -2506,6 +2786,31 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         return await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows), disable_web_page_preview=True)
 
+    if action == "keyword_post_search":
+        context.user_data[KEYWORD_POST_SEARCH_INPUT_KEY] = True
+        context.user_data.pop(KEYWORD_POST_RESULTS_KEY, None)
+        await query.answer()
+        # Keep the original start/menu page untouched. The search prompt is a
+        # separate message, so cancelling naturally returns the user to it.
+        return await query.message.reply_text(
+            "🔎 请输入要查询的收录关键词，例如：悠悠 或 @youyouabc。\n"
+            "发送“取消”或点击下方按钮可退出查询。",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ 取消查询", callback_data="publish:keyword_post_search_cancel")]
+            ]),
+        )
+
+    if action == "keyword_post_search_cancel":
+        context.user_data.pop(KEYWORD_POST_SEARCH_INPUT_KEY, None)
+        context.user_data.pop(KEYWORD_POST_RESULTS_KEY, None)
+        await query.answer("已取消查询。")
+        # The prompt was sent as a separate message, so deleting it exposes
+        # the untouched start/menu page directly underneath.
+        try:
+            return await query.message.delete()
+        except Exception:
+            return await query.edit_message_text("已取消帖子关键词查询。")
+
     if action == "keyword_post_pick":
         results = (context.user_data or {}).get(KEYWORD_POST_RESULTS_KEY, [])
         try:
@@ -2514,6 +2819,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (ValueError, IndexError, TypeError):
             return await query.answer("关键词结果已失效，请重新搜索。", show_alert=True)
         context.user_data.pop(KEYWORD_POST_RESULTS_KEY, None)
+        context.user_data.pop(KEYWORD_POST_SEARCH_INPUT_KEY, None)
         await query.answer()
         await _send_keyword_post_result(query.message, context, route)
         try:
@@ -2549,7 +2855,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # All remaining actions below are publishing configuration actions.  Do not
     # rely on the hidden start-menu button: callbacks can be forged manually.
-    public_actions = {"publish", "channel_message", "bottle_prev", "bottle_next", "accept_friend", "reject_friend", "back"}
+    public_actions = {"publish", "channel_message", "keyword_post_search", "keyword_post_search_cancel", "bottle_prev", "bottle_next", "accept_friend", "reject_friend", "back"}
     if action not in public_actions and not has_admin_permission(
         context, query.from_user.id, "submission_config"
     ):
@@ -3002,6 +3308,113 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.edit_message_text(
             f"报告链接已{'开启' if config['report_link_enabled'] else '关闭'}。\n{note}",
             reply_markup=publish_setting_keyboard(config),
+        )
+
+    if action == "group_keyword_reply":
+        return await query.edit_message_text(
+            _group_keyword_reply_settings_text(config),
+            reply_markup=_group_keyword_reply_settings_keyboard(config),
+        )
+
+    if action == "toggle_group_keyword_reply":
+        config["keyword_group_reply_enabled"] = not bool(
+            config.get("keyword_group_reply_enabled", False)
+        )
+        save_publish_config(config)
+        return await query.edit_message_text(
+            _group_keyword_reply_settings_text(config),
+            reply_markup=_group_keyword_reply_settings_keyboard(config),
+        )
+
+    if action == "group_keyword_reply_add":
+        rules = _keyword_group_reply_rules(config)
+        if len(rules) >= 20:
+            return await query.answer("最多只能设置 20 条群关键词回复规则。", show_alert=True)
+        next_id = max((int(rule["id"]) for rule in rules), default=0) + 1
+        context.user_data[GROUP_KEYWORD_REPLY_STAGE_KEY] = {
+            "id": next_id,
+            "mode": "add",
+            "step": "input_label",
+        }
+        return await query.edit_message_text(
+            "请输入输入关键词字段名，例如：艺名。\n"
+            "群成员发送“悠悠”时，会先在“艺名”字段中查找“悠悠”。"
+        )
+
+    if action == "group_keyword_reply_view":
+        try:
+            rule_id = int(query.data.split(":", 2)[2])
+        except (ValueError, IndexError):
+            return await query.answer("规则数据无效。", show_alert=True)
+        rule = next((item for item in _keyword_group_reply_rules(config) if item["id"] == rule_id), None)
+        if not rule:
+            return await query.answer("规则不存在。", show_alert=True)
+        return await query.edit_message_text(
+            _group_keyword_reply_rule_text(rule),
+            reply_markup=_group_keyword_reply_rule_keyboard(rule),
+        )
+
+    if action == "group_keyword_reply_field":
+        parts = query.data.split(":")
+        if len(parts) != 4:
+            return await query.answer("规则字段数据无效。", show_alert=True)
+        field = parts[2]
+        try:
+            rule_id = int(parts[3])
+        except ValueError:
+            return await query.answer("规则数据无效。", show_alert=True)
+        rule = next((item for item in _keyword_group_reply_rules(config) if item["id"] == rule_id), None)
+        prompts = {
+            "input_label": "请输入新的输入关键词字段名，例如：艺名。",
+            "reply_label": "请输入新的回复关键词字段名，例如：联系。该字段必须已在关键词提取标签中配置。",
+            "display_text": (
+                "请输入新的机器人显示文案，例如：联系方式：{value}。\n"
+                "支持 {keyword}、{value}、{values}；发送“默认”恢复为“回复字段：{value}”。"
+            ),
+            "default_text": (
+                "请输入点击联系方式后，打开对方私聊时的预填文字。\n"
+                "支持 {keyword}、{value}、{contacts}；发送“无”清空。"
+            ),
+            "button_text": "请输入新的联系方式按钮文案，例如：联系 {value}；发送“默认”恢复默认值。",
+        }
+        if not rule or field not in prompts:
+            return await query.answer("规则或字段不存在。", show_alert=True)
+        context.user_data[GROUP_KEYWORD_REPLY_STAGE_KEY] = {
+            "mode": "field",
+            "id": rule_id,
+            "field": field,
+            "step": "field",
+        }
+        return await query.edit_message_text(prompts[field])
+
+    if action == "group_keyword_reply_toggle":
+        try:
+            rule_id = int(query.data.split(":", 2)[2])
+        except (ValueError, IndexError):
+            return await query.answer("规则数据无效。", show_alert=True)
+        rules = _keyword_group_reply_rules(config)
+        rule = next((item for item in rules if item["id"] == rule_id), None)
+        if not rule:
+            return await query.answer("规则不存在。", show_alert=True)
+        rule["enabled"] = not bool(rule.get("enabled", True))
+        config["keyword_group_reply_rules"] = rules
+        save_publish_config(config)
+        return await query.edit_message_text(
+            _group_keyword_reply_rule_text(rule),
+            reply_markup=_group_keyword_reply_rule_keyboard(rule),
+        )
+
+    if action == "group_keyword_reply_delete":
+        try:
+            rule_id = int(query.data.split(":", 2)[2])
+        except (ValueError, IndexError):
+            return await query.answer("规则数据无效。", show_alert=True)
+        rules = [item for item in _keyword_group_reply_rules(config) if item["id"] != rule_id]
+        config["keyword_group_reply_rules"] = rules
+        save_publish_config(config)
+        return await query.edit_message_text(
+            "✅ 已删除规则。\n\n" + _group_keyword_reply_settings_text(config),
+            reply_markup=_group_keyword_reply_settings_keyboard(config),
         )
 
     if action == "keywords":
@@ -4111,26 +4524,183 @@ async def _handle_reject_reason_input(update: Update, context: ContextTypes.DEFA
     await msg.reply_text("❌ 已拒绝投稿，已通知投稿人拒绝原因。")
     return True
 
+async def _handle_group_keyword_reply_settings_input(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    draft = (context.user_data or {}).get(GROUP_KEYWORD_REPLY_STAGE_KEY)
+    if not isinstance(draft, dict):
+        return False
+    msg = update.message
+    if not msg or not msg.text:
+        return True
+    if not update.effective_user or not has_admin_permission(
+        context, update.effective_user.id, "submission_config"
+    ):
+        context.user_data.pop(GROUP_KEYWORD_REPLY_STAGE_KEY, None)
+        return False
+
+    text = msg.text.strip()
+    if text in {"取消", "返回"}:
+        context.user_data.pop(GROUP_KEYWORD_REPLY_STAGE_KEY, None)
+        config = load_publish_config()
+        await msg.reply_text(
+            "已取消群关键词回复规则配置。",
+            reply_markup=_group_keyword_reply_settings_keyboard(config),
+        )
+        return True
+
+    step = str(draft.get("step") or "")
+    config = load_publish_config()
+
+    if draft.get("mode") == "field" and step == "field":
+        field = str(draft.get("field") or "")
+        rule_id = _as_int(draft.get("id"))
+        rules = _keyword_group_reply_rules(config)
+        rule = next((item for item in rules if item["id"] == rule_id), None)
+        if not rule:
+            context.user_data.pop(GROUP_KEYWORD_REPLY_STAGE_KEY, None)
+            await msg.reply_text("❗ 规则不存在或已删除。")
+            return True
+        if field in {"input_label", "reply_label"}:
+            if not text or len(text) > 30:
+                await msg.reply_text("❗ 字段不能为空，且不能超过 30 个字符。")
+                return True
+            rule[field] = text
+        elif field == "display_text":
+            if text == "默认":
+                rule[field] = f"{rule.get('reply_label') or '联系方式'}：{{value}}"
+            elif not text or len(text) > 500:
+                await msg.reply_text("❗ 显示文案不能为空，且不能超过 500 个字符。")
+                return True
+            else:
+                rule[field] = msg.text[:500]
+        elif field == "default_text":
+            rule[field] = "" if text in {"无", "-"} else msg.text[:500]
+        elif field == "button_text":
+            value = "联系 {value}" if text in {"默认", "-"} else text
+            if not value or len(value) > 64:
+                await msg.reply_text("❗ 按钮文案不能为空，且不能超过 64 个字符。")
+                return True
+            rule[field] = value
+        else:
+            context.user_data.pop(GROUP_KEYWORD_REPLY_STAGE_KEY, None)
+            return False
+
+        config["keyword_group_reply_rules"] = rules
+        save_publish_config(config)
+        context.user_data.pop(GROUP_KEYWORD_REPLY_STAGE_KEY, None)
+        await msg.reply_text(
+            "✅ 字段已更新。\n\n" + _group_keyword_reply_rule_text(rule),
+            reply_markup=_group_keyword_reply_rule_keyboard(rule),
+        )
+        return True
+
+    if step == "input_label":
+        if not text or len(text) > 30:
+            await msg.reply_text("❗ 输入关键词字段不能为空，且不能超过 30 个字符。")
+            return True
+        draft["input_label"] = text
+        draft["step"] = "reply_label"
+        await msg.reply_text(
+            "请输入回复关键词字段名，例如：联系方式。\n"
+            "注意：该字段必须同时在“关键词设置”的提取标签中配置。"
+        )
+        return True
+
+    if step == "reply_label":
+        if not text or len(text) > 30:
+            await msg.reply_text("❗ 回复关键词字段不能为空，且不能超过 30 个字符。")
+            return True
+        draft["reply_label"] = text
+        draft["step"] = "display_text"
+        await msg.reply_text(
+            "请输入机器人在群里回复用户的显示文案，例如：联系方式：{value}。\n"
+            "可使用 {keyword}（用户输入）、{value}（第一个联系方式）、{values}（全部联系方式）。"
+        )
+        return True
+
+    if step == "display_text":
+        if not text or len(text) > 500:
+            await msg.reply_text("❗ 显示文案不能为空，且不能超过 500 个字符。")
+            return True
+        draft["display_text"] = msg.text[:500]
+        draft["step"] = "default_text"
+        await msg.reply_text(
+            "请输入用户点击联系方式后，打开对方私聊时自动带入的默认文字。\n"
+            "可使用 {keyword}、{value}、{contacts} 占位符；发送“无”可跳过。"
+        )
+        return True
+
+    if step == "default_text":
+        draft["default_text"] = "" if text in {"无", "-"} else msg.text[:500]
+        draft["step"] = "button_text"
+        await msg.reply_text(
+            "请输入联系方式按钮文案，例如：联系 {value}。\n"
+            "可使用 {value}（@用户名）和 {keyword}（用户输入的艺名）；发送“默认”使用“联系 {value}”。"
+        )
+        return True
+
+    if step == "button_text":
+        button_text = "联系 {value}" if text in {"默认", "-"} else text
+        if not button_text or len(button_text) > 64:
+            await msg.reply_text("❗ 按钮文案不能为空，且不能超过 64 个字符。")
+            return True
+        draft["button_text"] = button_text
+        rule = {
+            "id": int(draft["id"]),
+            "input_label": str(draft["input_label"]),
+            "reply_label": str(draft["reply_label"]),
+            "display_text": str(draft.get("display_text") or "{value}"),
+            "default_text": str(draft.get("default_text") or ""),
+            "button_text": button_text,
+            "enabled": bool(draft.get("enabled", True)),
+        }
+        rules = [item for item in _keyword_group_reply_rules(config) if item["id"] != rule["id"]]
+        rules.append(rule)
+        rules.sort(key=lambda item: item["id"])
+        config["keyword_group_reply_rules"] = rules
+        save_publish_config(config)
+        context.user_data.pop(GROUP_KEYWORD_REPLY_STAGE_KEY, None)
+        await msg.reply_text(
+            "✅ 群关键词回复规则已保存。\n\n" + _group_keyword_reply_rule_text(rule),
+            reply_markup=_group_keyword_reply_rule_keyboard(rule),
+        )
+        return True
+
+    context.user_data.pop(GROUP_KEYWORD_REPLY_STAGE_KEY, None)
+    return False
+
+async def _group_keyword_reply_interceptor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await _handle_group_keyword_reply(update, context):
+        raise ApplicationHandlerStop
+
+
 async def _keyword_search_interceptor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Give active keyword search first chance to consume private text.
 
     If there is no active search/template flow, processing returns normally and
     the bidirectional private-forward handlers can continue.
     """
+    if await _handle_group_keyword_reply_settings_input(update, context):
+        raise ApplicationHandlerStop
     if await _handle_template_input(update, context):
         raise ApplicationHandlerStop
     if await _handle_keyword_search_input(update, context):
         raise ApplicationHandlerStop
-    if await _handle_automatic_keyword_lookup(update, context):
+    if await _handle_keyword_post_search_input(update, context):
         raise ApplicationHandlerStop
 
 
 async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await _handle_group_keyword_reply_settings_input(update, context):
+        raise ApplicationHandlerStop
     if await _handle_template_input(update, context):
         raise ApplicationHandlerStop
     if await _handle_keyword_search_input(update, context):
         # Stop group=999 message_router and any later handler from sending the
         # search text into the bidirectional/private bot flow.
+        raise ApplicationHandlerStop
+    if await _handle_keyword_post_search_input(update, context):
         raise ApplicationHandlerStop
     if await _handle_reject_reason_input(update, context):
         return
@@ -4399,6 +4969,17 @@ def register_publish_setting_handlers(app):
         TypeHandler(Update, _capture_comment_source_message),
         # Must run before generic group handlers that may stop processing.
         group=-940,
+    )
+    # Group keyword replies run before generic group dispatch/AI handlers.
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS
+            & filters.TEXT
+            & (~filters.COMMAND)
+            & ~filters.UpdateType.BUSINESS_MESSAGE,
+            _group_keyword_reply_interceptor,
+        ),
+        group=-20,
     )
     # Keyword search must run before bot.py's group=0 private-forward handlers.
     # If it does not consume the message, processing falls through normally.

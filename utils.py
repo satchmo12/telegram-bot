@@ -664,6 +664,8 @@ async def safe_reply(
     html: bool = False,
     reply_markup=None,
     auto_delete_seconds: int = 60,
+    bot_reply: bool = False,
+    disable_web_page_preview: bool = True,
 ):
     try:
         chat_id = int(update.effective_chat.id) if update and update.effective_chat else None
@@ -675,7 +677,8 @@ async def safe_reply(
         parse_mode = ParseMode.HTML if html else None
         if update.message and bot_reply:
             msg = await update.message.reply_text(
-                text, parse_mode=parse_mode, reply_markup=reply_markup
+                text, parse_mode=parse_mode, reply_markup=reply_markup,
+                disable_web_page_preview=disable_web_page_preview,
             )
         else:
             msg = await context.bot.send_message(
@@ -683,6 +686,7 @@ async def safe_reply(
                 text=text,
                 parse_mode=parse_mode,
                 reply_markup=reply_markup,
+                disable_web_page_preview=disable_web_page_preview,
             )
         # 后台启动删除任务，不阻塞 safe_reply
         if msg and auto_delete_seconds and auto_delete_seconds > 0:

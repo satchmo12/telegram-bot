@@ -46,7 +46,11 @@ from channel.telethon_forwarder import start_telethon_forwarder_job
 from channel.telethon_login import _clear_login_state
 from info.storage import ensure_info_migrated
 from channel.channel_config import is_active_subscription
-from channel.publish_setting import handle_comment_start_parameter, handle_report_start_parameter, load_publish_config
+from channel.publish_setting import (
+    handle_comment_start_parameter,
+    handle_report_start_parameter,
+    load_publish_config,
+)
 from custom_command_templates import (
     register_custom_command_handlers,
     visible_bot_commands,
@@ -764,6 +768,9 @@ def _build_start_panel_rows(
         )
     if resource_row:
         rows.append(resource_row)
+    # Post lookup is deliberately explicit. It must never consume ordinary
+    # private text such as a protocol-login phone number.
+    rows.append([InlineKeyboardButton("🔎 查找收录", callback_data="publish:keyword_post_search")])
 
     return rows
 

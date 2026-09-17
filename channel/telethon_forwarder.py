@@ -22,6 +22,7 @@ from utils import (
     get_sessions_dir_by_bot,
     is_shared_session_name,
 )
+from channel.access_control import is_channel_subscription_required
 from channel.channel_forwarder import _is_active_subscription
 from channel.telethon_login import _get_api_creds
 from channel.telethon_ai_reply import get_enabled_sessions, handle_protocol_group_message
@@ -211,6 +212,11 @@ def _load_session_owners() -> dict:
 def _can_use_rule(user_id: str, username: str) -> bool:
     if not user_id:
         return False
+    # The channel-access switch controls both UI access and runtime forwarding.
+    # When subscription is disabled, an owner-configured rule must not be
+    # silently filtered out by the protocol forwarder.
+    if not is_channel_subscription_required():
+        return True
     if is_super_admin(user_id):
         return True
     return _is_active_subscription(user_id, username)

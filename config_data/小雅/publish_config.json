@@ -128,5 +128,17 @@
             "new_channel_id": -1003585759564,
             "changed_at": 1789570371
         }
+    ],
+    "keyword_group_reply_enabled": true,
+    "keyword_group_reply_rules": [
+        {
+            "id": 1,
+            "input_label": "艺名",
+            "reply_label": "联系",
+            "display_text": "点击联系美丽的“{keyword}”老师",
+            "default_text": "你好啊",
+            "button_text": "点击约课{keyword}",
+            "enabled": true
+        }
     ]
 }

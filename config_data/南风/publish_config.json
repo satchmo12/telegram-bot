@@ -26,5 +26,7 @@
     "template_publish_enabled": false,
     "publish_templates": [],
     "pending_history_post_migration": null,
-    "channel_change_history": []
+    "channel_change_history": [],
+    "keyword_group_reply_enabled": false,
+    "keyword_group_reply_rules": []
 }
