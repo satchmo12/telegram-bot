@@ -1,0 +1,18 @@
+{
+    "admins": {
+        "667253432": {
+            "name": "",
+            "username": "",
+            "permissions": [
+                "submission_review",
+                "submission_config",
+                "private_forward",
+                "group_config",
+                "global_ad_config",
+                "channel_config",
+                "telethon_manage",
+                "bot_channel_config"
+            ]
+        }
+    }
+}

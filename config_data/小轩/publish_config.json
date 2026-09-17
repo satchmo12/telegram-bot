@@ -23,5 +23,7 @@
     "random_view_enabled": false,
     "report_link_enabled": false,
     "template_publish_enabled": false,
-    "publish_templates": []
+    "publish_templates": [],
+    "pending_history_post_migration": null,
+    "channel_change_history": []
 }

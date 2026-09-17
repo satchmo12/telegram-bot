@@ -101,5 +101,7 @@
             "buttons": [],
             "button_columns": 1
         }
-    ]
+    ],
+    "pending_history_post_migration": null,
+    "channel_change_history": []
 }
