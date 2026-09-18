@@ -43,6 +43,7 @@ KEYWORD_POST_SEARCH_INPUT_KEY = "publish_keyword_post_search"
 KEYWORD_LABEL_INPUT_KEY = "publish_keyword_label_input"
 GROUP_KEYWORD_REPLY_STAGE_KEY = "publish_group_keyword_reply_stage"
 REPORT_PAGE_SIZE = 6
+REPORT_USERNAME_MIGRATION_KEY = "publish_report_username_migration"
 TEMPLATE_DRAFT_KEY = "publish_template_draft"
 TEMPLATE_FLOW_KEY = "publish_template_flow"
 TEMPLATE_KEY_PATTERN = re.compile(r"\{([\w\-一-鿿]+)\}")
@@ -997,7 +998,11 @@ def _load_comment_reports() -> dict:
     reports = data.get("reports")
     if not isinstance(reports, dict):
         reports = {}
+    aliases = data.get("aliases")
+    if not isinstance(aliases, dict):
+        aliases = {}
     data["reports"] = reports
+    data["aliases"] = aliases
     return data
 
 
@@ -1060,9 +1065,177 @@ def _create_comment_report(
     _save_comment_reports(data)
 
 
+def _normalize_report_username(value: str) -> str:
+    username = str(value or "").strip().lstrip("@").lower()
+    return username if re.fullmatch(r"[a-z0-9_]{5,32}", username) else ""
+
+
+def _resolve_report_id(data: dict, report_id: str) -> str:
+    current = str(report_id or "").strip()
+    aliases = data.get("aliases", {}) if isinstance(data, dict) else {}
+    seen = set()
+    while current and current not in seen and isinstance(aliases, dict) and current in aliases:
+        seen.add(current)
+        current = str(aliases[current] or "").strip()
+    return current
+
+
 def _get_comment_report(report_id: str):
-    report = _load_comment_reports().get("reports", {}).get(str(report_id))
+    data = _load_comment_reports()
+    resolved_id = _resolve_report_id(data, report_id)
+    report = data.get("reports", {}).get(resolved_id)
     return report if isinstance(report, dict) else None
+
+
+def _find_report_id_by_username(username: str) -> str:
+    """Find the current report for @username, including older subject-based records."""
+    username = _normalize_report_username(username)
+    if not username:
+        return ""
+    data = _load_comment_reports()
+    report_id = _resolve_report_id(data, username)
+    if isinstance(data.get("reports", {}).get(report_id), dict):
+        return report_id
+    needle = f"@{username}".lower()
+    matches = []
+    for candidate_id, report in data.get("reports", {}).items():
+        if not isinstance(report, dict):
+            continue
+        for subject in report.get("subjects", []) or []:
+            if isinstance(subject, dict) and str(subject.get("value") or "").lower() == needle:
+                matches.append((candidate_id, report))
+                break
+    if not matches:
+        return ""
+    matches.sort(key=lambda item: int((item[1] or {}).get("updated_at", 0) or (item[1] or {}).get("created_at", 0) or 0), reverse=True)
+    return str(matches[0][0])
+
+
+def _merge_report_username(old_username: str, new_username: str) -> tuple[bool, str]:
+    """Move old username report history under the new username report ID."""
+    old_username = _normalize_report_username(old_username)
+    new_username = _normalize_report_username(new_username)
+    if not old_username or not new_username:
+        return False, "用户名格式无效。"
+    if old_username == new_username:
+        return False, "新旧用户名相同，无需迁移。"
+
+    data = _load_comment_reports()
+    old_id = _find_report_id_by_username(old_username)
+    if not old_id:
+        return False, f"未找到 @{old_username} 的历史报告。"
+    old_id = _resolve_report_id(data, old_id)
+    old_report = data.get("reports", {}).get(old_id)
+    if not isinstance(old_report, dict):
+        return False, f"未找到 @{old_username} 的历史报告。"
+
+    new_id = _resolve_report_id(data, new_username)
+    new_report = data.get("reports", {}).get(new_id)
+    if not isinstance(new_report, dict):
+        new_report = dict(old_report)
+        new_report["comments"] = []
+        new_report["migrated_from_report_ids"] = []
+        data["reports"][new_username] = new_report
+        new_id = new_username
+
+    merged_comments = list(new_report.get("comments", []) or [])
+    seen_comments = {
+        (
+            str(item.get("forward_channel_id")),
+            str(item.get("forward_message_id")),
+            str(item.get("created_at")),
+            str(item.get("content")),
+        )
+        for item in merged_comments if isinstance(item, dict)
+    }
+    for comment in old_report.get("comments", []) or []:
+        if not isinstance(comment, dict):
+            continue
+        key = (
+            str(comment.get("forward_channel_id")),
+            str(comment.get("forward_message_id")),
+            str(comment.get("created_at")),
+            str(comment.get("content")),
+        )
+        if key not in seen_comments:
+            merged_comments.append(comment)
+            seen_comments.add(key)
+    new_report["comments"] = merged_comments[-1000:]
+    history = new_report.setdefault("migrated_from_report_ids", [])
+    if old_id not in history:
+        history.append(old_id)
+    new_report["updated_at"] = int(time.time())
+    new_report["username_migrated_from"] = old_username
+    new_report["username"] = new_username
+    data["reports"][new_id] = new_report
+    if old_id != new_id:
+        data["reports"].pop(old_id, None)
+    data["aliases"][old_username] = new_id
+    data["aliases"][old_id] = new_id
+    _save_comment_reports(data)
+    return True, f"✅ 已将 @{old_username} 的报告迁移到 @{new_username}。"
+
+
+async def _handle_username_report_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Open the latest report when a user sends an exact @username in private."""
+    msg = update.message
+    chat = update.effective_chat
+    if not msg or not msg.text or not chat or chat.type != "private":
+        return False
+    username = _normalize_report_username(msg.text)
+    if not username or not msg.text.strip().startswith("@"):
+        return False
+    report_id = _find_report_id_by_username(username)
+    if not report_id:
+        return False
+    report = _get_comment_report(report_id)
+    if not report:
+        return False
+    text, markup = _report_list_view(report_id, report, 1)
+    await msg.reply_text(text, reply_markup=markup, disable_web_page_preview=True)
+    return True
+
+
+async def _handle_report_username_migration_input(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    stage = (context.user_data or {}).get(REPORT_USERNAME_MIGRATION_KEY)
+    if not isinstance(stage, dict):
+        return False
+    msg = update.message
+    if not msg or not msg.text:
+        return True
+    if not update.effective_user or not has_admin_permission(
+        context, update.effective_user.id, "submission_config"
+    ):
+        context.user_data.pop(REPORT_USERNAME_MIGRATION_KEY, None)
+        return False
+    text = msg.text.strip()
+    if text in {"取消", "返回"}:
+        context.user_data.pop(REPORT_USERNAME_MIGRATION_KEY, None)
+        await msg.reply_text("已取消用户名报告迁移。")
+        return True
+    username = _normalize_report_username(text)
+    if not username:
+        await msg.reply_text("❗ 请输入有效 Telegram 用户名，例如：@newname。")
+        return True
+    if stage.get("step") == "new":
+        stage["new_username"] = username
+        stage["step"] = "old"
+        await msg.reply_text(
+            f"新用户名：@{username}\n\n"
+            "请继续输入旧用户名，例如：@oldname。\n"
+            "旧用户名的报告评论会合并到新用户名报告下。"
+        )
+        return True
+    if stage.get("step") == "old":
+        new_username = str(stage.get("new_username") or "")
+        ok, result = _merge_report_username(username, new_username)
+        context.user_data.pop(REPORT_USERNAME_MIGRATION_KEY, None)
+        await msg.reply_text(result)
+        return True
+    context.user_data.pop(REPORT_USERNAME_MIGRATION_KEY, None)
+    return False
 
 
 def _comment_content(msg, max_length: int = 3500) -> str:
@@ -3714,10 +3887,16 @@ def publish_setting_keyboard(config: dict):
                 callback_data="publish:toggle_continuous_submission",
             )
         ],
-        [InlineKeyboardButton(
+        [   
+            InlineKeyboardButton(
             f"{'✅' if report_link_enabled else '🚫'} 生成报告链接",
             callback_data="publish:toggle_report_link",
-        )],
+            ),
+            InlineKeyboardButton(
+                    "📛 用户名报告迁移",
+                     callback_data="publish:report_username_migrate",
+                 ),
+         ],
         [InlineKeyboardButton(
             "🔄 一键迁移历史评论到当前转发频道(防止转发频道炸了)",
             callback_data="publish:migrate_forward_comments",
@@ -4407,6 +4586,15 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await query.answer("历史主帖正在关联，请稍候。", show_alert=True)
         return await _start_historical_post_migration(
             query, context, source_channel_id, target_channel_id
+        )
+
+    if action == "report_username_migrate":
+        context.user_data[REPORT_USERNAME_MIGRATION_KEY] = {"step": "new"}
+        return await query.edit_message_text(
+            "📛 用户名报告迁移\n\n"
+            "请先输入新的用户名，例如：@bbb。\n"
+            "下一步再输入旧用户名，例如：@aaa。\n\n"
+            "旧报告的评论会合并到新用户名报告下；旧链接也会自动重定向到新报告。"
         )
 
     if action == "migrate_forward_comments":
@@ -6007,6 +6195,8 @@ async def _keyword_search_interceptor(update: Update, context: ContextTypes.DEFA
     """
     if await _handle_checkin_settings_input(update, context):
         raise ApplicationHandlerStop
+    if await _handle_report_username_migration_input(update, context):
+        raise ApplicationHandlerStop
     if await _handle_group_keyword_reply_settings_input(update, context):
         raise ApplicationHandlerStop
     if await _handle_template_input(update, context):
@@ -6014,6 +6204,8 @@ async def _keyword_search_interceptor(update: Update, context: ContextTypes.DEFA
     if await _handle_keyword_search_input(update, context):
         raise ApplicationHandlerStop
     if await _handle_keyword_post_search_input(update, context):
+        raise ApplicationHandlerStop
+    if await _handle_username_report_lookup(update, context):
         raise ApplicationHandlerStop
 
 
@@ -6067,6 +6259,8 @@ async def _handle_checkin_settings_input(update: Update, context: ContextTypes.D
 
 async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await _handle_checkin_settings_input(update, context):
+        raise ApplicationHandlerStop
+    if await _handle_report_username_migration_input(update, context):
         raise ApplicationHandlerStop
 
     if await _handle_group_keyword_reply_settings_input(update, context):
