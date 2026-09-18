@@ -9,7 +9,7 @@ import random
 import re
 import time
 import uuid
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity, Update
 from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, ContextTypes, MessageHandler, TypeHandler, filters
 from telegram.error import BadRequest, Forbidden
 
@@ -34,6 +34,7 @@ KEYWORD_MAP_FILE = "data/publish_keyword_map.json"
 COMMENT_REPORTS_FILE = "data/comment_reports.json"
 POST_MIGRATION_STATE_FILE = "data/publish_post_migrations.json"
 BACKUP_POST_MAP_FILE = "data/publish_backup_post_map.json"
+CHECKIN_POSTS_FILE = "data/publish_checkin_posts.json"
 HISTORY_FORWARD_STATE_FILE = "data/history_forward_state.json"
 KEYWORD_INPUT_KEY = "publish_keyword_search"
 KEYWORD_RESULTS_KEY = "publish_keyword_results"
@@ -95,6 +96,15 @@ def load_publish_config():
         "keyword_group_reply_rules": [],
         # Private “查找收录” result source: main / backup / all.
         "keyword_post_search_display_mode": "main",
+        # Channel-post check-in / online roster settings.
+        "checkin_enabled": False,
+        "checkin_duration_hours": 8,
+        "checkin_user_label": "联系",
+        "checkin_display_label": "艺名",
+        "checkin_group_label": "",
+        "checkin_command_text": "打卡",
+        "checkin_cancel_command_text": "取消打卡",
+        "checkin_online_command_text": "在线宝宝",
         # Preserve the existing behavior: one 投稿 action can send multiple posts.
         "continuous_submission_enabled": True,
         # Visibility of normal start-panel buttons controlled by the owner.
@@ -120,6 +130,10 @@ def load_publish_config():
         if key not in data:
             data[key] = value.copy() if isinstance(value, (list, dict)) else value
             changed = True
+    normalized_labels = _keyword_labels(data)
+    if data.get("keyword_extract_labels") != normalized_labels:
+        data["keyword_extract_labels"] = normalized_labels
+        changed = True
     if changed:
         save_json(PUBLISH_CONFIG_FILE, data)
 
@@ -499,6 +513,433 @@ async def _publish_comment_to_backup_discussion(
             f"discussion={discussion_chat_id}/{discussion_message_id}: {exc}"
         )
         return False
+
+
+def _checkin_command_text(config: dict, key: str, default: str) -> str:
+    value = str((config or {}).get(key) or default).strip()
+    return value[:30] or default
+
+
+def _checkin_duration_seconds(config: dict) -> int:
+    try:
+        hours = int((config or {}).get("checkin_duration_hours", 8))
+    except (TypeError, ValueError):
+        hours = 8
+    return max(1, min(hours, 168)) * 3600
+
+
+def _load_checkin_posts() -> dict:
+    data = load_json(CHECKIN_POSTS_FILE)
+    if not isinstance(data, dict):
+        data = {}
+    posts = data.get("posts")
+    if not isinstance(posts, dict):
+        posts = {}
+    data["posts"] = posts
+    return data
+
+
+def _save_checkin_posts(data: dict) -> None:
+    posts = data.get("posts", {}) if isinstance(data, dict) else {}
+    if isinstance(posts, dict) and len(posts) > 5000:
+        oldest = sorted(
+            posts.items(),
+            key=lambda item: int((item[1] or {}).get("created_at", 0) or 0),
+        )[: len(posts) - 5000]
+        for key, _ in oldest:
+            posts.pop(key, None)
+    save_json(CHECKIN_POSTS_FILE, data)
+
+
+def _clean_keyword_value(value: str) -> str:
+    return str(value or "").strip().lstrip("#").strip()
+
+
+def _checkin_post_key(channel_id: int, message_id: int) -> str:
+    return f"{channel_id}:{message_id}"
+
+
+def _cleanup_expired_checkin_posts(data: dict, now_ts: int = None) -> bool:
+    """Expire only check-in states; published posts remain eligible forever."""
+    now_ts = int(now_ts or time.time())
+    changed = False
+    for post in data.get("posts", {}).values():
+        if not isinstance(post, dict):
+            continue
+        checkins = post.get("checkins")
+        if not isinstance(checkins, dict):
+            post["checkins"] = {}
+            changed = True
+            continue
+        for user_id, checkin in list(checkins.items()):
+            if not isinstance(checkin, dict):
+                checkins.pop(user_id, None)
+                changed = True
+                continue
+            # Compatibility with older records that only had checked_at.
+            expires_at = int(checkin.get("expires_at", 0) or 0)
+            if expires_at and expires_at <= now_ts:
+                checkins.pop(user_id, None)
+                changed = True
+    return changed
+
+
+def _register_checkin_post(
+    config: dict,
+    channel_id: int,
+    message_id: int,
+    entries: list[dict],
+) -> None:
+    """Register eligible usernames and display fields for a newly published main post."""
+    if not bool(config.get("checkin_enabled", False)):
+        return
+    if _as_int(config.get("channel_id")) != _as_int(channel_id):
+        return
+    user_label = str(config.get("checkin_user_label") or "联系").strip()
+    users = []
+    fields: dict[str, list[str]] = {}
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        label = str(entry.get("label") or "").strip()
+        raw = str(entry.get("raw") or entry.get("key") or "").strip()
+        if label and raw:
+            fields.setdefault(label, [])
+            if raw not in fields[label]:
+                fields[label].append(raw)
+        if label == user_label:
+            for username in re.findall(r"@([A-Za-z0-9_]{5,32})", raw):
+                if username.lower() not in users:
+                    users.append(username.lower())
+    if not users:
+        return
+    data = _load_checkin_posts()
+    _cleanup_expired_checkin_posts(data)
+    key = _checkin_post_key(int(channel_id), int(message_id))
+    old = data["posts"].get(key, {})
+    existing_checkins = old.get("checkins", {}) if isinstance(old, dict) else {}
+    # Keep only still-eligible users after an admin edits a post.
+    checkins = {
+        uid: item for uid, item in existing_checkins.items()
+        if isinstance(item, dict) and str(item.get("username", "")).lower() in users
+    }
+    now_ts = int(time.time())
+    data["posts"][key] = {
+        "channel_id": int(channel_id),
+        "message_id": int(message_id),
+        "created_at": int(old.get("created_at", now_ts) or now_ts) if isinstance(old, dict) else now_ts,
+        "eligible_usernames": users,
+        "fields": fields,
+        "checkins": checkins,
+    }
+    _save_checkin_posts(data)
+
+
+def _checkin_field_values(post: dict, label: str) -> list[str]:
+    values = (post.get("fields", {}) or {}).get(label, [])
+    if isinstance(values, list) and values:
+        return [str(item) for item in values if item]
+    # Recover display fields for posts recorded by an older version before
+    # fields were persisted in the check-in file.
+    channel_id = _as_int(post.get("channel_id"))
+    message_id = _as_int(post.get("message_id"))
+    recovered = []
+    for records in _load_keyword_map().values():
+        for record in records if isinstance(records, list) else []:
+            if (
+                isinstance(record, dict)
+                and _as_int(record.get("channel_id")) == channel_id
+                and _as_int(record.get("channel_message_id")) == message_id
+                and str(record.get("label") or "").strip() == label
+            ):
+                value = str(record.get("raw") or record.get("key") or "").strip()
+                if value and value not in recovered:
+                    recovered.append(value)
+    return recovered
+
+
+def _rebuild_checkin_posts_from_keyword_index(config: dict) -> int:
+    """Recreate persistent check-in eligibility for posts indexed before this feature."""
+    main_channel_id = _as_int(config.get("channel_id"))
+    if main_channel_id is None:
+        return 0
+    grouped: dict[int, list[dict]] = {}
+    for records in _load_keyword_map().values():
+        for record in records if isinstance(records, list) else []:
+            if not isinstance(record, dict) or _as_int(record.get("channel_id")) != main_channel_id:
+                continue
+            message_id = _as_int(record.get("channel_message_id"))
+            if message_id is None:
+                continue
+            grouped.setdefault(message_id, []).append({
+                "label": record.get("label", ""),
+                "raw": record.get("raw") or record.get("key") or "",
+                "key": record.get("key", ""),
+            })
+    before = len(_load_checkin_posts().get("posts", {}))
+    for message_id, entries in grouped.items():
+        _register_checkin_post(config, main_channel_id, message_id, entries)
+    after = len(_load_checkin_posts().get("posts", {}))
+    return max(0, after - before)
+
+
+async def _hydrate_checkin_post_fields(
+    context: ContextTypes.DEFAULT_TYPE,
+    post: dict,
+    config: dict,
+) -> bool:
+    """Fetch a legacy primary post through the active protocol client and re-extract fields."""
+    display_label = str(config.get("checkin_display_label") or "艺名").strip()
+    if _checkin_field_values(post, display_label):
+        return False
+    channel_id = _as_int(post.get("channel_id"))
+    message_id = _as_int(post.get("message_id"))
+    if channel_id is None or message_id is None:
+        return False
+    session_name = str(
+        config.get("discussion_mapping_session")
+        or _backup_channel_forward_session(config)
+        or "main"
+    ).strip()
+    try:
+        from channel.telethon_forwarder import SESSION_CLIENTS_BY_BOT, request_telethon_refresh
+    except Exception:
+        return False
+    bot_name = str(context.application.bot_data.get("name", "") or "")
+    client = SESSION_CLIENTS_BY_BOT.get(bot_name, {}).get(session_name)
+    if client is None:
+        request_telethon_refresh(bot_name)
+        return False
+    try:
+        source = await client.get_messages(channel_id, ids=message_id)
+        if source is None:
+            return False
+        entries = _extract_routing_keywords(
+            SimpleNamespace(text=getattr(source, "message", "") or "", caption=None),
+            config,
+        )
+        if not entries:
+            return False
+        _register_checkin_post(config, channel_id, message_id, entries)
+        return True
+    except Exception as exc:
+        print(f"在线打卡补全帖子字段失败 channel={channel_id}/{message_id}: {exc}")
+        return False
+
+
+def _checkin_display_value(post: dict, config: dict) -> str:
+    label = str(config.get("checkin_display_label") or "艺名").strip()
+    values = _checkin_field_values(post, label)
+    if values:
+        return "、".join(_clean_keyword_value(item) for item in values)[:100]
+    fallback_values = _checkin_field_values(
+        post,
+        str(config.get("checkin_user_label") or "联系").strip(),
+    )
+    if fallback_values:
+        return "、".join(fallback_values)[:100]
+    return "在线用户"
+
+
+def _checkin_group_value(post: dict, config: dict) -> str:
+    label = str(config.get("checkin_group_label") or "").strip()
+    if not label:
+        return ""
+    values = _checkin_field_values(post, label)
+    if values:
+        return "、".join(_clean_keyword_value(item) for item in values)[:100]
+    return "未分类"
+
+
+async def _handle_checkin_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    msg = update.message
+    if not msg or not msg.text or not update.effective_user:
+        return False
+    chat = update.effective_chat
+    if not chat or chat.type not in {"group", "supergroup"}:
+        return False
+    command = msg.text.strip()
+    config = load_publish_config()
+    checkin_command = _checkin_command_text(config, "checkin_command_text", "打卡")
+    cancel_command = _checkin_command_text(config, "checkin_cancel_command_text", "取消打卡")
+    online_command = _checkin_command_text(config, "checkin_online_command_text", "在线宝宝")
+    if command not in {checkin_command, cancel_command, online_command}:
+        return False
+    if not bool(config.get("checkin_enabled", False)):
+        return False
+
+    data = _load_checkin_posts()
+    if _cleanup_expired_checkin_posts(data):
+        _save_checkin_posts(data)
+    posts = data.get("posts", {})
+    if not posts:
+        _rebuild_checkin_posts_from_keyword_index(config)
+        data = _load_checkin_posts()
+        posts = data.get("posts", {})
+    username = str(update.effective_user.username or "").strip().lstrip("@").lower()
+
+    if command in {checkin_command, cancel_command}:
+        if not username:
+            # await msg.reply_text("❗ 打卡需要先设置 Telegram 用户名（@username）。")
+            return True
+        matched = [
+            post for post in posts.values()
+            if isinstance(post, dict) and username in (post.get("eligible_usernames") or [])
+        ]
+        if not matched:
+            # await msg.reply_text("❗ 当前没有包含你用户名的有效帖子，无法打卡。")
+            return True
+        changed = 0
+        for post in matched:
+            checkins = post.setdefault("checkins", {})
+            if command == checkin_command:
+                checkins[str(update.effective_user.id)] = {
+                    "username": username,
+                    "name": update.effective_user.full_name,
+                    "checked_at": int(time.time()),
+                    "expires_at": int(time.time()) + _checkin_duration_seconds(config),
+                }
+                changed += 1
+            elif str(update.effective_user.id) in checkins:
+                checkins.pop(str(update.effective_user.id), None)
+                changed += 1
+        _save_checkin_posts(data)
+        await msg.reply_text(
+            f"✅ 已{'打卡' if command == checkin_command else '取消打卡'}，"
+            f"{'打卡成功，牛马上线' if command == checkin_command else '下线成功，祝早日财富自由'}"
+        )
+        return True
+
+    online_posts = [
+        post for post in posts.values()
+        if isinstance(post, dict) and isinstance(post.get("checkins"), dict) and post.get("checkins")
+    ]
+    hydrated = False
+    for post in online_posts:
+        hydrated = await _hydrate_checkin_post_fields(context, post, config) or hydrated
+    if hydrated:
+        data = _load_checkin_posts()
+        posts = data.get("posts", {})
+        online_posts = [
+            post for post in posts.values()
+            if isinstance(post, dict) and isinstance(post.get("checkins"), dict) and post.get("checkins")
+        ]
+    if not online_posts:
+        await msg.reply_text("当前暂无在线宝宝。")
+        return True
+
+    grouped: dict[str, list[dict]] = {}
+    for post in online_posts:
+        group = _checkin_group_value(post, config)
+        grouped.setdefault(group, []).append(post)
+    lines = ["🟢 在线宝宝"]
+    link_rows = []
+    text_link_entities = []
+    for group, group_posts in grouped.items():
+        if group:
+            lines.extend(["", f"【{group}】"])
+        for post in group_posts:
+            link = await _route_message_link(context, post)
+            name_text = _checkin_display_value(post, config)
+            line = f"• {name_text}"
+            # Store code-point offsets first; PTB converts them to Telegram's
+            # required UTF-16 offsets after the full text is assembled.
+            prefix = "\n".join(lines)
+            lines.append(line)
+            if link:
+                text_link_entities.append(
+                    MessageEntity(
+                        type=MessageEntity.TEXT_LINK,
+                        offset=len(prefix) + 1 + 2,
+                        length=len(name_text),
+                        url=link,
+                    )
+                )
+                # Keep a URL button too, as a reliable fallback for private
+                # channel links in Telegram clients.
+                # link_rows.append([InlineKeyboardButton(
+                #     f"📩 查看 {name_text}"[:64],
+                #     callback_data=f"publish:checkin_view:{post.get('channel_id')}:{post.get('message_id')}",
+                # )])
+    result_text = "\n".join(lines)
+    text_link_entities = MessageEntity.adjust_message_entities_to_utf_16(
+        result_text,
+        text_link_entities,
+    )
+    await msg.reply_text(
+        result_text,
+        entities=text_link_entities or None,
+        disable_web_page_preview=True,
+        reply_markup=InlineKeyboardMarkup(link_rows) if link_rows else None,
+    )
+    return True
+
+
+async def _checkin_group_interceptor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await _handle_checkin_group_message(update, context):
+        raise ApplicationHandlerStop
+
+
+def _checkin_settings_text(config: dict) -> str:
+    group_label = str(config.get("checkin_group_label") or "").strip() or "不分组"
+    return "\n".join([
+        "🟢 在线打卡设置",
+        "",
+        f"状态：{'✅ 开启' if config.get('checkin_enabled', False) else '🚫 关闭'}",
+        f"有效时间：{_checkin_duration_seconds(config) // 3600} 小时",
+        f"打卡用户名字段：{config.get('checkin_user_label') or '联系'}",
+        f"展示文字字段：{config.get('checkin_display_label') or '艺名'}",
+        f"展示分组字段：{group_label}",
+        f"打卡文案：{_checkin_command_text(config, 'checkin_command_text', '打卡')}",
+        f"取消文案：{_checkin_command_text(config, 'checkin_cancel_command_text', '取消打卡')}",
+        f"在线展示文案：{_checkin_command_text(config, 'checkin_online_command_text', '在线宝宝')}",
+        "",
+        "管理员发布带 @用户名 的主频道帖子后，对应用户可按上述文案打卡或取消。",
+    ])
+
+
+def _checkin_settings_keyboard(config: dict) -> InlineKeyboardMarkup:
+    enabled = bool(config.get("checkin_enabled", False))
+    group_label = str(config.get("checkin_group_label") or "").strip() or "不分组"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"{'✅' if enabled else '🚫'} 在线打卡",
+            callback_data="publish:toggle_checkin",
+        )],
+        [InlineKeyboardButton(
+            f"⏱ 有效时间：{_checkin_duration_seconds(config) // 3600} 小时",
+            callback_data="publish:checkin_duration",
+        )],
+        [
+            InlineKeyboardButton(
+                f"👤 用户名字段：{config.get('checkin_user_label') or '联系'}",
+                callback_data="publish:checkin_user_label",
+            ),
+            InlineKeyboardButton(
+                f"📝 展示字段：{config.get('checkin_display_label') or '艺名'}",
+                callback_data="publish:checkin_display_label",
+            ),
+        ],
+        [InlineKeyboardButton(
+            f"🗂 分组字段：{group_label}",
+            callback_data="publish:checkin_group_label",
+        )],
+        [
+            InlineKeyboardButton(
+                f"✅ 打卡文案：{_checkin_command_text(config, 'checkin_command_text', '打卡')}",
+                callback_data="publish:checkin_command_text",
+            ),
+            InlineKeyboardButton(
+                f"🚫 取消文案：{_checkin_command_text(config, 'checkin_cancel_command_text', '取消打卡')}",
+                callback_data="publish:checkin_cancel_command_text",
+            ),
+        ],
+        [InlineKeyboardButton(
+            f"🟢 在线文案：{_checkin_command_text(config, 'checkin_online_command_text', '在线宝宝')}",
+            callback_data="publish:checkin_online_command_text",
+        )],
+        [InlineKeyboardButton("⬅️ 返回", callback_data="publish:back")],
+    ])
 
 
 def _record_publish_channel_change(config: dict, old_channel_id, new_channel_id) -> None:
@@ -1391,9 +1832,12 @@ def _keyword_labels(config: dict) -> list[str]:
         return []
     result = []
     for label in labels:
-        value = str(label or "").strip()
-        if value and value not in result:
-            result.append(value[:30])
+        # Accept common separator input such as “标签.艺名” in addition to
+        # commas/newlines, so both fields are extracted independently.
+        for value in re.split(r"[,，\n.。]+", str(label or "")):
+            value = value.strip()
+            if value and value not in result:
+                result.append(value[:30])
     return result
 
 
@@ -1619,6 +2063,62 @@ def _find_keyword_routes(query: str, *, require_discussion: bool = True) -> list
     matches.sort(key=lambda item: int(item.get("created_at", 0) or 0), reverse=True)
     return matches[:30]
 
+def _find_keyword_routes_with_artist(
+    query: str,
+    *,
+    require_discussion: bool = True,
+) -> list[dict]:
+    """Find keyword routes and attach the artist name of the same post."""
+    routes = _find_keyword_routes(
+        query,
+        require_discussion=require_discussion,
+    )
+
+    if not routes:
+        return []
+
+    data = _load_keyword_map()
+
+    # (channel_id, channel_message_id) -> 艺名
+    artist_map = {}
+
+    for records in data.values():
+        for record in records or []:
+            if not isinstance(record, dict):
+                continue
+
+            if record.get("label") != "艺名":
+                continue
+
+            channel_id = record.get("channel_id")
+            message_id = record.get("channel_message_id")
+
+            if not channel_id or not message_id:
+                continue
+
+            artist_name = str(record.get("raw", "")).lstrip("#").strip()
+            if artist_name:
+                artist_map[(int(channel_id), int(message_id))] = artist_name
+
+    result = []
+
+    for route in routes:
+        route = dict(route)
+
+        if route.get("label") == "标签":
+            channel_id = route.get("channel_id")
+            message_id = route.get("channel_message_id")
+
+            if channel_id and message_id:
+                artist_name = artist_map.get(
+                    (int(channel_id), int(message_id))
+                )
+                if artist_name:
+                    route["艺名"] = artist_name
+
+        result.append(route)
+
+    return result
 
 KEYWORD_SEARCH_DISPLAY_OPTIONS = {
     "main": "主频道帖子",
@@ -1711,7 +2211,8 @@ def _fallback_channel_message_link(channel_id, message_id):
 async def _route_message_link(context: ContextTypes.DEFAULT_TYPE, route: dict):
     """Build a public link when possible, otherwise use Telegram's private link."""
     channel_id = route.get("channel_id")
-    message_id = route.get("channel_message_id")
+    # Keyword routes use channel_message_id; check-in records use message_id.
+    message_id = route.get("channel_message_id") or route.get("message_id")
     try:
         chat = await context.bot.get_chat(channel_id)
         username = str(getattr(chat, "username", "") or "").strip().lstrip("@")
@@ -1742,7 +2243,10 @@ async def _send_keyword_post_result(message, context: ContextTypes.DEFAULT_TYPE,
             await message.reply_text(
                 f"🔎 已找到 {label}：{value}",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔗 在频道中打开", url=link)]
+                    [
+                        InlineKeyboardButton("🔗 在频道中打开", url=link),
+                        InlineKeyboardButton("⬅️ 返回", callback_data="publish:keyword_post_search_cancel"),
+                    ]
                 ]),
                 disable_web_page_preview=True,
             )
@@ -1754,7 +2258,10 @@ async def _send_keyword_post_result(message, context: ContextTypes.DEFAULT_TYPE,
         await message.reply_text(
             f"🔎 已找到 {label}：{value}",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 查看对应帖子", url=link)]
+                [
+                    InlineKeyboardButton("🔗 查看对应帖子", url=link),
+                    InlineKeyboardButton("⬅️ 返回", callback_data="publish:keyword_post_search_cancel"),
+                ]
             ]),
             disable_web_page_preview=True,
         )
@@ -1789,7 +2296,7 @@ async def _handle_keyword_post_search_input(update: Update, context: ContextType
 
     config = load_publish_config()
     routes = _keyword_post_display_routes(
-        _find_keyword_routes(query, require_discussion=False),
+        _find_keyword_routes_with_artist(query, require_discussion=False),
         config,
     )
     if not routes:
@@ -1806,10 +2313,16 @@ async def _handle_keyword_post_search_input(update: Update, context: ContextType
     for index, route in enumerate(routes):
         label = str(route.get("label", "关键词"))[:12]
         value = str(route.get("raw", route.get("key", "")))[:30]
+        extra = ""
+        if label == "标签":
+            artist_name = str(route.get("艺名", "")).strip()
+            if artist_name:
+                extra = f" · {artist_name[:20]}"
+            
         channel_label = str(route.get("display_channel") or "主频道")
         rows.append([
             InlineKeyboardButton(
-                f"查看 {channel_label} · {label}：{value}",
+                f"查看 {channel_label} · {label}：{value} {extra}",
                 callback_data=f"publish:keyword_post_pick:{index}",
             )
         ])
@@ -2303,7 +2816,22 @@ async def _capture_comment_source_message(
             "✅ 已更新编辑后频道帖关键词 "
             f"channel={main_channel_id} message={msg.message_id} keywords={count}"
         )
+        _register_checkin_post(config, main_channel_id, msg.message_id, entries)
         await _sync_main_post_edit_to_backup(context, msg, config)
+        return
+
+    channel_post = getattr(update, "channel_post", None)
+    if (
+        channel_post is not None
+        and main_channel_id is not None
+        and int(getattr(getattr(msg, "chat", None), "id", 0) or 0) == main_channel_id
+    ):
+        _register_checkin_post(
+            config,
+            main_channel_id,
+            msg.message_id,
+            _extract_routing_keywords(msg, config),
+        )
         return
 
     sender_chat = getattr(msg, "sender_chat", None)
@@ -2343,6 +2871,14 @@ async def _capture_comment_source_message(
             config,
             main_channel_id=channel_id,
             main_message_id=channel_message_id,
+        )
+
+    if getattr(update, "edited_message", None) is None:
+        _register_checkin_post(
+            config,
+            int(channel_id),
+            int(channel_message_id),
+            _extract_routing_keywords(msg, config),
         )
 
     records = _load_comment_map()
@@ -2476,6 +3012,12 @@ async def _copy_submission_to_channel(
             submission["keyword_entries"],
             target_channel_id,
             published.message_id,
+        )
+        _register_checkin_post(
+            config,
+            int(target_channel_id),
+            published.message_id,
+            submission["keyword_entries"],
         )
     if add_comment_button:
         # 暂时停用“参与讨论请点击下方按钮”辅助消息及其评论按钮。
@@ -3111,6 +3653,7 @@ def publish_setting_keyboard(config: dict):
             f"🔎 搜索展示：{KEYWORD_SEARCH_DISPLAY_OPTIONS[_keyword_post_search_display_mode(config)]}",
             callback_data="publish:keyword_search_display",
         )],
+        [InlineKeyboardButton("🟢 在线打卡设置", callback_data="publish:checkin_settings")],
         [
             
             InlineKeyboardButton("🔘 底部按钮设置", callback_data="publish:buttons"),
@@ -3299,9 +3842,48 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         link = _fallback_channel_message_link(comment.get("forward_channel_id"), comment.get("forward_message_id"))
         if link:
             rows.append([InlineKeyboardButton("🔗 打开转发频道评论", url=link)])
-        rows.append([InlineKeyboardButton("⬅️ 返回报告", callback_data=f"publish:report_page:{parts[2]}:{page}")])
+        comments = report.get("comments", []) if isinstance(report, dict) else []
+        nav_row = []
+        previous_index = index - 1
+        next_index = index + 1
+        if previous_index >= 0:
+            previous_page = previous_index // REPORT_PAGE_SIZE + 1
+            nav_row.append(InlineKeyboardButton(
+                "⬅️ 上一条",
+                callback_data=f"publish:report_detail:{parts[2]}:{previous_page}:{previous_index}",
+            ))
+        nav_row.append(InlineKeyboardButton(
+            "⬅️ 返回报告",
+            callback_data=f"publish:report_page:{parts[2]}:{page}",
+        ))
+        if next_index < len(comments):
+            next_page = next_index // REPORT_PAGE_SIZE + 1
+            nav_row.append(InlineKeyboardButton(
+                "➡️ 下一条",
+                callback_data=f"publish:report_detail:{parts[2]}:{next_page}:{next_index}",
+            ))
+        rows.append(nav_row)
         await query.answer()
         return await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows), disable_web_page_preview=True)
+
+    if action == "checkin_view":
+        parts = query.data.split(":")
+        if len(parts) != 4:
+            return await query.answer("帖子参数无效。", show_alert=True)
+        channel_id = _as_int(parts[2])
+        message_id = _as_int(parts[3])
+        if channel_id is None or message_id is None:
+            return await query.answer("帖子参数无效。", show_alert=True)
+        try:
+            await context.bot.copy_message(
+                chat_id=query.message.chat_id,
+                from_chat_id=channel_id,
+                message_id=message_id,
+            )
+            return await query.answer("已发送帖子内容。")
+        except Exception as exc:
+            print(f"在线帖子查看失败 channel={channel_id}/{message_id}: {exc}")
+            return await query.answer("暂时无法读取该帖子，请确认机器人可访问主频道。", show_alert=True)
 
     if action == "keyword_post_search":
         context.user_data[KEYWORD_POST_SEARCH_INPUT_KEY] = True
@@ -3372,7 +3954,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # All remaining actions below are publishing configuration actions.  Do not
     # rely on the hidden start-menu button: callbacks can be forged manually.
-    public_actions = {"publish", "channel_message", "keyword_post_search", "keyword_post_search_cancel", "bottle_prev", "bottle_next", "accept_friend", "reject_friend", "back"}
+    public_actions = {"publish", "channel_message", "checkin_view", "keyword_post_search", "keyword_post_search_cancel", "bottle_prev", "bottle_next", "accept_friend", "reject_friend", "back"}
     if action not in public_actions and not has_admin_permission(
         context, query.from_user.id, "submission_config"
     ):
@@ -3632,6 +4214,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await query.answer(f"发布失败：{str(exc)[:100]}", show_alert=True)
         if bool(config.get("comment_forward_enabled", False)):
             _register_post_keywords(entries, channel_id_int, published.message_id)
+        _register_checkin_post(config, channel_id_int, published.message_id, entries)
         if report_id and report_url:
             _create_comment_report(
                 channel_id_int,
@@ -3938,6 +4521,45 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.edit_message_text(
             "✅ 已删除规则。\n\n" + _group_keyword_reply_settings_text(config),
             reply_markup=_group_keyword_reply_settings_keyboard(config),
+        )
+
+    if action == "checkin_settings":
+        return await query.edit_message_text(
+            _checkin_settings_text(config),
+            reply_markup=_checkin_settings_keyboard(config),
+        )
+
+    if action == "toggle_checkin":
+        config["checkin_enabled"] = not bool(config.get("checkin_enabled", False))
+        save_publish_config(config)
+        return await query.edit_message_text(
+            _checkin_settings_text(config),
+            reply_markup=_checkin_settings_keyboard(config),
+        )
+
+    if action in {"checkin_duration", "checkin_user_label", "checkin_display_label", "checkin_group_label", "checkin_command_text", "checkin_cancel_command_text", "checkin_online_command_text"}:
+        field_map = {
+            "checkin_duration": "checkin_duration_hours",
+            "checkin_user_label": "checkin_user_label",
+            "checkin_display_label": "checkin_display_label",
+            "checkin_group_label": "checkin_group_label",
+            "checkin_command_text": "checkin_command_text",
+            "checkin_cancel_command_text": "checkin_cancel_command_text",
+            "checkin_online_command_text": "checkin_online_command_text",
+        }
+        prompt_map = {
+            "checkin_duration": "请输入打卡有效时间（小时），例如：8。范围 1-168。",
+            "checkin_user_label": "请输入帖子中记录可打卡用户名的字段，例如：联系。",
+            "checkin_display_label": "请输入“在线宝宝”展示文字使用的字段，例如：艺名。",
+            "checkin_group_label": "请输入“在线宝宝”分组字段，例如：区域 或 标签。发送“无”表示不分组。",
+            "checkin_command_text": "请输入用户打卡时发送的文案，例如：打卡。",
+            "checkin_cancel_command_text": "请输入用户取消打卡时发送的文案，例如：取消打卡。",
+            "checkin_online_command_text": "请输入展示在线帖子时发送的文案，例如：在线宝宝。",
+        }
+        context.user_data["publish_checkin_setting_field"] = field_map[action]
+        return await query.edit_message_text(
+            prompt_map[action],
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ 返回打卡设置", callback_data="publish:checkin_settings")]]),
         )
 
     if action == "keyword_search_display":
@@ -4844,7 +5466,11 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
         "report_content": _comment_content(msg),
         "keyword_entries": (
             _extract_routing_keywords(msg, config)
-            if comment_forward_enabled and is_owner_submission and submission_kind == "main"
+            if (
+                (comment_forward_enabled or bool(config.get("checkin_enabled", False)))
+                and is_owner_submission
+                and submission_kind == "main"
+            )
             else []
         ),
     }
@@ -5354,6 +5980,8 @@ async def _keyword_search_interceptor(update: Update, context: ContextTypes.DEFA
     If there is no active search/template flow, processing returns normally and
     the bidirectional private-forward handlers can continue.
     """
+    if await _handle_checkin_settings_input(update, context):
+        raise ApplicationHandlerStop
     if await _handle_group_keyword_reply_settings_input(update, context):
         raise ApplicationHandlerStop
     if await _handle_template_input(update, context):
@@ -5364,7 +5992,58 @@ async def _keyword_search_interceptor(update: Update, context: ContextTypes.DEFA
         raise ApplicationHandlerStop
 
 
+async def _handle_checkin_settings_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if context.user_data.get("publish_checkin_setting_field"):
+        field = context.user_data.pop("publish_checkin_setting_field")
+        if not update.message or not update.message.text:
+            return
+        value = update.message.text.strip()
+        config = load_publish_config()
+        if value in {"取消", "返回"}:
+            return await update.message.reply_text(
+                "已取消打卡设置修改。",
+                reply_markup=_checkin_settings_keyboard(config),
+            )
+        if field == "checkin_duration_hours":
+            try:
+                hours = int(value)
+            except ValueError:
+                hours = 0
+            if not 1 <= hours <= 168:
+                return await update.message.reply_text("❗ 请输入 1 到 168 之间的小时数。")
+            config[field] = hours
+        elif field in {"checkin_user_label", "checkin_display_label"}:
+            if not value or len(value) > 30:
+                return await update.message.reply_text("❗ 字段不能为空且不能超过 30 个字符。")
+            config[field] = value
+        elif field == "checkin_group_label":
+            config[field] = "" if value in {"无", "-"} else value[:30]
+        elif field in {"checkin_command_text", "checkin_cancel_command_text", "checkin_online_command_text"}:
+            if not value or len(value) > 30:
+                return await update.message.reply_text("❗ 文案不能为空且不能超过 30 个字符。")
+            other_values = {
+                _checkin_command_text(config, "checkin_command_text", "打卡"),
+                _checkin_command_text(config, "checkin_cancel_command_text", "取消打卡"),
+                _checkin_command_text(config, "checkin_online_command_text", "在线宝宝"),
+            }
+            other_values.discard(_checkin_command_text(config, field, ""))
+            if value in other_values:
+                return await update.message.reply_text("❗ 三个打卡文案不能重复，请换一个。")
+            config[field] = value
+        else:
+            return
+        save_publish_config(config)
+        return await update.message.reply_text(
+            "✅ 已保存打卡设置。\n\n" + _checkin_settings_text(config),
+            reply_markup=_checkin_settings_keyboard(config),
+        )
+    return False
+
+
 async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await _handle_checkin_settings_input(update, context):
+        raise ApplicationHandlerStop
+
     if await _handle_group_keyword_reply_settings_input(update, context):
         raise ApplicationHandlerStop
     if await _handle_template_input(update, context):
@@ -5658,6 +6337,17 @@ def register_publish_setting_handlers(app):
         TypeHandler(Update, _capture_comment_source_message),
         # Must run before generic group handlers that may stop processing.
         group=-940,
+    )
+    # Check-in commands run before generic group dispatch/AI handlers.
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS
+            & filters.TEXT
+            & (~filters.COMMAND)
+            & ~filters.UpdateType.BUSINESS_MESSAGE,
+            _checkin_group_interceptor,
+        ),
+        group=-21,
     )
     # Group keyword replies run before generic group dispatch/AI handlers.
     app.add_handler(

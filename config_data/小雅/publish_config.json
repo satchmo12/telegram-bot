@@ -21,7 +21,8 @@
     "keyword_extract_labels": [
         "标签",
         "艺名",
-        "联系"
+        "联系",
+        "区域"
     ],
     "continuous_submission_enabled": false,
     "custom_bot_button_visible": true,
@@ -141,10 +142,15 @@
             "enabled": true
         }
     ],
-    "backup_channel_id": -1004426822084,
+    "backup_channel_id": null,
     "keyword_post_search_display_mode": "main",
     "backup_channel_use_telethon": false,
     "backup_channel_session": "",
     "backup_channel_listen_session": "",
-    "backup_channel_forward_session": ""
+    "backup_channel_forward_session": "",
+    "checkin_enabled": true,
+    "checkin_duration_hours": 8,
+    "checkin_user_label": "联系",
+    "checkin_display_label": "艺名",
+    "checkin_group_label": "区域"
 }

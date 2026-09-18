@@ -105,7 +105,7 @@ async def delete_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     removed = data[user_id].pop(index)
 
-    save_json(NOTE_FILE, notes)
+    save_json(NOTE_FILE, data)
 
     await update.message.reply_text(
         f"🗑 已删除：\n{removed}"

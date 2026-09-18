@@ -14,7 +14,9 @@
     "forward_channel_id": -1004406338659,
     "keyword_extract_labels": [
         "艺名",
-        "联系"
+        "联系",
+        "区域",
+        "标签"
     ],
     "continuous_submission_enabled": false,
     "custom_menu_buttons": {
@@ -121,5 +123,10 @@
     "backup_channel_use_telethon": true,
     "backup_channel_session": "+13218329173",
     "backup_channel_listen_session": "",
-    "backup_channel_forward_session": ""
+    "backup_channel_forward_session": "",
+    "checkin_enabled": false,
+    "checkin_duration_hours": 8,
+    "checkin_user_label": "联系",
+    "checkin_display_label": "艺名",
+    "checkin_group_label": ""
 }
