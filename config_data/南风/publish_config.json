@@ -39,5 +39,8 @@
     "checkin_duration_hours": 8,
     "checkin_user_label": "联系",
     "checkin_display_label": "艺名",
-    "checkin_group_label": ""
+    "checkin_group_label": "",
+    "checkin_command_text": "打卡",
+    "checkin_cancel_command_text": "取消打卡",
+    "checkin_online_command_text": "在线宝宝"
 }

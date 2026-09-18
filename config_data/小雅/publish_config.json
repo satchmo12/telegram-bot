@@ -38,38 +38,11 @@
     "template_publish_enabled": true,
     "publish_templates": [
         {
-            "id": 3,
-            "name": "测试3",
-            "text": "🍃艺名 #{艺名}         🌎区域 #{区域}              \n\n📡联系：@{联系}  \n                                        \n💰课费：{课费}  \n额外积分：约课备注*艺术展览会推荐\n\n✅标签 ：{标签}  \n\n📡频道：{频道}",
-            "format": "html",
-            "buttons": []
-        },
-        {
             "id": 4,
             "name": "测试中奖",
             "text": "艺名 {艺名}                 区域 #{区域}             \n\n联系：@{联系}  <a href=\"https://t.me/boost/yishuzanlanhui\">😀助推榜单</a> \n                                           助推频道\n课费：{课费}  \n额外积分：约课备注*艺术展览会推荐\n绅士Vip群\n标签 ：#手势验证 点击返回工兵区 \n#舌吻 #白虎 #肤白 #筷子腿 #A4腰\n\n📡频道：{频道}\n\n  老师总榜单  中转平台  点击更多福利\n\n   福利群       报告区       人气榜单",
             "format": "html",
             "buttons": []
-        },
-        {
-            "id": 5,
-            "name": "4",
-            "text": "艺名：{艺名}\n联系：{联系方式}",
-            "format": "html",
-            "buttons": [
-                {
-                    "text": "老师总榜单",
-                    "url": "https://t.me/+9VoY0YHVJXFhOWZh"
-                },
-                {
-                    "text": "中转平台",
-                    "url": "https://t.me/+-sIwH2NalFw2MzEy"
-                },
-                {
-                    "text": "点击更多福利",
-                    "url": "https://example.com"
-                }
-            ]
         },
         {
             "id": 6,
@@ -108,6 +81,14 @@
             "id": 2,
             "name": "发布新模版",
             "text": "等待内容编辑中",
+            "format": "plain",
+            "buttons": [],
+            "button_columns": 1
+        },
+        {
+            "id": 5,
+            "name": "4",
+            "text": "联系：{联系方式}",
             "format": "plain",
             "buttons": [],
             "button_columns": 1
@@ -152,5 +133,8 @@
     "checkin_duration_hours": 8,
     "checkin_user_label": "联系",
     "checkin_display_label": "艺名",
-    "checkin_group_label": "区域"
+    "checkin_group_label": "区域",
+    "checkin_command_text": "打卡",
+    "checkin_cancel_command_text": "取消打卡",
+    "checkin_online_command_text": "在线宝宝"
 }

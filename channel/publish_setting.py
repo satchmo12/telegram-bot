@@ -1013,6 +1013,18 @@ def _save_comment_reports(data: dict) -> None:
     save_json(COMMENT_REPORTS_FILE, data)
 
 
+def _report_id_from_subject_entries(subject_entries: Optional[list[dict]]) -> str:
+    """Use the first Telegram @username in a post as its stable report ID."""
+    for entry in subject_entries or []:
+        if not isinstance(entry, dict):
+            continue
+        raw = str(entry.get("raw") or entry.get("key") or "")
+        match = re.search(r"@([A-Za-z0-9_]{5,32})", raw)
+        if match:
+            return match.group(1).lower()
+    return uuid.uuid4().hex[:16]
+
+
 def _create_comment_report(
     channel_id: int, message_id: int, report_id: str, subject_entries: Optional[list[dict]] = None
 ) -> None:
@@ -1025,13 +1037,26 @@ def _create_comment_report(
         value = str(entry.get("raw") or entry.get("key") or "").strip()
         if value and not any(item.get("label") == label and item.get("value") == value for item in subjects):
             subjects.append({"label": label, "value": value})
-    data["reports"][report_id] = {
+    existing = data["reports"].get(report_id)
+    # A report ID based on the post username is intentionally stable. When the
+    # same username is published again, keep its report/comments but point the
+    # report link at the newest primary message.
+    comments = existing.get("comments", []) if isinstance(existing, dict) else []
+    if not isinstance(comments, list):
+        comments = []
+    report = dict(existing) if isinstance(existing, dict) else {}
+    report.update({
         "channel_id": int(channel_id),
         "message_id": int(message_id),
-        "created_at": int(time.time()),
-        "subjects": subjects,
-        "comments": [],
-    }
+        "created_at": int(report.get("created_at", int(time.time())) or int(time.time())),
+        "updated_at": int(time.time()),
+        "subjects": subjects or report.get("subjects", []),
+        "comments": comments,
+    })
+    if isinstance(existing, dict):
+        report["previous_channel_id"] = _as_int(existing.get("channel_id"))
+        report["previous_message_id"] = _as_int(existing.get("message_id"))
+    data["reports"][report_id] = report
     _save_comment_reports(data)
 
 
@@ -4197,7 +4222,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report_url = ""
         text_to_publish = rendered_text
         if bool(config.get("comment_forward_enabled", False)) and bool(config.get("report_link_enabled", False)):
-            report_id = uuid.uuid4().hex[:16]
+            report_id = _report_id_from_subject_entries(entries)
             report_url = await _report_deep_link(context, report_id) or ""
             if report_url:
                 link_for_text = html.escape(report_url) if parse_mode == "HTML" else report_url
@@ -5482,7 +5507,7 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
         and is_owner_submission
         and submission_kind == "main"
     ):
-        report_id = uuid.uuid4().hex[:16]
+        report_id = _report_id_from_subject_entries(submission.get("keyword_entries", []))
         report_url = await _report_deep_link(context, report_id) or ""
 
     try:
