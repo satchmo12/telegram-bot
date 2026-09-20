@@ -2665,7 +2665,7 @@ def _keyword_group_reply_rules(config: dict) -> list[dict]:
             continue
         input_label = str(rule.get("input_label") or "").strip()[:30]
         reply_label = str(rule.get("reply_label") or "").strip()[:30]
-        if not input_label or not reply_label:
+        if not input_label:
             continue
         try:
             rule_id = int(rule.get("id", 0) or 0)
@@ -2678,10 +2678,12 @@ def _keyword_group_reply_rules(config: dict) -> list[dict]:
             "input_label": input_label,
             "reply_label": reply_label,
             "display_text": str(
-                rule.get("display_text") or f"{reply_label}：{{value}}"
+                rule.get("display_text") or (f"{reply_label}：{{value}}" if reply_label else "已找到对应帖子")
             )[:500],
             "default_text": str(rule.get("default_text") or "")[:500],
-            "button_text": str(rule.get("button_text") or "联系 {value}")[:64],
+            "button_text": str(
+                rule.get("button_text") or ("联系 {value}" if reply_label else "查看对应帖子")
+            )[:64],
             "enabled": bool(rule.get("enabled", True)),
         })
     return result
@@ -2703,7 +2705,8 @@ def _group_keyword_reply_settings_text(config: dict) -> str:
         for rule in rules:
             default_text = rule.get("default_text") or "未设置"
             lines.append(
-                f"#{rule['id']} 输入「{rule['input_label']}」 → 回复「{rule['reply_label']}」\n"
+                f"#{rule['id']} 输入「{rule['input_label']}」 → "
+                f"{'回复「' + rule['reply_label'] + '」' if rule['reply_label'] else '跳转对应帖子'}\n"
                 f"默认咨询文字：{default_text[:80]}"
             )
     return "\n".join(lines)
@@ -2720,7 +2723,7 @@ def _group_keyword_reply_settings_keyboard(config: dict) -> InlineKeyboardMarkup
     ]
     for rule in _keyword_group_reply_rules(config):
         rows.append([InlineKeyboardButton(
-            f"📝 {rule['input_label']} → {rule['reply_label']}",
+            f"📝 {rule['input_label']} → {rule['reply_label'] or '查看帖子'}",
             callback_data=f"publish:group_keyword_reply_view:{rule['id']}",
         )])
     rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="publish:back")])
@@ -2731,10 +2734,10 @@ def _group_keyword_reply_rule_text(rule: dict) -> str:
     return "\n".join([
         "💬 群关键词回复规则",
         f"输入关键词字段：{rule.get('input_label', '')}",
-        f"回复关键词字段：{rule.get('reply_label', '')}",
-        f"显示文案：{rule.get('display_text') or '{value}'}",
+        f"回复关键词字段：{rule.get('reply_label') or '未配置（按钮跳转对应帖子）'}",
+        f"显示文案：{rule.get('display_text') or '已找到对应帖子'}",
         f"私聊预填文字：{rule.get('default_text') or '未设置'}",
-        f"联系方式按钮文案：{rule.get('button_text') or '联系 {{value}}'}",
+        f"按钮文案：{rule.get('button_text') or ('联系 {value}' if rule.get('reply_label') else '查看对应帖子')}",
         f"状态：{'✅ 开启' if rule.get('enabled', True) else '🚫 关闭'}",
     ])
 
@@ -2779,6 +2782,12 @@ def _find_group_keyword_reply_values(query: str, input_label: str, reply_label: 
             message_id = _as_int(record.get("channel_message_id"))
             if channel_id is not None and message_id is not None:
                 source_posts.add((channel_id, message_id))
+
+    if not reply_label:
+        return [
+            {"value": "", "channel_id": channel_id, "message_id": message_id}
+            for channel_id, message_id in sorted(source_posts)
+        ][:20]
 
     values = []
     seen = set()
@@ -2894,30 +2903,56 @@ async def _handle_group_keyword_reply(update: Update, context: ContextTypes.DEFA
         )
         if not values:
             continue
-        contacts = []
+        reply_label = str(rule.get("reply_label") or "").strip()
+        contacts = [item["value"] for item in values if item.get("value")]
         rule_buttons = []
-        for item in values:
-            contacts.append(item["value"])
-        for item in values:
-            rule_buttons.extend(
-                _telegram_contact_buttons(
-                    item["value"],
-                    rule["button_text"],
-                    query,
-                    rule.get("default_text", ""),
-                    contacts,
+        if reply_label:
+            for item in values:
+                rule_buttons.extend(
+                    _telegram_contact_buttons(
+                        item["value"],
+                        rule["button_text"],
+                        query,
+                        rule.get("default_text", ""),
+                        contacts,
+                    )
                 )
-            )
+        else:
+            # With no reply field configured, the input keyword itself locates
+            # the source post. Buttons open that post instead of a contact.
+            for item in values:
+                link = await _route_message_link(context, {
+                    "channel_id": item.get("channel_id"),
+                    "channel_message_id": item.get("message_id"),
+                })
+                if not link:
+                    continue
+                try:
+                    button_text = str(rule.get("button_text") or "查看对应帖子").format(
+                        keyword=query,
+                        value="对应帖子",
+                    )
+                except Exception:
+                    button_text = "查看对应帖子"
+                rule_buttons.append(InlineKeyboardButton(
+                    button_text[:64] or "查看对应帖子",
+                    url=link,
+                ))
         if not rule_buttons:
             continue
         rows.extend([[button] for button in rule_buttons])
-        display_text = _render_group_keyword_display_text(rule, query, contacts)
+        display_values = contacts or ["对应帖子"]
+        display_text = _render_group_keyword_display_text(rule, query, display_values)
         if display_text and display_text not in display_messages:
             display_messages.append(display_text)
 
     if not rows:
         return False
     response_text = "\n\n".join(display_messages) or "已找到联系方式："
+    
+    
+    # link_rows.append([InlineKeyboardButton( # f"📩 查看 {name_text}"[:64], # callback_data=f"publish:checkin_view:{post.get('channel_id')}:{post.get('message_id')}",
+    
     # await msg.reply_text(
     #     response_text,
     #     reply_markup=InlineKeyboardMarkup(rows),
@@ -4867,7 +4902,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rule = next((item for item in _keyword_group_reply_rules(config) if item["id"] == rule_id), None)
         prompts = {
             "input_label": "请输入新的输入关键词字段名，例如：艺名。",
-            "reply_label": "请输入新的回复关键词字段名，例如：联系。该字段必须已在关键词提取标签中配置。",
+            "reply_label": "请输入新的回复关键词字段名，例如：联系。发送“无”则不回复字段，按钮直接跳转对应帖子。",
             "display_text": (
                 "请输入新的机器人显示文案，例如：联系方式：{value}。\n"
                 "支持 {keyword}、{value}、{values}；发送“默认”恢复为“回复字段：{value}”。"
@@ -6269,14 +6304,28 @@ async def _handle_group_keyword_reply_settings_input(
             context.user_data.pop(GROUP_KEYWORD_REPLY_STAGE_KEY, None)
             await msg.reply_text("❗ 规则不存在或已删除。")
             return True
-        if field in {"input_label", "reply_label"}:
+        if field == "input_label":
             if not text or len(text) > 30:
                 await msg.reply_text("❗ 字段不能为空，且不能超过 30 个字符。")
                 return True
             rule[field] = text
+        elif field == "reply_label":
+            if text in {"无", "-"}:
+                rule[field] = ""
+                rule["display_text"] = "已找到对应帖子"
+                rule["default_text"] = ""
+                rule["button_text"] = "查看对应帖子"
+            elif len(text) > 30:
+                await msg.reply_text("❗ 回复字段不能超过 30 个字符。")
+                return True
+            else:
+                rule[field] = text
         elif field == "display_text":
             if text == "默认":
-                rule[field] = f"{rule.get('reply_label') or '联系方式'}：{{value}}"
+                rule[field] = (
+                    f"{rule.get('reply_label')}：{{value}}"
+                    if rule.get("reply_label") else "已找到对应帖子"
+                )
             elif not text or len(text) > 500:
                 await msg.reply_text("❗ 显示文案不能为空，且不能超过 500 个字符。")
                 return True
@@ -6285,7 +6334,9 @@ async def _handle_group_keyword_reply_settings_input(
         elif field == "default_text":
             rule[field] = "" if text in {"无", "-"} else msg.text[:500]
         elif field == "button_text":
-            value = "联系 {value}" if text in {"默认", "-"} else text
+            value = (
+                "联系 {value}" if rule.get("reply_label") else "查看对应帖子"
+            ) if text in {"默认", "-"} else text
             if not value or len(value) > 64:
                 await msg.reply_text("❗ 按钮文案不能为空，且不能超过 64 个字符。")
                 return True
@@ -6311,13 +6362,23 @@ async def _handle_group_keyword_reply_settings_input(
         draft["step"] = "reply_label"
         await msg.reply_text(
             "请输入回复关键词字段名，例如：联系方式。\n"
-            "注意：该字段必须同时在“关键词设置”的提取标签中配置。"
+            "发送“无”则不配置回复字段，按钮将直接跳转到对应帖子。"
         )
         return True
 
     if step == "reply_label":
-        if not text or len(text) > 30:
-            await msg.reply_text("❗ 回复关键词字段不能为空，且不能超过 30 个字符。")
+        if text in {"无", "-"}:
+            draft["reply_label"] = ""
+            draft["display_text"] = "已找到对应帖子"
+            draft["default_text"] = ""
+            draft["step"] = "button_text"
+            await msg.reply_text(
+                "未配置回复字段，按钮将直接跳转对应帖子。\n"
+                "请输入按钮文案，例如：查看对应帖子；发送“默认”使用默认文案。"
+            )
+            return True
+        if len(text) > 30:
+            await msg.reply_text("❗ 回复关键词字段不能超过 30 个字符。")
             return True
         draft["reply_label"] = text
         draft["step"] = "display_text"
@@ -6349,7 +6410,9 @@ async def _handle_group_keyword_reply_settings_input(
         return True
 
     if step == "button_text":
-        button_text = "联系 {value}" if text in {"默认", "-"} else text
+        button_text = (
+            "联系 {value}" if draft.get("reply_label") else "查看对应帖子"
+        ) if text in {"默认", "-"} else text
         if not button_text or len(button_text) > 64:
             await msg.reply_text("❗ 按钮文案不能为空，且不能超过 64 个字符。")
             return True

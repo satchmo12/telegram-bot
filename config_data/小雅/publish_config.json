@@ -117,9 +117,9 @@
         {
             "id": 1,
             "input_label": "艺名",
-            "reply_label": "联系",
+            "reply_label": "",
             "display_text": "点击联系美丽的“{keyword}”老师",
-            "default_text": "你好啊",
+            "default_text": "",
             "button_text": "点击约课{keyword}",
             "enabled": true
         }
