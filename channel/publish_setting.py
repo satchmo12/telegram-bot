@@ -845,7 +845,7 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
             line = f"• {name_text}"
             # Store code-point offsets first; PTB converts them to Telegram's
             # required UTF-16 offsets after the full text is assembled.
-            prefix = "\n".join(lines)
+            prefix = "  ".join(lines)
             lines.append(line)
             if link:
                 text_link_entities.append(
@@ -2421,6 +2421,20 @@ async def _route_message_link(context: ContextTypes.DEFAULT_TYPE, route: dict):
     return _fallback_channel_message_link(channel_id, message_id)
 
 
+def _keyword_post_results_keyboard(routes: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for index, route in enumerate(routes):
+        label = str(route.get("label", "关键词"))[:12]
+        value = str(route.get("raw", route.get("key", "")))[:30]
+        channel_label = str(route.get("display_channel") or "主频道")
+        rows.append([InlineKeyboardButton(
+            f"查看 {channel_label} · {label}：{value}",
+            callback_data=f"publish:keyword_post_pick:{index}",
+        )])
+    rows.append([InlineKeyboardButton("❌ 取消查询", callback_data="publish:keyword_post_search_cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def _send_keyword_post_result(message, context: ContextTypes.DEFAULT_TYPE, route: dict) -> None:
     """Send the indexed channel post to a private lookup requester.
 
@@ -2443,7 +2457,7 @@ async def _send_keyword_post_result(message, context: ContextTypes.DEFAULT_TYPE,
                 reply_markup=InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton("🔗 在频道中打开", url=link),
-                        InlineKeyboardButton("⬅️ 返回", callback_data="publish:keyword_post_search_cancel"),
+                        InlineKeyboardButton("⬅️ 返回", callback_data="publish:keyword_post_return"),
                     ]
                 ]),
                 disable_web_page_preview=True,
@@ -2458,7 +2472,7 @@ async def _send_keyword_post_result(message, context: ContextTypes.DEFAULT_TYPE,
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton("🔗 查看对应帖子", url=link),
-                    InlineKeyboardButton("⬅️ 返回", callback_data="publish:keyword_post_search_cancel"),
+                    InlineKeyboardButton("⬅️ 返回", callback_data="publish:keyword_post_return"),
                 ]
             ]),
             disable_web_page_preview=True,
@@ -2817,6 +2831,18 @@ async def _handle_group_keyword_reply(update: Update, context: ContextTypes.DEFA
     return True
 
 
+def _keyword_submission_mode_keyboard(route: dict, link: str) -> InlineKeyboardMarkup:
+    rows = []
+    if link:
+        rows.append([InlineKeyboardButton("🔗 查看对应帖子", url=link)])
+    rows.append([
+        InlineKeyboardButton("🙈 匿名投稿", callback_data="publish:keyword_submit_mode:anonymous"),
+        InlineKeyboardButton("👤 实名投稿", callback_data="publish:keyword_submit_mode:real"),
+    ])
+    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
+    return InlineKeyboardMarkup(rows)
+
+
 def _keyword_settings_text(config: dict) -> str:
     labels = _keyword_labels(config)
     sample = "【艺名】：#丹丹\n【联系方式】：@dandan"
@@ -2935,17 +2961,31 @@ async def _send_submission_for_review(
     if owner_id is None:
         raise RuntimeError("未配置机器人所有者")
 
-    await context.bot.forward_message(
-        chat_id=owner_id,
-        from_chat_id=submission["user_chat_id"],
-        message_id=submission["user_message_id"],
-    )
-    if submission.get("proof_message_id"):
+    if submission.get("anonymous"):
+        await context.bot.copy_message(
+            chat_id=owner_id,
+            from_chat_id=submission["user_chat_id"],
+            message_id=submission["user_message_id"],
+        )
+    else:
         await context.bot.forward_message(
             chat_id=owner_id,
-            from_chat_id=submission["proof_chat_id"],
-            message_id=submission["proof_message_id"],
+            from_chat_id=submission["user_chat_id"],
+            message_id=submission["user_message_id"],
         )
+    if submission.get("proof_message_id"):
+        if submission.get("anonymous"):
+            await context.bot.copy_message(
+                chat_id=owner_id,
+                from_chat_id=submission["proof_chat_id"],
+                message_id=submission["proof_message_id"],
+            )
+        else:
+            await context.bot.forward_message(
+                chat_id=owner_id,
+                from_chat_id=submission["proof_chat_id"],
+                message_id=submission["proof_message_id"],
+            )
 
     # Send review work to the owner and every delegated reviewer. Each recipient
     # gets independent controls; the persisted submission state prevents duplicate publishing.
@@ -4103,6 +4143,23 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]),
         )
 
+    if action == "keyword_post_return":
+        routes = (context.user_data or {}).get(KEYWORD_POST_RESULTS_KEY, [])
+        await query.answer()
+        if isinstance(routes, list) and routes:
+            return await query.edit_message_text(
+                "找到多个对应帖子，请选择要查看的帖子：",
+                reply_markup=_keyword_post_results_keyboard(routes),
+            )
+        context.user_data[KEYWORD_POST_SEARCH_INPUT_KEY] = True
+        return await query.edit_message_text(
+            "🔎 请输入要查询的收录关键词，例如：悠悠 或 @youyouabc。\n"
+            "发送“取消”可退出查询。",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ 取消查询", callback_data="publish:keyword_post_search_cancel")]
+            ]),
+        )
+
     if action == "keyword_post_search_cancel":
         context.user_data.pop(KEYWORD_POST_SEARCH_INPUT_KEY, None)
         context.user_data.pop(KEYWORD_POST_RESULTS_KEY, None)
@@ -4121,14 +4178,31 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             route = results[result_index]
         except (ValueError, IndexError, TypeError):
             return await query.answer("关键词结果已失效，请重新搜索。", show_alert=True)
-        context.user_data.pop(KEYWORD_POST_RESULTS_KEY, None)
-        context.user_data.pop(KEYWORD_POST_SEARCH_INPUT_KEY, None)
+        context.user_data[KEYWORD_POST_SEARCH_INPUT_KEY] = True
         await query.answer()
         await _send_keyword_post_result(query.message, context, route)
         try:
             return await query.edit_message_text("✅ 已发送对应帖子。")
         except Exception:
             return
+
+    if action == "keyword_submit_mode":
+        mode = query.data.split(":", 2)[2] if len(query.data.split(":", 2)) == 3 else ""
+        if mode not in {"anonymous", "real"}:
+            return await query.answer("投稿方式无效。", show_alert=True)
+        if not isinstance(context.user_data.get(COMMENT_TARGET_KEY), dict):
+            return await query.answer("选中的帖子已失效，请重新查询。", show_alert=True)
+        anonymous = mode == "anonymous"
+        context.user_data["post_no_name"] = anonymous
+        context.user_data["waiting_post"] = True
+        await query.answer("已选择匿名投稿。" if anonymous else "已选择实名投稿。")
+        return await query.edit_message_text(
+            f"{'🙈 匿名投稿' if anonymous else '👤 实名投稿'}已开启。\n\n"
+            "请发送投稿内容，审核通过后会评论到选中的帖子下，并发布到转发频道。",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ 取消", callback_data="start:back")]
+            ]),
+        )
 
     if action == "keyword_pick":
         results = (context.user_data or {}).get(KEYWORD_RESULTS_KEY, [])
@@ -4143,22 +4217,18 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "channel_id": route["channel_id"],
             "message_id": route["channel_message_id"],
         }
-        context.user_data["waiting_post"] = True
+        context.user_data["waiting_post"] = False
         link = await _route_message_link(context, route)
         await query.answer()
         return await query.edit_message_text(
             f"✅ 已选择 {route.get('label', '关键词')}：{route.get('raw', route.get('key'))}。\n"
-            "请发送投稿内容，审核通过后会评论到对应帖子下，并发布到转发频道。",
-            reply_markup=_keyword_route_keyboard(
-                route,
-                link,
-                context.user_data.get("post_no_name", True),
-            ),
+            "请选择匿名投稿或实名投稿，选择后才会开始输入投稿内容。",
+            reply_markup=_keyword_submission_mode_keyboard(route, link),
         )
 
     # All remaining actions below are publishing configuration actions.  Do not
     # rely on the hidden start-menu button: callbacks can be forged manually.
-    public_actions = {"publish", "channel_message", "checkin_view", "keyword_post_search", "keyword_post_search_cancel", "bottle_prev", "bottle_next", "accept_friend", "reject_friend", "back"}
+    public_actions = {"publish", "channel_message", "checkin_view", "keyword_post_search", "keyword_post_search_cancel", "keyword_post_return", "keyword_submit_mode", "bottle_prev", "bottle_next", "accept_friend", "reject_friend", "back"}
     if action not in public_actions and not has_admin_permission(
         context, query.from_user.id, "submission_config"
     ):
@@ -5528,10 +5598,10 @@ async def publish_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def create_post_keyboard(enabled: bool):
     rows = [
         [
-            # InlineKeyboardButton(
-            #     f"{'✅' if enabled else '🚫'} 匿名模式",
-            #     callback_data=f"{CALLBACK_PREFIX}:global_ad_toggle",
-            # ),
+            InlineKeyboardButton(
+                f"{'✅' if enabled else '🚫'} 匿名投稿",
+                callback_data=f"{CALLBACK_PREFIX}:global_ad_toggle",
+            ),
             InlineKeyboardButton(
                 "✅ 继续发",
                 callback_data="publish:publish",
@@ -5628,13 +5698,15 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         submission_id = uuid.uuid4().hex[:16]
+        anonymous_submission = bool(context.user_data.get("post_no_name", False))
         submission = {
             "status": "pending",
             "user_id": msg.from_user.id,
             "user_chat_id": msg.chat_id,
             "username": msg.from_user.username,
-            "author": _submission_author_text(msg),
-            "report_author": _comment_author(msg),
+            "anonymous": anonymous_submission,
+            "author": "匿名投稿" if anonymous_submission else _submission_author_text(msg),
+            "report_author": "匿名用户" if anonymous_submission else _comment_author(msg),
             "report_content": _comment_content(msg),
             "user_message_id": msg.message_id,
             "submitted_at": int(time.time()),
@@ -5950,7 +6022,7 @@ async def _handle_keyword_search_input(update: Update, context: ContextTypes.DEF
         route = routes[0]
         context.user_data.pop(KEYWORD_INPUT_KEY, None)
         context.user_data[COMMENT_TARGET_KEY] = {"channel_id": route["channel_id"], "message_id": route["channel_message_id"]}
-        context.user_data["waiting_post"] = True
+        # context.user_data["waiting_post"] = True
         link = await _route_message_link(context, route)
         await msg.reply_text(
             f"✅ 已匹配 {route.get('label', '关键词')}：{route.get('raw', route.get('key'))}。\n"
