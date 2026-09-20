@@ -138,5 +138,12 @@
     "checkin_command_text": "打卡",
     "checkin_cancel_command_text": "取消打卡",
     "checkin_online_command_text": "在线宝宝",
-    "checkin_online_text": "在线老师哈哈哈哈"
+    "checkin_online_text": "在线老师哈哈哈哈",
+    "user_mark_enabled": true,
+    "user_mark_report_chat_id": -1003861180330,
+    "user_mark_labels": [
+        "广告",
+        "骗子",
+        "骚扰"
+    ]
 }

@@ -45,6 +45,7 @@ POST_MIGRATION_STATE_FILE = "data/publish_post_migrations.json"
 BACKUP_POST_MAP_FILE = "data/publish_backup_post_map.json"
 CHECKIN_POSTS_FILE = "data/publish_checkin_posts.json"
 HISTORY_FORWARD_STATE_FILE = "data/history_forward_state.json"
+USER_MARK_FILE = "data/user_marks.json"
 KEYWORD_INPUT_KEY = "publish_keyword_search"
 KEYWORD_RESULTS_KEY = "publish_keyword_results"
 KEYWORD_POST_RESULTS_KEY = "publish_keyword_post_results"
@@ -55,6 +56,9 @@ REPORT_PAGE_SIZE = 6
 REPORT_USERNAME_MIGRATION_KEY = "publish_report_username_migration"
 TEMPLATE_DRAFT_KEY = "publish_template_draft"
 TEMPLATE_FLOW_KEY = "publish_template_flow"
+USER_MARK_SETTING_KEY = "publish_user_mark_setting"
+USER_MARK_SELECTION_KEY = "publish_user_mark_selection"
+USER_MARK_COMMAND = "标记"
 TEMPLATE_KEY_PATTERN = re.compile(r"\{([\w\-一-鿿]+)\}")
 
 # =========================
@@ -120,6 +124,11 @@ def load_publish_config():
         "checkin_cancel_command_text": "取消打卡",
         "checkin_online_command_text": "在线宝宝",
         "checkin_online_text": "在线宝宝",
+        # Reply to a user's group message with the fixed command “标记” to
+        # query and optionally add configured user-mark labels.
+        "user_mark_enabled": False,
+        "user_mark_report_chat_id": None,
+        "user_mark_labels": [],
         # Preserve the existing behavior: one 投稿 action can send multiple posts.
         "continuous_submission_enabled": True,
         # Visibility of normal start-panel buttons controlled by the owner.
@@ -570,6 +579,273 @@ def _clean_keyword_value(value: str) -> str:
     return str(value or "").strip().lstrip("#").strip()
 
 
+def _user_mark_labels(config: dict) -> list[str]:
+    labels = (config or {}).get("user_mark_labels", [])
+    if not isinstance(labels, list):
+        return []
+    result = []
+    for label in labels:
+        value = str(label or "").strip()[:30]
+        if value and value not in result:
+            result.append(value)
+    return result[:30]
+
+
+def _load_user_marks() -> dict:
+    data = load_json(USER_MARK_FILE)
+    if not isinstance(data, dict):
+        data = {}
+    users = data.get("users")
+    if not isinstance(users, dict):
+        data["users"] = {}
+    return data
+
+
+def _save_user_marks(data: dict) -> None:
+    users = data.get("users", {}) if isinstance(data, dict) else {}
+    if isinstance(users, dict) and len(users) > 20000:
+        oldest = sorted(
+            users,
+            key=lambda user_id: int((users.get(user_id) or {}).get("updated_at", 0) or 0),
+        )[:len(users) - 20000]
+        for user_id in oldest:
+            users.pop(user_id, None)
+    save_json(USER_MARK_FILE, data)
+
+
+def _user_mark_target_from_user(user) -> dict:
+    return {
+        "user_id": int(getattr(user, "id", 0) or 0),
+        "name": str(getattr(user, "full_name", "") or getattr(user, "first_name", "") or "用户").strip(),
+        "username": str(getattr(user, "username", "") or "").strip().lstrip("@"),
+    }
+
+
+def _ensure_user_mark_target(target: dict) -> dict:
+    data = _load_user_marks()
+    user_id = int(target.get("user_id", 0) or 0)
+    if user_id <= 0:
+        return {}
+    record = data["users"].setdefault(str(user_id), {
+        "user_id": user_id,
+        "name": "用户",
+        "username": "",
+        "marks": {},
+        "updated_at": int(time.time()),
+    })
+    if not isinstance(record.get("marks"), dict):
+        record["marks"] = {}
+    if target.get("name"):
+        record["name"] = str(target["name"])[:128]
+    if target.get("username"):
+        record["username"] = str(target["username"]).lstrip("@")[:32]
+    record["updated_at"] = int(time.time())
+    _save_user_marks(data)
+    return record
+
+
+def _user_mark_record(user_id: int) -> dict:
+    data = _load_user_marks()
+    record = data.get("users", {}).get(str(user_id), {})
+    return record if isinstance(record, dict) else {}
+
+
+def _user_mark_result_text(target: dict, config: dict) -> str:
+    record = _user_mark_record(int(target.get("user_id", 0) or 0))
+    name = str(record.get("name") or target.get("name") or "用户")
+    username = str(record.get("username") or target.get("username") or "").lstrip("@")
+    marks = record.get("marks", {}) if isinstance(record.get("marks"), dict) else {}
+    labels = _user_mark_labels(config)
+    total = sum(max(0, int(marks.get(label, 0) or 0)) for label in labels)
+    lines = [
+        "🏷 用户标记查询",
+        "",
+        f"用户：{name}" + (f" (@{username})" if username else ""),
+        f"用户 ID：{target.get('user_id')}",
+        f"标记总次数：{total}",
+        "",
+        "标签统计：",
+    ]
+    if labels:
+        lines.extend(f"{label}：{int(marks.get(label, 0) or 0)} 次" for label in labels)
+    else:
+        lines.append("未配置可选标签。")
+    return "\n".join(lines)
+
+
+def _user_mark_result_keyboard(target_user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🏷 标记", callback_data=f"publish:user_mark_open:{target_user_id}")
+    ]])
+
+
+def _user_mark_selection_keyboard(labels: list[str], selected: set[int], target_user_id: int) -> InlineKeyboardMarkup:
+    rows = []
+    for index, label in enumerate(labels):
+        rows.append([InlineKeyboardButton(
+            f"{'✅' if index in selected else '☑️'} {label}",
+            callback_data=f"publish:user_mark_toggle:{target_user_id}:{index}",
+        )])
+    rows.append([
+        InlineKeyboardButton("✅ 确定", callback_data=f"publish:user_mark_confirm:{target_user_id}"),
+        InlineKeyboardButton("🔄 重新选择", callback_data=f"publish:user_mark_reset:{target_user_id}"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _user_mark_selection_text(target: dict, labels: list[str], selected: set[int]) -> str:
+    name = str(target.get("name") or "用户")
+    chosen = "、".join(labels[index] for index in sorted(selected) if 0 <= index < len(labels))
+    return "\n".join([
+        "🏷 选择标记标签",
+        "",
+        f"用户：{name}（ID：{target.get('user_id')}）",
+        f"已选择：{chosen or '未选择'}",
+        "",
+        "可多选；完成后点击“确定”提交。",
+    ])
+
+
+def _user_mark_selection_state(context, query, target_user_id: int) -> dict:
+    state = (context.user_data or {}).get(USER_MARK_SELECTION_KEY)
+    message = getattr(query, "message", None)
+    chat_id = getattr(getattr(message, "chat", None), "id", None)
+    message_id = getattr(message, "message_id", None)
+    if not isinstance(state, dict) or (
+        state.get("target_user_id") != target_user_id
+        or state.get("chat_id") != chat_id
+        or state.get("message_id") != message_id
+    ):
+        record = _user_mark_record(target_user_id)
+        state = {
+            "target_user_id": target_user_id,
+            "name": str(record.get("name") or "用户"),
+            "username": str(record.get("username") or ""),
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "selected": set(),
+        }
+        context.user_data[USER_MARK_SELECTION_KEY] = state
+    selected = state.get("selected", set())
+    state["selected"] = set(selected) if isinstance(selected, (set, list, tuple)) else set()
+    return state
+
+
+async def _handle_user_mark_callback(query, context: ContextTypes.DEFAULT_TYPE, config: dict):
+    parts = query.data.split(":")
+    if len(parts) < 3:
+        return await query.answer("标记参数无效。", show_alert=True)
+    action = parts[1]
+    try:
+        target_user_id = int(parts[2])
+    except (TypeError, ValueError):
+        return await query.answer("用户参数无效。", show_alert=True)
+    labels = _user_mark_labels(config)
+    target_record = _user_mark_record(target_user_id)
+    target = {
+        "user_id": target_user_id,
+        "name": str(target_record.get("name") or "用户"),
+        "username": str(target_record.get("username") or ""),
+    }
+    if action == "user_mark_open":
+        if not labels:
+            return await query.answer("尚未配置可选标签。", show_alert=True)
+        state = _user_mark_selection_state(context, query, target_user_id)
+        await query.answer()
+        return await query.edit_message_text(
+            _user_mark_selection_text(target, labels, state["selected"]),
+            reply_markup=_user_mark_selection_keyboard(labels, state["selected"], target_user_id),
+        )
+    if action == "user_mark_toggle":
+        if len(parts) != 4:
+            return await query.answer("标签参数无效。", show_alert=True)
+        try:
+            index = int(parts[3])
+        except ValueError:
+            return await query.answer("标签参数无效。", show_alert=True)
+        if index < 0 or index >= len(labels):
+            return await query.answer("标签已失效，请重新打开标记。", show_alert=True)
+        state = _user_mark_selection_state(context, query, target_user_id)
+        selected = state["selected"]
+        if index in selected:
+            selected.remove(index)
+        else:
+            selected.add(index)
+        await query.answer()
+        return await query.edit_message_text(
+            _user_mark_selection_text(target, labels, selected),
+            reply_markup=_user_mark_selection_keyboard(labels, selected, target_user_id),
+        )
+    if action == "user_mark_reset":
+        state = _user_mark_selection_state(context, query, target_user_id)
+        state["selected"] = set()
+        await query.answer("已清空选择。")
+        return await query.edit_message_text(
+            _user_mark_selection_text(target, labels, state["selected"]),
+            reply_markup=_user_mark_selection_keyboard(labels, state["selected"], target_user_id),
+        )
+    if action == "user_mark_confirm":
+        state = _user_mark_selection_state(context, query, target_user_id)
+        selected = sorted(index for index in state["selected"] if 0 <= index < len(labels))
+        if not selected:
+            return await query.answer("请先选择至少一个标签。", show_alert=True)
+        data = _load_user_marks()
+        record = data["users"].setdefault(str(target_user_id), {
+            "user_id": target_user_id,
+            "name": target["name"],
+            "username": target["username"],
+            "marks": {},
+        })
+        marks = record.setdefault("marks", {})
+        for index in selected:
+            label = labels[index]
+            marks[label] = int(marks.get(label, 0) or 0) + 1
+        record["updated_at"] = int(time.time())
+        _save_user_marks(data)
+        context.user_data.pop(USER_MARK_SELECTION_KEY, None)
+        await query.answer("✅ 标记已提交。")
+        return await query.edit_message_text(
+            _user_mark_result_text(target, config),
+            reply_markup=_user_mark_result_keyboard(target_user_id),
+        )
+    return await query.answer("标记操作无效。", show_alert=True)
+
+
+async def _handle_user_mark_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    msg = update.message
+    chat = update.effective_chat
+    if not msg or not chat or chat.type not in {"group", "supergroup"}:
+        return False
+    if str(msg.text or "").strip() != USER_MARK_COMMAND or not msg.reply_to_message:
+        return False
+    config = load_publish_config()
+    if not bool(config.get("user_mark_enabled", False)):
+        return False
+    report_chat_id = _as_int(config.get("user_mark_report_chat_id"))
+    labels = _user_mark_labels(config)
+    target_user = getattr(msg.reply_to_message, "from_user", None)
+    if report_chat_id is None or not labels or not target_user or getattr(target_user, "is_bot", False):
+        return True
+    target = _user_mark_target_from_user(target_user)
+    if not target.get("user_id"):
+        return True
+    _ensure_user_mark_target(target)
+    try:
+        await context.bot.send_message(
+            chat_id=report_chat_id,
+            text=_user_mark_result_text(target, config),
+            reply_markup=_user_mark_result_keyboard(target["user_id"]),
+        )
+    except Exception as exc:
+        print(f"发送用户标记查询结果失败: {exc}")
+    return True
+
+
+async def _user_mark_interceptor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await _handle_user_mark_query(update, context):
+        raise ApplicationHandlerStop
+
+
 def _checkin_post_key(channel_id: int, message_id: int) -> str:
     return f"{channel_id}:{message_id}"
 
@@ -991,6 +1267,83 @@ def _checkin_settings_keyboard(config: dict) -> InlineKeyboardMarkup:
         ],
         [InlineKeyboardButton("⬅️ 返回", callback_data="publish:back")],
     ])
+
+
+def _user_mark_settings_text(config: dict) -> str:
+    report_chat_id = _as_int(config.get("user_mark_report_chat_id"))
+    labels = _user_mark_labels(config)
+    return "\n".join([
+        "🏷 用户标记设置",
+        "",
+        f"状态：{'✅ 开启' if config.get('user_mark_enabled', False) else '🚫 关闭'}",
+        f"固定命令：回复用户消息后发送“{USER_MARK_COMMAND}”",
+        f"结果群：{report_chat_id if report_chat_id is not None else '未设置'}",
+        f"可选标签：{'、'.join(labels) if labels else '未设置'}",
+        "",
+        "查询结果会发送到结果群；点击“标记”可多选标签，确定后每个已选标签加 1。",
+    ])
+
+
+def _user_mark_settings_keyboard(config: dict) -> InlineKeyboardMarkup:
+    enabled = bool(config.get("user_mark_enabled", False))
+    labels = _user_mark_labels(config)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"{'✅' if enabled else '🚫'} 用户标记",
+            callback_data="publish:toggle_user_mark",
+        )],
+        [InlineKeyboardButton(
+            f"👥 结果群：{_as_int(config.get('user_mark_report_chat_id')) or '未设置'}",
+            callback_data="publish:user_mark_report_chat",
+        )],
+        [InlineKeyboardButton(
+            f"🏷 设置标签（{len(labels)}）",
+            callback_data="publish:user_mark_labels",
+        )],
+        [InlineKeyboardButton("🗑 清空标签", callback_data="publish:user_mark_labels_clear")],
+        [InlineKeyboardButton("⬅️ 返回", callback_data="publish:back")],
+    ])
+
+
+async def _handle_user_mark_settings_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    stage = (context.user_data or {}).get(USER_MARK_SETTING_KEY)
+    if not stage:
+        return False
+    msg = update.message
+    if not msg or not msg.text or not update.effective_user:
+        return True
+    if not has_admin_permission(context, update.effective_user.id, "submission_config"):
+        context.user_data.pop(USER_MARK_SETTING_KEY, None)
+        return False
+    value = msg.text.strip()
+    config = load_publish_config()
+    if value in {"取消", "返回"}:
+        context.user_data.pop(USER_MARK_SETTING_KEY, None)
+        await msg.reply_text("已取消用户标记设置。", reply_markup=_user_mark_settings_keyboard(config))
+        return True
+    if stage == "report_chat":
+        chat_id = _as_int(value)
+        if chat_id is None or chat_id >= 0:
+            await msg.reply_text("❗ 请输入目标群 ID，例如：-1001234567890。")
+            return True
+        config["user_mark_report_chat_id"] = chat_id
+    elif stage == "labels":
+        labels = []
+        for label in re.split(r"[,，、\n]+", value):
+            label = label.strip()[:30]
+            if label and label not in labels:
+                labels.append(label)
+        if not labels:
+            await msg.reply_text("❗ 请至少输入一个标签，多个标签可用逗号或换行分隔。")
+            return True
+        config["user_mark_labels"] = labels[:30]
+    else:
+        context.user_data.pop(USER_MARK_SETTING_KEY, None)
+        return False
+    save_publish_config(config)
+    context.user_data.pop(USER_MARK_SETTING_KEY, None)
+    await msg.reply_text("✅ 用户标记设置已保存。\n\n" + _user_mark_settings_text(config), reply_markup=_user_mark_settings_keyboard(config))
+    return True
 
 
 def _record_publish_channel_change(config: dict, old_channel_id, new_channel_id) -> None:
@@ -4038,7 +4391,10 @@ def publish_setting_keyboard(config: dict):
             f"🔎 搜索展示：{KEYWORD_SEARCH_DISPLAY_OPTIONS[_keyword_post_search_display_mode(config)]}",
             callback_data="publish:keyword_search_display",
         )],
-        [InlineKeyboardButton("🟢 在线打卡设置", callback_data="publish:checkin_settings")],
+        [
+            InlineKeyboardButton("🟢 在线打卡设置", callback_data="publish:checkin_settings"),
+            InlineKeyboardButton("🏷 用户标记设置", callback_data="publish:user_mark_settings"),
+        ],
         [
             
             InlineKeyboardButton("🔘 底部按钮设置", callback_data="publish:buttons"),
@@ -4186,6 +4542,9 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_publish_config()
     channel_id = config.get("channel_id")
     action = query.data.split(":")[1]
+
+    if action in {"user_mark_open", "user_mark_toggle", "user_mark_confirm", "user_mark_reset"}:
+        return await _handle_user_mark_callback(query, context, config)
 
     if action in {"review_approve", "review_reject", "review_reject_cancel"}:
         return await _handle_review_callback(query, context, config)
@@ -4951,6 +5310,42 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.edit_message_text(
             "✅ 已删除规则。\n\n" + _group_keyword_reply_settings_text(config),
             reply_markup=_group_keyword_reply_settings_keyboard(config),
+        )
+
+    if action == "user_mark_settings":
+        return await query.edit_message_text(
+            _user_mark_settings_text(config),
+            reply_markup=_user_mark_settings_keyboard(config),
+        )
+
+    if action == "toggle_user_mark":
+        config["user_mark_enabled"] = not bool(config.get("user_mark_enabled", False))
+        save_publish_config(config)
+        return await query.edit_message_text(
+            _user_mark_settings_text(config),
+            reply_markup=_user_mark_settings_keyboard(config),
+        )
+
+    if action == "user_mark_report_chat":
+        context.user_data[USER_MARK_SETTING_KEY] = "report_chat"
+        return await query.edit_message_text(
+            "请输入接收用户标记查询结果的群 ID，例如：-1001234567890。",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ 返回", callback_data="publish:user_mark_settings")]]),
+        )
+
+    if action == "user_mark_labels":
+        context.user_data[USER_MARK_SETTING_KEY] = "labels"
+        return await query.edit_message_text(
+            "请输入可选标记标签，多个用逗号、顿号或换行分隔。\n例如：广告, 骗子, 骚扰",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ 返回", callback_data="publish:user_mark_settings")]]),
+        )
+
+    if action == "user_mark_labels_clear":
+        config["user_mark_labels"] = []
+        save_publish_config(config)
+        return await query.edit_message_text(
+            "✅ 已清空用户标记标签。\n\n" + _user_mark_settings_text(config),
+            reply_markup=_user_mark_settings_keyboard(config),
         )
 
     if action == "checkin_settings":
@@ -6452,6 +6847,8 @@ async def _keyword_search_interceptor(update: Update, context: ContextTypes.DEFA
     If there is no active search/template flow, processing returns normally and
     the bidirectional private-forward handlers can continue.
     """
+    if await _handle_user_mark_settings_input(update, context):
+        raise ApplicationHandlerStop
     if await _handle_checkin_settings_input(update, context):
         raise ApplicationHandlerStop
     if await _handle_report_username_migration_input(update, context):
@@ -6525,6 +6922,8 @@ async def _handle_checkin_settings_input(update: Update, context: ContextTypes.D
 
 
 async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await _handle_user_mark_settings_input(update, context):
+        raise ApplicationHandlerStop
     if await _handle_checkin_settings_input(update, context):
         raise ApplicationHandlerStop
     if await _handle_report_username_migration_input(update, context):
@@ -6835,6 +7234,17 @@ def register_publish_setting_handlers(app):
         ),
         group=-21,
     )
+    # User marking is triggered by replying “标记” to a group member's message.
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS
+            & filters.TEXT
+            & (~filters.COMMAND)
+            & ~filters.UpdateType.BUSINESS_MESSAGE,
+            _user_mark_interceptor,
+        ),
+        group=-20,
+    )
     # Group keyword replies run before generic group dispatch/AI handlers.
     app.add_handler(
         MessageHandler(
@@ -6844,7 +7254,7 @@ def register_publish_setting_handlers(app):
             & ~filters.UpdateType.BUSINESS_MESSAGE,
             _group_keyword_reply_interceptor,
         ),
-        group=-20,
+        group=-19,
     )
     # Keyword search must run before bot.py's group=0 private-forward handlers.
     # If it does not consume the message, processing falls through normally.
