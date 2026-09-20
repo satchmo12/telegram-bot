@@ -41,5 +41,6 @@
     "random_view_enabled": false,
     "checkin_command_text": "打卡",
     "checkin_cancel_command_text": "取消打卡",
-    "checkin_online_command_text": "在线宝宝"
+    "checkin_online_command_text": "在线宝宝",
+    "checkin_online_text": "在线宝宝"
 }

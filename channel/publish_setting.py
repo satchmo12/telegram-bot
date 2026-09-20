@@ -698,14 +698,25 @@ def _rebuild_checkin_posts_from_keyword_index(config: dict) -> int:
     return max(0, after - before)
 
 
+def _checkin_display_labels(config: dict) -> list[str]:
+    """Parse one or more online-roster display fields in their configured order."""
+    raw = str((config or {}).get("checkin_display_label") or "艺名")
+    labels = []
+    for label in re.split(r"[+＋,，、\n]+", raw):
+        label = label.strip()[:30]
+        if label and label not in labels:
+            labels.append(label)
+    return labels or ["艺名"]
+
+
 async def _hydrate_checkin_post_fields(
     context: ContextTypes.DEFAULT_TYPE,
     post: dict,
     config: dict,
 ) -> bool:
     """Fetch a legacy primary post through the active protocol client and re-extract fields."""
-    display_label = str(config.get("checkin_display_label") or "艺名").strip()
-    if _checkin_field_values(post, display_label):
+    display_labels = _checkin_display_labels(config)
+    if all(_checkin_field_values(post, label) for label in display_labels):
         return False
     channel_id = _as_int(post.get("channel_id"))
     message_id = _as_int(post.get("message_id"))
@@ -743,10 +754,15 @@ async def _hydrate_checkin_post_fields(
 
 
 def _checkin_display_value(post: dict, config: dict) -> str:
-    label = str(config.get("checkin_display_label") or "艺名").strip()
-    values = _checkin_field_values(post, label)
-    if values:
-        return "、".join(_clean_keyword_value(item) for item in values)[:100]
+    # Multiple configured fields are concatenated without a separator, e.g.
+    # “艺名+课费” renders as “雪500p”.
+    parts = []
+    for label in _checkin_display_labels(config):
+        values = _checkin_field_values(post, label)
+        if values:
+            parts.append("、".join(_clean_keyword_value(item) for item in values))
+    if parts:
+        return "".join(parts)[:100]
     fallback_values = _checkin_field_values(
         post,
         str(config.get("checkin_user_label") or "联系").strip(),
@@ -1064,26 +1080,20 @@ def _report_id_from_subject_entries(subject_entries: Optional[list[dict]]) -> st
     return uuid.uuid4().hex[:16]
 
 
-def _report_subject_post_refs(report: Optional[dict]) -> list[tuple[int, int]]:
-    """Return source posts whose indexed fields belong to this report."""
-    if not isinstance(report, dict):
-        return []
-    refs = []
-
-    def add_ref(channel_id, message_id) -> None:
-        channel_id = _as_int(channel_id)
-        message_id = _as_int(message_id)
-        if channel_id is not None and message_id is not None and (channel_id, message_id) not in refs:
-            refs.append((channel_id, message_id))
-
-    # Current and legacy single-previous fields support reports created before
-    # source-reference history was introduced.
-    add_ref(report.get("channel_id"), report.get("message_id"))
-    add_ref(report.get("previous_channel_id"), report.get("previous_message_id"))
-    for ref in report.get("subject_post_refs", []) or []:
-        if isinstance(ref, dict):
-            add_ref(ref.get("channel_id"), ref.get("message_id"))
-    return refs
+def _report_subject_entries(entries: Optional[list[dict]]) -> list[dict]:
+    """Normalize the fields extracted from one current channel post."""
+    subjects = []
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        label = str(entry.get("label") or "").strip()
+        value = str(entry.get("value") or entry.get("raw") or entry.get("key") or "").strip()
+        if label and value and not any(
+            item.get("label") == label and item.get("value") == value
+            for item in subjects
+        ):
+            subjects.append({"label": label, "value": value})
+    return subjects
 
 
 def _create_comment_report(
@@ -1091,61 +1101,55 @@ def _create_comment_report(
 ) -> None:
     data = _load_comment_reports()
     existing = data["reports"].get(report_id)
-
-    # A username-based report is reused when its post is republished. Preserve
-    # every previously indexed field (including 标签 / 艺名) and merge the fields
-    # extracted from the new post instead of replacing the old subject list.
-    subjects = []
-    for item in _report_subjects(existing) if isinstance(existing, dict) else []:
-        label = str(item.get("label") or "").strip()
-        value = str(item.get("value") or "").strip()
-        if label and value and not any(
-            saved.get("label") == label and saved.get("value") == value
-            for saved in subjects
-        ):
-            subjects.append({"label": label, "value": value})
-    for entry in subject_entries or []:
-        if not isinstance(entry, dict):
-            continue
-        label = str(entry.get("label") or "").strip()
-        value = str(entry.get("raw") or entry.get("key") or "").strip()
-        if label and value and not any(
-            saved.get("label") == label and saved.get("value") == value
-            for saved in subjects
-        ):
-            subjects.append({"label": label, "value": value})
-
-    # Retain all historical post references so reports created before this fix
-    # can still recover indexed fields after one or more republishes.
-    post_refs = _report_subject_post_refs(existing)
-    current_ref = (_as_int(channel_id), _as_int(message_id))
-    if current_ref[0] is not None and current_ref[1] is not None and current_ref not in post_refs:
-        post_refs.append(current_ref)
-
-    # A report ID based on the post username is intentionally stable. When the
-    # same username is published again, keep its report/comments but point the
-    # report link at the newest primary message.
     comments = existing.get("comments", []) if isinstance(existing, dict) else []
     if not isinstance(comments, list):
         comments = []
+
+    # A republish keeps the report's comments, but its displayed collection
+    # fields are replaced by the fields extracted from this current post only.
     report = dict(existing) if isinstance(existing, dict) else {}
     report.update({
         "channel_id": int(channel_id),
         "message_id": int(message_id),
         "created_at": int(report.get("created_at", int(time.time())) or int(time.time())),
         "updated_at": int(time.time()),
-        "subjects": subjects,
-        "subject_post_refs": [
-            {"channel_id": source_channel_id, "message_id": source_message_id}
-            for source_channel_id, source_message_id in post_refs[-20:]
-        ],
+        "subjects": _report_subject_entries(subject_entries),
         "comments": comments,
     })
-    if isinstance(existing, dict):
-        report["previous_channel_id"] = _as_int(existing.get("channel_id"))
-        report["previous_message_id"] = _as_int(existing.get("message_id"))
+    # Collection fields are intentionally current-post-only; remove metadata
+    # introduced by earlier history-based behavior.
+    report.pop("previous_channel_id", None)
+    report.pop("previous_message_id", None)
+    report.pop("subject_post_refs", None)
     data["reports"][report_id] = report
     _save_comment_reports(data)
+
+
+def _update_comment_report_subjects(
+    channel_id, message_id, subject_entries: Optional[list[dict]]
+) -> int:
+    """Replace fields in reports bound to this post after it is edited."""
+    channel_id = _as_int(channel_id)
+    message_id = _as_int(message_id)
+    if channel_id is None or message_id is None:
+        return 0
+    subjects = _report_subject_entries(subject_entries)
+    data = _load_comment_reports()
+    updated = 0
+    for report in data.get("reports", {}).values():
+        if not isinstance(report, dict):
+            continue
+        if (
+            _as_int(report.get("channel_id")) == channel_id
+            and _as_int(report.get("message_id")) == message_id
+            and report.get("subjects") != subjects
+        ):
+            report["subjects"] = subjects
+            report["updated_at"] = int(time.time())
+            updated += 1
+    if updated:
+        _save_comment_reports(data)
+    return updated
 
 
 def _normalize_report_username(value: str) -> str:
@@ -1974,46 +1978,10 @@ async def _start_historical_post_migration(
 
 
 def _report_subjects(report: dict) -> list[dict]:
-    """Return every indexed field belonging to a report's source post.
-
-    Stored report subjects are retained for reliability, while the keyword index
-    supplements them with fields such as 标签、艺名 and 区域. This also improves
-    reports that were created before all extracted fields were saved to them.
-    """
-    subjects = report.get("subjects", []) if isinstance(report.get("subjects"), list) else []
-    result = []
-    for item in subjects:
-        if not isinstance(item, dict):
-            continue
-        label = str(item.get("label") or "").strip()
-        value = str(item.get("value") or "").strip()
-        if label and value and not any(
-            current.get("label") == label and current.get("value") == value
-            for current in result
-        ):
-            result.append({"label": label, "value": value})
-
-    # The keyword map is the complete index for a post. Always merge it rather
-    # than using it only as a fallback, because earlier reports often stored
-    # only the contact field in ``subjects``.
-    source_posts = set(_report_subject_post_refs(report))
-    for records in _load_keyword_map().values():
-        for record in records or []:
-            if (
-                isinstance(record, dict)
-                and (
-                    _as_int(record.get("channel_id")),
-                    _as_int(record.get("channel_message_id")),
-                ) in source_posts
-            ):
-                label = str(record.get("label") or "").strip()
-                value = str(record.get("raw") or record.get("key") or "").strip()
-                if label and value and not any(
-                    item.get("label") == label and item.get("value") == value
-                    for item in result
-                ):
-                    result.append({"label": label, "value": value})
-    return result
+    """Return only the fields saved for the report's current post."""
+    if not isinstance(report, dict):
+        return []
+    return _report_subject_entries(report.get("subjects", []))
 
 
 def _report_subject_text(report: dict) -> str:
@@ -2185,10 +2153,29 @@ def _extract_routing_keywords(msg, config: dict) -> list[dict]:
             if not match:
                 continue
 
-            # Only read the 标签 field's own line. Do not accidentally add
-            # values such as “艺名：#小雅” on later lines as tags.
-            content = match.group(1).splitlines()[0]
+            # Keep multiline tag blocks. Existing templates often place the
+            # first tag line after “标签：” and continue the remaining #tags
+            # on following lines. Stop before the next configured field so
+            # values like “区域：#浦东区” are not mistaken for tags.
+            content = match.group(1)
+            following_labels = [
+                item for item in _keyword_labels(config)
+                if item and item != "标签"
+            ]
+            if following_labels:
+                next_field_pattern = "|".join(
+                    re.escape(item) for item in following_labels
+                )
+                next_field = re.search(
+                    rf"\n\s*(?:[【\[（(]\s*)?(?:{next_field_pattern})"
+                    rf"\s*(?:[】\]）)])?\s*[：:]",
+                    content,
+                    re.IGNORECASE,
+                )
+                if next_field:
+                    content = content[:next_field.start()]
 
+            # 标签字段仅收录 #xxx 格式的标签，保持原有规则。
             for raw in re.findall(r"#[^\s#]+", content):
                 key = _normalize_routing_keyword(raw)
 
@@ -2246,6 +2233,7 @@ def _save_keyword_map(data: dict) -> None:
 
 def _register_post_keywords(entries: list[dict], channel_id, message_id) -> None:
     if not entries:
+        _update_comment_report_subjects(channel_id, message_id, [])
         return
     data = _load_keyword_map()
     now = int(time.time())
@@ -2270,6 +2258,7 @@ def _register_post_keywords(entries: list[dict], channel_id, message_id) -> None
             "created_at": now,
         })
     _save_keyword_map(data)
+    _update_comment_report_subjects(channel_id, message_id, entries)
 
 
 def _replace_post_keywords_from_channel_edit(
@@ -2330,6 +2319,7 @@ def _replace_post_keywords_from_channel_edit(
         data.setdefault(key, []).append(record)
 
     _save_keyword_map(data)
+    _update_comment_report_subjects(channel_id, message_id, entries)
     return len(entries)
 
 
@@ -4956,7 +4946,10 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prompt_map = {
             "checkin_duration": "请输入打卡有效时间（小时），例如：8。范围 1-168。",
             "checkin_user_label": "请输入帖子中记录可打卡用户名的字段，例如：联系。",
-            "checkin_display_label": "请输入“在线宝宝”展示文字使用的字段，例如：艺名。",
+            "checkin_display_label": (
+                "请输入“在线宝宝”展示字段，多个字段用 + 分隔。\n"
+                "例如：艺名+课费，展示效果：雪500p。"
+            ),
             "checkin_group_label": "请输入“在线宝宝”分组字段，例如：区域 或 标签。发送“无”表示不分组。",
             "checkin_command_text": "请输入用户打卡时发送的文案，例如：打卡。",
             "checkin_cancel_command_text": "请输入用户取消打卡时发送的文案，例如：取消打卡。",
@@ -6432,10 +6425,17 @@ async def _handle_checkin_settings_input(update: Update, context: ContextTypes.D
             if not 1 <= hours <= 168:
                 return await update.message.reply_text("❗ 请输入 1 到 168 之间的小时数。")
             config[field] = hours
-        elif field in {"checkin_user_label", "checkin_display_label"}:
+        elif field == "checkin_user_label":
             if not value or len(value) > 30:
                 return await update.message.reply_text("❗ 字段不能为空且不能超过 30 个字符。")
             config[field] = value
+        elif field == "checkin_display_label":
+            labels = _checkin_display_labels({"checkin_display_label": value})
+            if not value or not labels or len("+".join(labels)) > 30:
+                return await update.message.reply_text(
+                    "❗ 展示字段不能为空且不能超过 30 个字符。多个字段请用 + 分隔。"
+                )
+            config[field] = "+".join(labels)
         elif field == "checkin_group_label":
             config[field] = "" if value in {"无", "-"} else value[:30]
         elif field in {"checkin_command_text", "checkin_cancel_command_text", "checkin_online_command_text", "checkin_online_text"}:
