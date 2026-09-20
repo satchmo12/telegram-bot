@@ -102,6 +102,14 @@
             "format": "plain",
             "buttons": [],
             "button_columns": 1
+        },
+        {
+            "id": 4,
+            "name": "发布模版最新",
+            "text": "联系：{联系方式}",
+            "format": "plain",
+            "buttons": [],
+            "button_columns": 1
         }
     ],
     "pending_history_post_migration": null,
@@ -124,9 +132,12 @@
     "backup_channel_session": "+13218329173",
     "backup_channel_listen_session": "",
     "backup_channel_forward_session": "",
-    "checkin_enabled": false,
+    "checkin_enabled": true,
     "checkin_duration_hours": 8,
-    "checkin_user_label": "联系",
-    "checkin_display_label": "艺名",
-    "checkin_group_label": ""
+    "checkin_user_label": "@ls2174",
+    "checkin_display_label": "开课老师",
+    "checkin_group_label": "普陀区",
+    "checkin_command_text": "打卡",
+    "checkin_cancel_command_text": "取消打卡",
+    "checkin_online_command_text": "开课老师"
 }
