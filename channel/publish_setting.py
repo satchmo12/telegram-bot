@@ -14,7 +14,16 @@ from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, ContextTy
 from telegram.error import BadRequest, Forbidden
 
 from channel.channel_config import USER_MESSAGE_FILE
-from utils import BOT_USER_FILE, _can_manage, is_shared_session_name, is_super_admin, load_json, safe_reply, save_json
+from utils import (
+    BOT_USER_FILE,
+    _can_manage,
+    is_shared_session_name,
+    is_super_admin,
+    load_json,
+    refresh_json_cache_if_changed,
+    safe_reply,
+    save_json,
+)
 from admin_permissions import get_delegated_admin_ids, has_admin_permission
 
 PUBLISH_CONFIG_FILE = "config_data/publish_config.json"
@@ -53,6 +62,10 @@ TEMPLATE_KEY_PATTERN = re.compile(r"\{([\w\-一-鿿]+)\}")
 # =========================
 
 def load_publish_config():
+    # Config files are often edited directly in the management workspace.
+    # Invalidate the five-minute JSON cache so keyword_extract_labels takes
+    # effect on the very next publish or edit event.
+    refresh_json_cache_if_changed(PUBLISH_CONFIG_FILE)
     default = {
         "channel_id": None,
         # Optional mirror for every main-channel post. It is never used for
@@ -106,6 +119,7 @@ def load_publish_config():
         "checkin_command_text": "打卡",
         "checkin_cancel_command_text": "取消打卡",
         "checkin_online_command_text": "在线宝宝",
+        "checkin_online_text": "在线宝宝",
         # Preserve the existing behavior: one 投稿 action can send multiple posts.
         "continuous_submission_enabled": True,
         # Visibility of normal start-panel buttons controlled by the owner.
@@ -764,6 +778,8 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
     checkin_command = _checkin_command_text(config, "checkin_command_text", "打卡")
     cancel_command = _checkin_command_text(config, "checkin_cancel_command_text", "取消打卡")
     online_command = _checkin_command_text(config, "checkin_online_command_text", "在线宝宝")
+    online_text = _checkin_command_text(config, "checkin_online_text", "在线宝宝")
+     
     if command not in {checkin_command, cancel_command, online_command}:
         return False
     if not bool(config.get("checkin_enabled", False)):
@@ -833,45 +849,57 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
     for post in online_posts:
         group = _checkin_group_value(post, config)
         grouped.setdefault(group, []).append(post)
-    lines = ["🟢 在线宝宝"]
-    link_rows = []
-    text_link_entities = []
+
+    lines = [f"🟢 {online_text}"]
+    link_items = []
+
     for group, group_posts in grouped.items():
         if group:
             lines.extend(["", f"【{group}】"])
+
+        names = []
+
         for post in group_posts:
             link = await _route_message_link(context, post)
             name_text = _checkin_display_value(post, config)
-            line = f"• {name_text}"
-            # Store code-point offsets first; PTB converts them to Telegram's
-            # required UTF-16 offsets after the full text is assembled.
-            prefix = "  ".join(lines)
-            lines.append(line)
+
+            names.append(name_text)
+
             if link:
-                text_link_entities.append(
-                    MessageEntity(
-                        type=MessageEntity.TEXT_LINK,
-                        offset=len(prefix) + 1 + 2,
-                        length=len(name_text),
-                        url=link,
-                    )
-                )
-                # Keep a URL button too, as a reliable fallback for private
-                # channel links in Telegram clients.
-                # link_rows.append([InlineKeyboardButton(
-                #     f"📩 查看 {name_text}"[:64],
-                #     callback_data=f"publish:checkin_view:{post.get('channel_id')}:{post.get('message_id')}",
-                # )])
+                link_items.append((name_text, link))
+
+        if names:
+            lines.append("  ".join(names))
+
     result_text = "\n".join(lines)
+
+    # 根据最终文本重新寻找每个名字的位置
+    text_link_entities = []
+
+    search_start = 0
+    for name_text, link in link_items:
+        offset = result_text.find(name_text, search_start)
+
+        if offset >= 0:
+            text_link_entities.append(
+                MessageEntity(
+                    type=MessageEntity.TEXT_LINK,
+                    offset=offset,
+                    length=len(name_text),
+                    url=link,
+                )
+            )
+            search_start = offset + len(name_text)
+
     text_link_entities = MessageEntity.adjust_message_entities_to_utf_16(
         result_text,
         text_link_entities,
     )
+
     await msg.reply_text(
         result_text,
         entities=text_link_entities or None,
         disable_web_page_preview=True,
-        reply_markup=InlineKeyboardMarkup(link_rows) if link_rows else None,
     )
     return True
 
@@ -894,6 +922,7 @@ def _checkin_settings_text(config: dict) -> str:
         f"打卡文案：{_checkin_command_text(config, 'checkin_command_text', '打卡')}",
         f"取消文案：{_checkin_command_text(config, 'checkin_cancel_command_text', '取消打卡')}",
         f"在线展示文案：{_checkin_command_text(config, 'checkin_online_command_text', '在线宝宝')}",
+        f"展示文案：{_checkin_command_text(config, 'checkin_online_text', '在线宝宝')}",
         "",
         "管理员发布带 @用户名 的主频道帖子后，对应用户可按上述文案打卡或取消。",
     ])
@@ -935,10 +964,15 @@ def _checkin_settings_keyboard(config: dict) -> InlineKeyboardMarkup:
                 callback_data="publish:checkin_cancel_command_text",
             ),
         ],
-        [InlineKeyboardButton(
-            f"🟢 在线文案：{_checkin_command_text(config, 'checkin_online_command_text', '在线宝宝')}",
-            callback_data="publish:checkin_online_command_text",
-        )],
+        [   InlineKeyboardButton(
+                f"🟢 在线文案：{_checkin_command_text(config, 'checkin_online_command_text', '在线宝宝')}",
+                callback_data="publish:checkin_online_command_text",
+            ),
+            InlineKeyboardButton(
+            f"输出正文文案：{_checkin_command_text(config, 'checkin_online_text', '在线宝宝')}",
+            callback_data="publish:checkin_online_text",
+            )
+        ],
         [InlineKeyboardButton("⬅️ 返回", callback_data="publish:back")],
     ])
 
@@ -1030,19 +1064,64 @@ def _report_id_from_subject_entries(subject_entries: Optional[list[dict]]) -> st
     return uuid.uuid4().hex[:16]
 
 
+def _report_subject_post_refs(report: Optional[dict]) -> list[tuple[int, int]]:
+    """Return source posts whose indexed fields belong to this report."""
+    if not isinstance(report, dict):
+        return []
+    refs = []
+
+    def add_ref(channel_id, message_id) -> None:
+        channel_id = _as_int(channel_id)
+        message_id = _as_int(message_id)
+        if channel_id is not None and message_id is not None and (channel_id, message_id) not in refs:
+            refs.append((channel_id, message_id))
+
+    # Current and legacy single-previous fields support reports created before
+    # source-reference history was introduced.
+    add_ref(report.get("channel_id"), report.get("message_id"))
+    add_ref(report.get("previous_channel_id"), report.get("previous_message_id"))
+    for ref in report.get("subject_post_refs", []) or []:
+        if isinstance(ref, dict):
+            add_ref(ref.get("channel_id"), ref.get("message_id"))
+    return refs
+
+
 def _create_comment_report(
     channel_id: int, message_id: int, report_id: str, subject_entries: Optional[list[dict]] = None
 ) -> None:
     data = _load_comment_reports()
+    existing = data["reports"].get(report_id)
+
+    # A username-based report is reused when its post is republished. Preserve
+    # every previously indexed field (including 标签 / 艺名) and merge the fields
+    # extracted from the new post instead of replacing the old subject list.
     subjects = []
+    for item in _report_subjects(existing) if isinstance(existing, dict) else []:
+        label = str(item.get("label") or "").strip()
+        value = str(item.get("value") or "").strip()
+        if label and value and not any(
+            saved.get("label") == label and saved.get("value") == value
+            for saved in subjects
+        ):
+            subjects.append({"label": label, "value": value})
     for entry in subject_entries or []:
         if not isinstance(entry, dict):
             continue
         label = str(entry.get("label") or "").strip()
         value = str(entry.get("raw") or entry.get("key") or "").strip()
-        if value and not any(item.get("label") == label and item.get("value") == value for item in subjects):
+        if label and value and not any(
+            saved.get("label") == label and saved.get("value") == value
+            for saved in subjects
+        ):
             subjects.append({"label": label, "value": value})
-    existing = data["reports"].get(report_id)
+
+    # Retain all historical post references so reports created before this fix
+    # can still recover indexed fields after one or more republishes.
+    post_refs = _report_subject_post_refs(existing)
+    current_ref = (_as_int(channel_id), _as_int(message_id))
+    if current_ref[0] is not None and current_ref[1] is not None and current_ref not in post_refs:
+        post_refs.append(current_ref)
+
     # A report ID based on the post username is intentionally stable. When the
     # same username is published again, keep its report/comments but point the
     # report link at the newest primary message.
@@ -1055,7 +1134,11 @@ def _create_comment_report(
         "message_id": int(message_id),
         "created_at": int(report.get("created_at", int(time.time())) or int(time.time())),
         "updated_at": int(time.time()),
-        "subjects": subjects or report.get("subjects", []),
+        "subjects": subjects,
+        "subject_post_refs": [
+            {"channel_id": source_channel_id, "message_id": source_message_id}
+            for source_channel_id, source_message_id in post_refs[-20:]
+        ],
         "comments": comments,
     })
     if isinstance(existing, dict):
@@ -1254,12 +1337,20 @@ def _comment_content(msg, max_length: int = 3500) -> str:
     return text if len(text) <= max_length else text[: max_length - 1] + "…"
 
 
-def _comment_author(msg) -> str:
+def _comment_nickname(msg) -> str:
+    """Return the sender's visible Telegram name without username or ID."""
     user = getattr(msg, "from_user", None)
     if not user:
-        return "未知用户"
-    name = str(getattr(user, "full_name", "") or getattr(user, "first_name", "") or "用户").strip()
-    username = str(getattr(user, "username", "") or "").strip()
+        return "匿名用户"
+    return str(
+        getattr(user, "full_name", "") or getattr(user, "first_name", "") or "匿名用户"
+    ).strip()
+
+
+def _comment_author(msg) -> str:
+    name = _comment_nickname(msg)
+    user = getattr(msg, "from_user", None)
+    username = str(getattr(user, "username", "") or "").strip() if user else ""
     return f"{name} (@{username})" if username else name
 
 
@@ -1883,25 +1974,44 @@ async def _start_historical_post_migration(
 
 
 def _report_subjects(report: dict) -> list[dict]:
-    subjects = report.get("subjects", []) if isinstance(report.get("subjects"), list) else []
-    result = [item for item in subjects if isinstance(item, dict) and item.get("value")]
-    if result:
-        return result
+    """Return every indexed field belonging to a report's source post.
 
-    # Reports created before this field was added can recover their subject from
-    # the keyword index using the channel post they belong to.
-    channel_id = report.get("channel_id")
-    message_id = report.get("message_id")
+    Stored report subjects are retained for reliability, while the keyword index
+    supplements them with fields such as 标签、艺名 and 区域. This also improves
+    reports that were created before all extracted fields were saved to them.
+    """
+    subjects = report.get("subjects", []) if isinstance(report.get("subjects"), list) else []
+    result = []
+    for item in subjects:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        value = str(item.get("value") or "").strip()
+        if label and value and not any(
+            current.get("label") == label and current.get("value") == value
+            for current in result
+        ):
+            result.append({"label": label, "value": value})
+
+    # The keyword map is the complete index for a post. Always merge it rather
+    # than using it only as a fallback, because earlier reports often stored
+    # only the contact field in ``subjects``.
+    source_posts = set(_report_subject_post_refs(report))
     for records in _load_keyword_map().values():
         for record in records or []:
             if (
                 isinstance(record, dict)
-                and str(record.get("channel_id")) == str(channel_id)
-                and int(record.get("channel_message_id", 0) or 0) == int(message_id or 0)
+                and (
+                    _as_int(record.get("channel_id")),
+                    _as_int(record.get("channel_message_id")),
+                ) in source_posts
             ):
                 label = str(record.get("label") or "").strip()
-                value = str(record.get("raw") or "").strip()
-                if value and not any(item.get("label") == label and item.get("value") == value for item in result):
+                value = str(record.get("raw") or record.get("key") or "").strip()
+                if label and value and not any(
+                    item.get("label") == label and item.get("value") == value
+                    for item in result
+                ):
                     result.append({"label": label, "value": value})
     return result
 
@@ -1936,7 +2046,7 @@ def _report_subject_text(report: dict) -> str:
 
 def _comment_date(comment: dict) -> str:
     try:
-        return datetime.fromtimestamp(int(comment.get("created_at", 0) or 0)).strftime("%Y-%m-%d")
+        return datetime.fromtimestamp(int(comment.get("created_at", 0) or 0)).strftime("%Y-%m-%d %H:%M")
     except Exception:
         return "未知日期"
 
@@ -2030,9 +2140,9 @@ def _keyword_labels(config: dict) -> list[str]:
         return []
     result = []
     for label in labels:
-        # Accept common separator input such as “标签.艺名” in addition to
-        # commas/newlines, so both fields are extracted independently.
-        for value in re.split(r"[,，\n.。]+", str(label or "")):
+        # Accept common separator input such as “标签、艺名” or “标签.艺名”
+        # in addition to commas/newlines, so every field is indexed separately.
+        for value in re.split(r"[,，、\n.。]+", str(label or "")):
             value = value.strip()
             if value and value not in result:
                 result.append(value[:30])
@@ -2060,10 +2170,14 @@ def _extract_routing_keywords(msg, config: dict) -> list[dict]:
     result = []
 
     for label in _keyword_labels(config):
+        # Support both “标签：#示例” and “【标签】：#示例” field styles.
+        field_prefix = (
+            rf"(?:[【\[（(]\s*)?{re.escape(label)}\s*(?:[】\]）)])?\s*[：:]?"
+        )
         if label == "标签":
             # 找到“标签”字段
             pattern = re.compile(
-                rf"{re.escape(label)}[：:]?(.*)",
+                rf"{field_prefix}(.*)",
                 re.IGNORECASE | re.DOTALL,
             )
 
@@ -2071,8 +2185,9 @@ def _extract_routing_keywords(msg, config: dict) -> list[dict]:
             if not match:
                 continue
 
-            # 标签字段后面的所有 #xxx
-            content = match.group(1)
+            # Only read the 标签 field's own line. Do not accidentally add
+            # values such as “艺名：#小雅” on later lines as tags.
+            content = match.group(1).splitlines()[0]
 
             for raw in re.findall(r"#[^\s#]+", content):
                 key = _normalize_routing_keyword(raw)
@@ -2090,7 +2205,7 @@ def _extract_routing_keywords(msg, config: dict) -> list[dict]:
         else:
             # 普通字段：取 label 后第一个非空白内容
             pattern = re.compile(
-                rf"{re.escape(label)}[：:]?\s*([^\s]+)",
+                rf"{field_prefix}\s*([^\s]+)",
                 re.IGNORECASE,
             )
 
@@ -3064,11 +3179,14 @@ async def _capture_comment_source_message(
         and main_channel_id is not None
         and int(getattr(getattr(msg, "chat", None), "id", 0) or 0) == main_channel_id
     ):
-        _register_checkin_post(
-            config,
-            main_channel_id,
-            msg.message_id,
-            _extract_routing_keywords(msg, config),
+        # New or republished channel posts can bypass the normal owner-publish
+        # flow, so rebuild the complete keyword index from their current text.
+        entries = _extract_routing_keywords(msg, config)
+        _register_post_keywords(entries, main_channel_id, msg.message_id)
+        _register_checkin_post(config, main_channel_id, msg.message_id, entries)
+        print(
+            "✅ 已收录新发布频道帖关键词 "
+            f"channel={main_channel_id} message={msg.message_id} keywords={len(entries)}"
         )
         return
 
@@ -3112,11 +3230,15 @@ async def _capture_comment_source_message(
         )
 
     if getattr(update, "edited_message", None) is None:
-        _register_checkin_post(
-            config,
-            int(channel_id),
-            int(channel_message_id),
-            _extract_routing_keywords(msg, config),
+        # Fallback path for bots that receive the new post only as the linked
+        # discussion group's automatic forward. Index every configured field
+        # here as well, not just the check-in fields.
+        entries = _extract_routing_keywords(msg, config)
+        _register_post_keywords(entries, int(channel_id), int(channel_message_id))
+        _register_checkin_post(config, int(channel_id), int(channel_message_id), entries)
+        print(
+            "✅ 已通过讨论组转发收录频道帖关键词 "
+            f"channel={channel_id} message={channel_message_id} keywords={len(entries)}"
         )
 
     records = _load_comment_map()
@@ -4820,7 +4942,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=_checkin_settings_keyboard(config),
         )
 
-    if action in {"checkin_duration", "checkin_user_label", "checkin_display_label", "checkin_group_label", "checkin_command_text", "checkin_cancel_command_text", "checkin_online_command_text"}:
+    if action in {"checkin_duration", "checkin_user_label", "checkin_display_label", "checkin_group_label", "checkin_command_text", "checkin_cancel_command_text", "checkin_online_command_text", "checkin_online_text"}:
         field_map = {
             "checkin_duration": "checkin_duration_hours",
             "checkin_user_label": "checkin_user_label",
@@ -4829,6 +4951,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "checkin_command_text": "checkin_command_text",
             "checkin_cancel_command_text": "checkin_cancel_command_text",
             "checkin_online_command_text": "checkin_online_command_text",
+                "checkin_online_text": "checkin_online_text",
         }
         prompt_map = {
             "checkin_duration": "请输入打卡有效时间（小时），例如：8。范围 1-168。",
@@ -4838,6 +4961,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "checkin_command_text": "请输入用户打卡时发送的文案，例如：打卡。",
             "checkin_cancel_command_text": "请输入用户取消打卡时发送的文案，例如：取消打卡。",
             "checkin_online_command_text": "请输入展示在线帖子时发送的文案，例如：在线宝宝。",
+            "checkin_online_text": "请输入展示在线帖子时发送的文案，例如：在线宝宝。",
         }
         context.user_data["publish_checkin_setting_field"] = field_map[action]
         return await query.edit_message_text(
@@ -5598,10 +5722,10 @@ async def publish_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def create_post_keyboard(enabled: bool):
     rows = [
         [
-            InlineKeyboardButton(
-                f"{'✅' if enabled else '🚫'} 匿名投稿",
-                callback_data=f"{CALLBACK_PREFIX}:global_ad_toggle",
-            ),
+            # InlineKeyboardButton(
+            #     f"{'✅' if enabled else '🚫'} 匿名投稿",
+            #     callback_data=f"{CALLBACK_PREFIX}:global_ad_toggle",
+            # ),
             InlineKeyboardButton(
                 "✅ 继续发",
                 callback_data="publish:publish",
@@ -5706,7 +5830,9 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
             "username": msg.from_user.username,
             "anonymous": anonymous_submission,
             "author": "匿名投稿" if anonymous_submission else _submission_author_text(msg),
-            "report_author": "匿名用户" if anonymous_submission else _comment_author(msg),
+            # Anonymous comments reveal only the sender's nickname in the
+            # public report; usernames and IDs remain hidden.
+            "report_author": _comment_nickname(msg) if anonymous_submission else _comment_author(msg),
             "report_content": _comment_content(msg),
             "user_message_id": msg.message_id,
             "submitted_at": int(time.time()),
@@ -6021,13 +6147,18 @@ async def _handle_keyword_search_input(update: Update, context: ContextTypes.DEF
     if len(routes) == 1:
         route = routes[0]
         context.user_data.pop(KEYWORD_INPUT_KEY, None)
-        context.user_data[COMMENT_TARGET_KEY] = {"channel_id": route["channel_id"], "message_id": route["channel_message_id"]}
-        # context.user_data["waiting_post"] = True
+        context.user_data[COMMENT_TARGET_KEY] = {
+            "channel_id": route["channel_id"],
+            "message_id": route["channel_message_id"],
+        }
+        # Keep this consistent with the multiple-result flow: the user must
+        # explicitly choose anonymous or real-name submission before input.
+        context.user_data["waiting_post"] = False
         link = await _route_message_link(context, route)
         await msg.reply_text(
             f"✅ 已匹配 {route.get('label', '关键词')}：{route.get('raw', route.get('key'))}。\n"
-            "请继续发送投稿内容，审核通过后会评论到对应帖子下，并发布到转发频道。",
-            reply_markup=_keyword_route_keyboard(route, link, context.user_data.get("post_no_name", True)),
+            "请选择匿名投稿或实名投稿，选择后才会开始输入投稿内容。",
+            reply_markup=_keyword_submission_mode_keyboard(route, link),
         )
         return True
 
@@ -6307,13 +6438,14 @@ async def _handle_checkin_settings_input(update: Update, context: ContextTypes.D
             config[field] = value
         elif field == "checkin_group_label":
             config[field] = "" if value in {"无", "-"} else value[:30]
-        elif field in {"checkin_command_text", "checkin_cancel_command_text", "checkin_online_command_text"}:
+        elif field in {"checkin_command_text", "checkin_cancel_command_text", "checkin_online_command_text", "checkin_online_text"}:
             if not value or len(value) > 30:
                 return await update.message.reply_text("❗ 文案不能为空且不能超过 30 个字符。")
             other_values = {
                 _checkin_command_text(config, "checkin_command_text", "打卡"),
                 _checkin_command_text(config, "checkin_cancel_command_text", "取消打卡"),
                 _checkin_command_text(config, "checkin_online_command_text", "在线宝宝"),
+                _checkin_command_text(config, "checkin_online_text", "在线宝宝"),
             }
             other_values.discard(_checkin_command_text(config, field, ""))
             if value in other_values:
@@ -6358,7 +6490,7 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if context.user_data.get(KEYWORD_LABEL_INPUT_KEY):
         labels = [
             value.strip()[:30]
-            for value in re.split(r"[,，\n]+", update.message.text or "")
+            for value in re.split(r"[,，、\n.。]+", update.message.text or "")
             if value.strip()
         ]
         if not labels:

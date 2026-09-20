@@ -139,5 +139,6 @@
     "checkin_group_label": "普陀区",
     "checkin_command_text": "打卡",
     "checkin_cancel_command_text": "取消打卡",
-    "checkin_online_command_text": "开课老师"
+    "checkin_online_command_text": "开课老师",
+    "checkin_online_text": "在线宝宝"
 }

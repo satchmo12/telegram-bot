@@ -14,7 +14,7 @@
             "id": 2,
             "command": "hh",
             "description": "你好",
-            "visible": true,
+            "visible": false,
             "mode": "text",
             "content": "试试",
             "button_text": "点击跳转",
