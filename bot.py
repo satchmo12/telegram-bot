@@ -488,6 +488,10 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """兜底 /start：保证未启用 verification 的机器人也能响应。"""
     if not update.message:
         return
+    
+    # # 开始验证
+    # if await handle_join_start(update, context):
+    #     return
 
     if context.args:
         if await handle_comment_start_parameter(update, context, context.args[0]):
@@ -760,7 +764,7 @@ def _build_start_panel_rows(
     resource_row = []
     if is_bot_admin_viewer or bool(publish_config.get("submission_enabled", True)):
         resource_row.append(
-            InlineKeyboardButton("我要投稿", callback_data="publish:publish")
+            InlineKeyboardButton("✍️我要投稿", callback_data="publish:publish")
         )
     if is_bot_admin_viewer or bool(publish_config.get("random_view_enabled", True)):
         resource_row.append(
@@ -770,7 +774,7 @@ def _build_start_panel_rows(
         rows.append(resource_row)
     # Post lookup is deliberately explicit. It must never consume ordinary
     # private text such as a protocol-login phone number.
-    rows.append([InlineKeyboardButton("🔎 查找收录", callback_data="publish:keyword_post_search")])
+    rows.append([InlineKeyboardButton("🔎 查找收录标签", callback_data="publish:keyword_post_search")])
 
     return rows
 
@@ -1176,6 +1180,87 @@ async def post_init_setup(app):
 
 configure_runtime_hooks(create_app, post_init_setup)
 
+
+async def handle_join_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return False
+
+    text = update.message.text or ""
+
+    if not text.startswith("/start"):
+        return False
+
+    parts = text.split(maxsplit=1)
+
+    if len(parts) < 2:
+        return False
+
+    payload = parts[1].strip()
+
+    if not payload.startswith("join_"):
+        return False
+
+    try:
+        _, chat_id, inviter_id = payload.split("_", 2)
+
+        chat_id = int(chat_id)
+        inviter_id = int(inviter_id)
+
+    except (ValueError, TypeError):
+        return False
+
+    # 找到对应群邀请链接
+    link_map_data = load_invite_link_map()
+    group_link_map = link_map_data.get(str(chat_id), {})
+
+    invite_link = None
+
+    for link, info in group_link_map.items():
+        if int(info.get("inviter_id", 0)) == inviter_id:
+            invite_link = link
+            break
+
+    if not invite_link:
+        await update.message.reply_text(
+            "❌ 这个邀请链接已经失效。"
+        )
+        return True
+
+    # 获取群信息
+    try:
+        chat = await context.bot.get_chat(chat_id)
+        chat_title = chat.title or "群聊"
+    except Exception:
+        chat_title = "群聊"
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "🚀 加入群聊",
+                url=invite_link,
+            )
+        ]
+    ]
+
+    inviter_name = "好友"
+
+    for info in group_link_map.values():
+        if int(info.get("inviter_id", 0)) == inviter_id:
+            inviter_name = info.get(
+                "inviter_name",
+                "好友",
+            )
+            break
+
+    await update.message.reply_text(
+        f"👋 欢迎你！\n\n"
+        f"📢 群聊：{chat_title}\n"
+        f"👤 邀请人：{inviter_name}\n\n"
+        f"点击下面按钮加入群聊 👇",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+    return True
 
 async def main():
     write_startup_debug(f"[main] process start cwd={os.getcwd()} argv={' '.join(sys.argv)}")

@@ -1,6 +1,7 @@
 from telegram import Update
 from telegram.ext import CommandHandler, MessageHandler, ContextTypes, filters
 from html import escape
+from html import escape as html_escape
 
 from command_router import register_command
 from group.points_rules import award_invite_points
@@ -152,6 +153,141 @@ async def create_personal_invite_link(update: Update, context: ContextTypes.DEFA
     await safe_reply(update, context, msg, html=True)
 
 
+
+@register_command("邀请链接")
+async def create_personal_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.effective_chat or not update.effective_user:
+        return
+
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup"):
+        return await safe_reply(update, context, "⚠️ 该命令只能在群里使用。")
+
+    user = update.effective_user
+    chat_key = str(chat.id)
+
+    stats_data = load_invite_stats()
+    invited_count = get_user_invite_count(
+        stats_data,
+        chat.id,
+        user.id,
+    )
+
+    link_map_data = load_invite_link_map()
+    group_link_map = link_map_data.setdefault(chat_key, {})
+
+    # 查找当前用户已有的群邀请链接
+    existing_link = None
+    existing_created_at = -1
+
+    for link, info in group_link_map.items():
+        if int(info.get("inviter_id", 0)) != int(user.id):
+            continue
+
+        ts = int(info.get("created_at", 0))
+
+        if ts >= existing_created_at:
+            existing_created_at = ts
+            existing_link = link
+
+    # 机器人没有创建邀请链接权限
+    if not existing_link:
+        try:
+            bot_member = await context.bot.get_chat_member(
+                chat.id,
+                context.bot.id,
+            )
+
+            can_invite = bool(
+                getattr(bot_member, "can_invite_users", False)
+            )
+
+            if not can_invite:
+                return
+
+        except Exception:
+            return
+
+        try:
+            link_obj = await context.bot.create_chat_invite_link(
+                chat_id=chat.id,
+                name=f"inviter:{user.id}",
+            )
+
+            existing_link = link_obj.invite_link
+
+            group_link_map[existing_link] = {
+                "inviter_id": user.id,
+                "inviter_name": user.full_name,
+                "created_at": int(update.message.date.timestamp())
+                if update.message.date else 0,
+            }
+
+            save_invite_link_map(link_map_data)
+
+        except Exception as e:
+            return await safe_reply(
+                update,
+                context,
+                f"❌ 生成链接失败：{e}",
+            )
+
+    # 获取机器人用户名
+    try:
+        bot_info = await context.bot.get_me()
+        bot_username = bot_info.username
+    except Exception:
+        return
+
+    # 生成机器人 Start Link
+    start_param = f"join_{chat.id}_{user.id}"
+
+    bot_link = (
+        f"https://t.me/{bot_username}"
+        f"?start={start_param}"
+    )
+
+    msg = format_personal_bot_link_text(
+        user.full_name,
+        bot_link,
+        invited_count,
+    )
+    
+    format_personal_link_text
+
+    await safe_reply(
+        update,
+        context,
+        msg,
+        html=True,
+    )
+
+def format_personal_bot_link_text(
+    display_name: str,
+    link: str,
+    total_count: int,
+) -> str:
+    safe_name = escape(display_name or "用户")
+    safe_link = escape(link or "")
+    return (
+        f"🔗 {safe_name} 您的专属邀请链接:\n"
+        f"<code>{safe_link}</code>\n"
+        "(点击复制)\n\n"
+        f"👉 当前总共邀请 {int(total_count)} 人"
+    )
+    
+# def format_personal_bot_link_text(
+#     user_name: str,
+#     bot_link: str,
+#     invited_count: int,
+# ) -> str:
+#     return (
+#         f"👤 <b>{html.escape(user_name)}</b>\n\n"
+#         f"🔗 你的专属邀请链接：\n"
+#         f'<a href="{html.escape(bot_link, quote=True)}">{html.escape(bot_link)}</a>\n\n'
+#         f"👥 已邀请：{invited_count} 人"
+    # )
+    
 async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.new_chat_members:
         return

@@ -847,6 +847,7 @@
         "SaveEvent)",
         "USDT搬砖",
         "WorldCupApi.instance.worldCupSaveEvent(event);",
+        "fugui_68",
         "if",
         "private",
         "reportSaveEventOnce(event:",

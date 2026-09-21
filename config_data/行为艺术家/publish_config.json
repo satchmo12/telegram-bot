@@ -5,7 +5,7 @@
     "ads_enabled": false,
     "ads": [],
     "buttons": [],
-    "bottom_buttons_enabled": true,
+    "bottom_buttons_enabled": false,
     "submission_enabled": true,
     "random_view_enabled": false,
     "proof_required": true,
@@ -16,7 +16,8 @@
         "艺名",
         "联系",
         "区域",
-        "标签"
+        "标签",
+        "课费"
     ],
     "continuous_submission_enabled": false,
     "custom_menu_buttons": {
@@ -134,14 +135,18 @@
     "backup_channel_forward_session": "",
     "checkin_enabled": true,
     "checkin_duration_hours": 8,
-    "checkin_user_label": "@ls2174",
-    "checkin_display_label": "开课老师",
-    "checkin_group_label": "普陀区",
+    "checkin_user_label": "联系",
+    "checkin_display_label": "艺名+课费",
+    "checkin_group_label": "区域",
     "checkin_command_text": "打卡",
     "checkin_cancel_command_text": "取消打卡",
     "checkin_online_command_text": "开课老师",
     "checkin_online_text": "在线宝宝",
-    "user_mark_enabled": false,
-    "user_mark_report_chat_id": null,
-    "user_mark_labels": []
+    "user_mark_enabled": true,
+    "user_mark_report_chat_id": -1003039256186,
+    "user_mark_labels": [
+        "广告",
+        "骗子",
+        "骚扰"
+    ]
 }

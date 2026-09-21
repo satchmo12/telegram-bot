@@ -576,8 +576,14 @@ def _save_checkin_posts(data: dict) -> None:
 
 
 def _clean_keyword_value(value: str) -> str:
-    return str(value or "").strip().lstrip("#").strip()
+    text = str(value or "").strip().lstrip("#").strip()
 
+    text = re.sub(
+        r'(\d+)(p)',
+        lambda m: f"{int(m.group(1)) // 100}{m.group(2)}",
+        text
+    )
+    return text
 
 def _user_mark_labels(config: dict) -> list[str]:
     labels = (config or {}).get("user_mark_labels", [])
@@ -898,11 +904,25 @@ def _register_checkin_post(
             fields.setdefault(label, [])
             if raw not in fields[label]:
                 fields[label].append(raw)
-        if label == user_label:
+
+    # The setting normally contains a field label such as “联系”. If an old
+    # config contains a username/value instead, gracefully fall back to the
+    # standard contact fields so publishing still creates a check-in record.
+    user_labels = [user_label] if user_label in fields else []
+    if not user_labels:
+        user_labels = [label for label in ("联系", "联系方式") if label in fields]
+    for label in user_labels:
+        for raw in fields.get(label, []):
             for username in re.findall(r"@([A-Za-z0-9_]{5,32})", raw):
                 if username.lower() not in users:
                     users.append(username.lower())
     if not users:
+        # An edited post may remove its contact field. Remove any previous
+        # eligibility record so users cannot keep checking in against stale data.
+        data = _load_checkin_posts()
+        key = _checkin_post_key(int(channel_id), int(message_id))
+        if data.get("posts", {}).pop(key, None) is not None:
+            _save_checkin_posts(data)
         return
     data = _load_checkin_posts()
     _cleanup_expired_checkin_posts(data)
@@ -3454,31 +3474,31 @@ async def _send_submission_for_review(
     if owner_id is None:
         raise RuntimeError("未配置机器人所有者")
 
-    if submission.get("anonymous"):
-        await context.bot.copy_message(
-            chat_id=owner_id,
-            from_chat_id=submission["user_chat_id"],
-            message_id=submission["user_message_id"],
-        )
-    else:
-        await context.bot.forward_message(
-            chat_id=owner_id,
-            from_chat_id=submission["user_chat_id"],
-            message_id=submission["user_message_id"],
-        )
-    if submission.get("proof_message_id"):
-        if submission.get("anonymous"):
-            await context.bot.copy_message(
-                chat_id=owner_id,
-                from_chat_id=submission["proof_chat_id"],
-                message_id=submission["proof_message_id"],
-            )
-        else:
-            await context.bot.forward_message(
-                chat_id=owner_id,
-                from_chat_id=submission["proof_chat_id"],
-                message_id=submission["proof_message_id"],
-            )
+    # if submission.get("anonymous"):
+    #     await context.bot.copy_message(
+    #         chat_id=owner_id,
+    #         from_chat_id=submission["user_chat_id"],
+    #         message_id=submission["user_message_id"],
+    #     )
+    # else:
+    await context.bot.forward_message(
+        chat_id=owner_id,
+        from_chat_id=submission["user_chat_id"],
+        message_id=submission["user_message_id"],
+    )
+    # if submission.get("proof_message_id"):
+    #     if submission.get("anonymous"):
+    #         await context.bot.copy_message(
+    #             chat_id=owner_id,
+    #             from_chat_id=submission["proof_chat_id"],
+    #             message_id=submission["proof_message_id"],
+    #         )
+    #     else:
+    await context.bot.forward_message(
+        chat_id=owner_id,
+        from_chat_id=submission["proof_chat_id"],
+        message_id=submission["proof_message_id"],
+    )
 
     # Send review work to the owner and every delegated reviewer. Each recipient
     # gets independent controls; the persisted submission state prevents duplicate publishing.
@@ -3599,6 +3619,9 @@ async def _capture_comment_source_message(
             "✅ 已通过讨论组编辑更新频道帖关键词 "
             f"channel={channel_id} message={channel_message_id} keywords={count}"
         )
+        # Some Telegram updates arrive only as an edited discussion forward;
+        # refresh the check-in record there as well as for edited_channel_post.
+        _register_checkin_post(config, int(channel_id), int(channel_message_id), entries)
         await _sync_main_post_edit_to_backup(
             context,
             msg,
@@ -4084,7 +4107,7 @@ def _clear_button_input(context: ContextTypes.DEFAULT_TYPE):
 
 
 CUSTOM_USER_MENU_OPTIONS = (
-    ("submission", "📝 我要投稿"),
+    ("submission", "✍️ 我要投稿"),
     ("random_view", "🎲 随机查看"),
     ("channel_clone", "📣 克隆频道"),
     ("telethon_manage", "📱 管理协议号"),
@@ -4577,6 +4600,9 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             comment = report.get("comments", [])[index] if report else None
         except (ValueError, IndexError, TypeError):
             comment = None
+            
+        # submission.get("anonymous")
+        
         if not isinstance(comment, dict):
             return await query.answer("该评论不存在或已清理。", show_alert=True)
         text = "\n".join([
@@ -4642,7 +4668,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Keep the original start/menu page untouched. The search prompt is a
         # separate message, so cancelling naturally returns the user to it.
         return await query.message.reply_text(
-            "🔎 请输入要查询的收录关键词，例如：悠悠 或 @youyouabc。\n"
+            "🔎 请输入需要查询的收录老师 联系方式 标签 区域 类型 关键词，例如：悠悠 或 @×××× 以及 普陀 嫩妹之类的关键词 \n"
             "发送“取消”或点击下方按钮可退出查询。",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("❌ 取消查询", callback_data="publish:keyword_post_search_cancel")]
@@ -5874,7 +5900,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data[KEYWORD_INPUT_KEY] = True
             context.user_data["waiting_post"] = False
             return await query.edit_message_text(
-                "🔎 请输入要查询的关键词（例如：@×××或名字）。\n"
+                "🔎 请输入需要投稿的收录老师关键词，例如：悠悠 或 @××××（名字或联系方式）\n"
                 "找到对应帖子后，再发送投稿内容。"
             )
         await publish_message(update, context)
@@ -6252,10 +6278,13 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
             "user_chat_id": msg.chat_id,
             "username": msg.from_user.username,
             "anonymous": anonymous_submission,
-            "author": "匿名投稿" if anonymous_submission else _submission_author_text(msg),
+            "author": _submission_author_text(msg),
+                # "匿名投稿" if anonymous_submission else _submission_author_text(msg),
             # Anonymous comments reveal only the sender's nickname in the
             # public report; usernames and IDs remain hidden.
-            "report_author": _comment_nickname(msg) if anonymous_submission else _comment_author(msg),
+            "report_author": "匿名投稿" if anonymous_submission else _comment_author(msg),
+                
+                # _comment_nickname(msg)
             "report_content": _comment_content(msg),
             "user_message_id": msg.message_id,
             "submitted_at": int(time.time()),
@@ -6944,7 +6973,7 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await handle_wall_publish(update, context)
 
-    if not update.message.text:
+    if  not update.message or not update.message.text:
         return
 
     config = load_publish_config()
