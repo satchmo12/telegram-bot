@@ -43,7 +43,7 @@ from forward.message_forward import (
 from menu import build_feature_intro
 from modules import register_all_handlers  # 注册各功能模块
 from dispatcher import message_router  # 最终文本处理路由器
-from channel.telethon_forwarder import start_telethon_forwarder_job
+from channel.telethon_forwarder import start_telethon_forwarder_job, stop_telethon_forwarder
 from channel.telethon_login import _clear_login_state
 from info.storage import ensure_info_migrated
 from channel.channel_config import is_active_subscription
@@ -1319,6 +1319,9 @@ async def main():
     finally:
         for app in reversed(apps):
             try:
+                # Stop the long-lived Telethon loop and await client disconnects
+                # before PTB shuts down the event loop.
+                await stop_telethon_forwarder(app)
                 if app.updater and app.updater.running:
                     await app.updater.stop()
                 if app.running:

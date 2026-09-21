@@ -131,7 +131,7 @@
     "backup_channel_listen_session": "",
     "backup_channel_forward_session": "",
     "checkin_enabled": true,
-    "checkin_duration_hours": 8,
+    "checkin_duration_hours": 12,
     "checkin_user_label": "联系",
     "checkin_display_label": "艺名+课费",
     "checkin_group_label": "区域",

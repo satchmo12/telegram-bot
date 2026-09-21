@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 import html
 from typing import Optional
@@ -13,6 +13,9 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity, 
 from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, ContextTypes, MessageHandler, TypeHandler, filters
 from telegram.error import BadRequest, Forbidden
 
+from datetime import datetime, timedelta, timezone
+
+BJ_TZ = timezone(timedelta(hours=8))
 from channel.channel_config import USER_MESSAGE_FILE
 from utils import (
     BOT_USER_FILE,
@@ -1122,11 +1125,30 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
         for post in matched:
             checkins = post.setdefault("checkins", {})
             if command == checkin_command:
+                
+                now = datetime.now(BJ_TZ)
+                expires_at_dt = now + timedelta(
+                    seconds=_checkin_duration_seconds(config)
+                )
+
+                next_midnight = (now + timedelta(days=1)).replace(
+                    hour=0,
+                    minute=0,
+                    second=0,
+                    microsecond=0,
+                )
+
+                if expires_at_dt > next_midnight:
+                    expires_at_dt = next_midnight
+                    
+                # 最终仍然保存 Unix 时间戳
+                expires_at = int(expires_at_dt.timestamp())
+    
                 checkins[str(update.effective_user.id)] = {
                     "username": username,
                     "name": update.effective_user.full_name,
                     "checked_at": int(time.time()),
-                    "expires_at": int(time.time()) + _checkin_duration_seconds(config),
+                    "expires_at": expires_at,
                 }
                 changed += 1
             elif str(update.effective_user.id) in checkins:

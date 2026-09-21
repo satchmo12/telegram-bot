@@ -1708,23 +1708,65 @@ async def telethon_forwarder_loop(app):
         return
     bot_name = str(app.bot_data.get("name", "") or "")
     refresh_event = REFRESH_EVENTS.setdefault(bot_name, asyncio.Event())
-    while True:
+    try:
+        while True:
+            try:
+                await _refresh_sessions(app)
+                await _process_history_requests()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"⚠️ 协议号自动转发刷新失败: {e}")
+            try:
+                await asyncio.wait_for(refresh_event.wait(), timeout=30)
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                refresh_event.clear()
+    except asyncio.CancelledError:
+        # The caller awaits this task during application shutdown, ensuring
+        # Telethon's sender/receiver loops are not left pending on event-loop close.
+        raise
+
+
+async def stop_telethon_forwarder(app) -> None:
+    """Cancel a bot's forward loop and gracefully disconnect all Telethon clients."""
+    bot_name = str(app.bot_data.get("name", "") or "")
+    task = FORWARD_TASKS.pop(bot_name, None)
+    if task and task is not asyncio.current_task() and not task.done():
+        task.cancel()
         try:
-            await _refresh_sessions(app)
-            await _process_history_requests()
-        except Exception as e:
-            print(f"⚠️ 协议号自动转发刷新失败: {e}")
-        try:
-            await asyncio.wait_for(refresh_event.wait(), timeout=30)
-        except asyncio.TimeoutError:
+            await task
+        except asyncio.CancelledError:
             pass
-        finally:
-            refresh_event.clear()
+        except Exception as exc:
+            print(f"⚠️ 协议号转发任务关闭异常 bot={bot_name}: {exc}")
+
+    clients = SESSION_CLIENTS_BY_BOT.pop(bot_name, {})
+    disconnects = []
+    for client in clients.values():
+        try:
+            disconnects.append(client.disconnect())
+        except Exception:
+            pass
+    if disconnects:
+        results = await asyncio.gather(*disconnects, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                print(f"⚠️ 协议号断开连接失败 bot={bot_name}: {result}")
+
+    SESSION_RULES_BY_BOT.pop(bot_name, None)
+    refresh_event = REFRESH_EVENTS.pop(bot_name, None)
+    if refresh_event is not None:
+        refresh_event.set()
+    app.bot_data["telethon_forwarder_started"] = False
 
 
 async def start_telethon_forwarder_job(context):
     app = context.application
     if app.bot_data.get("telethon_forwarder_started"):
         return
+    bot_name = str(app.bot_data.get("name", "") or "")
     app.bot_data["telethon_forwarder_started"] = True
-    FORWARD_TASKS["main"] = asyncio.create_task(telethon_forwarder_loop(app))
+    task = asyncio.create_task(telethon_forwarder_loop(app), name=f"telethon-forwarder:{bot_name}")
+    FORWARD_TASKS[bot_name] = task
