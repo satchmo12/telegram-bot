@@ -1325,80 +1325,82 @@ async def _ensure_client(
         # at least one enabled group.
         await handle_protocol_group_message(bot_name, session_name, client, event)
 
-    @client.on(events.NewMessage)
-    async def _on_group_inline(event):
-        if getattr(event, "out", False):
-            return
+    # @client.on(events.NewMessage)
+    # async def _on_group_inline(event):
 
-        # 只监听群
-        if not getattr(event, "is_group", False):
-            return
+    
+        # if getattr(event, "out", False):
+        #     return
 
-        # 消息内容
-        text = (getattr(event, "raw_text", None) or "").strip()
+        # # 只监听群
+        # if not getattr(event, "is_group", False):
+        #     return
 
-        # 必须包含空格
-        if " " not in text:
-            return
+        # # 消息内容
+        # text = (getattr(event, "raw_text", None) or "").strip()
 
-        # 拆分：@bot query
-        parts = text.split(" ", 1)
-        if len(parts) < 2:
-            return
+        # # 必须包含空格
+        # if " " not in text:
+        #     return
 
-        # 第一部分必须是 @ 开头
-        if not parts[0].startswith("@"):
-            return
+        # # 拆分：@bot query
+        # parts = text.split(" ", 1)
+        # if len(parts) < 2:
+        #     return
 
-        # 机器人用户名
-        bot_username = parts[0][1:].strip()
-        if not bot_username:
-            return
+        # # 第一部分必须是 @ 开头
+        # if not parts[0].startswith("@"):
+        #     return
 
-        # query 内容
-        query = parts[1].strip()
-        if not query:
-            return
+        # # 机器人用户名
+        # bot_username = parts[0][1:].strip()
+        # if not bot_username:
+        #     return
 
-        chat_id = getattr(event, "chat_id", None)
-        if chat_id is None:
-            return
+        # # query 内容
+        # query = parts[1].strip()
+        # if not query:
+        #     return
 
-        print(
-            f"🤖 群 inline 请求: session={session_name} chat_id={chat_id} bot=@{bot_username} query={query}",
-            flush=True,
-        )
+        # chat_id = getattr(event, "chat_id", None)
+        # if chat_id is None:
+        #     return
 
-        try:
-            peer = await client.get_input_entity(chat_id)
-            bot = await client.get_input_entity(bot_username)
+        # print(
+        #     f"🤖 群 inline 请求: session={session_name} chat_id={chat_id} bot=@{bot_username} query={query}",
+        #     flush=True,
+        # )
 
-            results = await client(
-                GetInlineBotResultsRequest(
-                    bot=bot,
-                    peer=peer,
-                    query=query,
-                    offset="",
-                )
-            )
-            if not getattr(results, "results", None):
-                if DEBUG_FORWARD:
-                    print(f"没有 inline 结果: bot=@{bot_username} query={query}")
-                return
+        # try:
+        #     peer = await client.get_input_entity(chat_id)
+        #     bot = await client.get_input_entity(bot_username)
 
-            await client(
-                SendInlineBotResultRequest(
-                    peer=peer,
-                    query_id=results.query_id,
-                    id=results.results[0].id,
-                )
-            )
-            print(
-                f"✅ 群 inline 发送成功: session={session_name} chat_id={chat_id} bot=@{bot_username}",
-                flush=True,
-            )
-        except Exception as e:
-            print(f"⚠️ 群 inline 发送失败: {e} (session={session_name} chat_id={chat_id})")
+        #     results = await client(
+        #         GetInlineBotResultsRequest(
+        #             bot=bot,
+        #             peer=peer,
+        #             query=query,
+        #             offset="",
+        #         )
+        #     )
+        #     if not getattr(results, "results", None):
+        #         if DEBUG_FORWARD:
+        #             print(f"没有 inline 结果: bot=@{bot_username} query={query}")
+        #         return
+
+        #     await client(
+        #         SendInlineBotResultRequest(
+        #             peer=peer,
+        #             query_id=results.query_id,
+        #             id=results.results[0].id,
+        #         )
+        #     )
+        #     print(
+        #         f"✅ 群 inline 发送成功: session={session_name} chat_id={chat_id} bot=@{bot_username}",
+        #         flush=True,
+        #     )
+        # except Exception as e:
+        #     print(f"⚠️ 群 inline 发送失败: {e} (session={session_name} chat_id={chat_id})")
 
     per_bot_clients[session_name] = client
     return client

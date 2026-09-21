@@ -185,6 +185,10 @@ async def handle_text(update, context):
         await my_points(update, context)
         return True
     
+    if points_alias and (text == points_alias + "排名" or text == points_alias + "排行"):
+        await top_points(update, context)
+        return True
+    
     if text == "🏆排行榜":
         await top_points(update, context)
         return True

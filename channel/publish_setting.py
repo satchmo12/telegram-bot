@@ -57,11 +57,12 @@ KEYWORD_LABEL_INPUT_KEY = "publish_keyword_label_input"
 GROUP_KEYWORD_REPLY_STAGE_KEY = "publish_group_keyword_reply_stage"
 REPORT_PAGE_SIZE = 6
 REPORT_USERNAME_MIGRATION_KEY = "publish_report_username_migration"
+REPORT_COMMENT_EDIT_KEY = "publish_report_comment_edit"
 TEMPLATE_DRAFT_KEY = "publish_template_draft"
 TEMPLATE_FLOW_KEY = "publish_template_flow"
 USER_MARK_SETTING_KEY = "publish_user_mark_setting"
 USER_MARK_SELECTION_KEY = "publish_user_mark_selection"
-USER_MARK_COMMAND = "标记"
+USER_MARK_COMMAND = "帅哥"
 TEMPLATE_KEY_PATTERN = re.compile(r"\{([\w\-一-鿿]+)\}")
 
 # =========================
@@ -2451,6 +2452,157 @@ def _report_list_view(report_id: str, report: dict, page: int):
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
+def _can_manage_report_comments(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    """Allow the owner/super-admins and delegated review administrators."""
+    return has_admin_permission(context, user_id, "submission_review")
+
+
+def _report_comment_detail_view(
+    report_id: str,
+    report: dict,
+    page: int,
+    index: int,
+    *,
+    can_manage: bool = False,
+):
+    comments = report.get("comments", []) if isinstance(report, dict) else []
+    if not isinstance(comments, list) or index < 0 or index >= len(comments):
+        return None, None
+    comment = comments[index]
+    if not isinstance(comment, dict):
+        return None, None
+    text = "\n".join([
+        "💬 评论详情",
+        "",
+        _report_subject_text(report),
+        f"评论日期：{_comment_date(comment)}",
+        f"作者：{comment.get('author') or '用户'}",
+        "",
+        str(comment.get("content") or "[媒体评论]"),
+    ])
+    rows = []
+    link = _fallback_channel_message_link(comment.get("forward_channel_id"), comment.get("forward_message_id"))
+    if link:
+        rows.append([InlineKeyboardButton("🔗 打开转发频道评论", url=link)])
+    if can_manage:
+        rows.append([
+            InlineKeyboardButton("✏️ 编辑评论", callback_data=f"publish:rce:{report_id}:{page}:{index}"),
+            InlineKeyboardButton("🗑 删除评论", callback_data=f"publish:rcd:{report_id}:{page}:{index}"),
+        ])
+    nav_row = []
+    previous_index = index - 1
+    next_index = index + 1
+    if previous_index >= 0:
+        previous_page = previous_index // REPORT_PAGE_SIZE + 1
+        nav_row.append(InlineKeyboardButton(
+            "⬅️ 上一条",
+            callback_data=f"publish:report_detail:{report_id}:{previous_page}:{previous_index}",
+        ))
+    nav_row.append(InlineKeyboardButton(
+        "⬅️ 返回报告",
+        callback_data=f"publish:report_page:{report_id}:{page}",
+    ))
+    if next_index < len(comments):
+        next_page = next_index // REPORT_PAGE_SIZE + 1
+        nav_row.append(InlineKeyboardButton(
+            "➡️ 下一条",
+            callback_data=f"publish:report_detail:{report_id}:{next_page}:{next_index}",
+        ))
+    rows.append(nav_row)
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def _handle_report_comment_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    stage = (context.user_data or {}).get(REPORT_COMMENT_EDIT_KEY)
+    if not isinstance(stage, dict):
+        return False
+    msg = update.message
+    user = update.effective_user
+    if not msg or not user:
+        return True
+    if not _can_manage_report_comments(context, user.id):
+        context.user_data.pop(REPORT_COMMENT_EDIT_KEY, None)
+        return False
+    content = (msg.text or "").strip()
+    if content in {"取消", "返回"}:
+        # Restore the original comment-detail page instead of leaving the
+        # report message on the edit prompt.
+        try:
+            data = _load_comment_reports()
+            report_id = str(stage.get("report_id") or "")
+            resolved_id = _resolve_report_id(data, report_id)
+            report = data.get("reports", {}).get(resolved_id)
+            index = int(stage.get("index"))
+            detail_text, detail_markup = _report_comment_detail_view(
+                report_id,
+                report,
+                int(stage.get("page", 1) or 1),
+                index,
+                can_manage=True,
+            )
+            if detail_text and stage.get("chat_id") and stage.get("message_id"):
+                await context.bot.edit_message_text(
+                    chat_id=stage["chat_id"],
+                    message_id=stage["message_id"],
+                    text=detail_text,
+                    reply_markup=detail_markup,
+                    disable_web_page_preview=True,
+                )
+        except Exception as exc:
+            print(f"恢复报告评论详情消息失败: {exc}")
+        context.user_data.pop(REPORT_COMMENT_EDIT_KEY, None)
+        await msg.reply_text("✅ 已取消编辑，已返回评论详情。")
+        return True
+    if not content:
+        await msg.reply_text("❗ 请发送新的文字评论内容，或发送“取消”。")
+        return True
+    if len(content) > 3500:
+        await msg.reply_text("❗ 评论内容不能超过 3500 个字符。")
+        return True
+
+    data = _load_comment_reports()
+    report_id = str(stage.get("report_id") or "")
+    resolved_id = _resolve_report_id(data, report_id)
+    report = data.get("reports", {}).get(resolved_id)
+    try:
+        index = int(stage.get("index"))
+        comment = report.get("comments", [])[index] if isinstance(report, dict) else None
+    except (TypeError, ValueError, IndexError):
+        comment = None
+    if not isinstance(comment, dict):
+        context.user_data.pop(REPORT_COMMENT_EDIT_KEY, None)
+        await msg.reply_text("❗ 该评论不存在或已删除。")
+        return True
+
+    # Only alter the report's saved content; author, timestamp, forwarding IDs
+    # and all other metadata remain unchanged.
+    comment["content"] = content
+    data["reports"][resolved_id] = report
+    _save_comment_reports(data)
+    context.user_data.pop(REPORT_COMMENT_EDIT_KEY, None)
+
+    try:
+        detail_text, detail_markup = _report_comment_detail_view(
+            report_id,
+            report,
+            int(stage.get("page", 1) or 1),
+            index,
+            can_manage=True,
+        )
+        if detail_text and stage.get("chat_id") and stage.get("message_id"):
+            await context.bot.edit_message_text(
+                chat_id=stage["chat_id"],
+                message_id=stage["message_id"],
+                text=detail_text,
+                reply_markup=detail_markup,
+                disable_web_page_preview=True,
+            )
+    except Exception as exc:
+        print(f"更新报告评论详情消息失败: {exc}")
+    await msg.reply_text("✅ 评论内容已修改。")
+    return True
+
+
 async def handle_report_start_parameter(update: Update, context: ContextTypes.DEFAULT_TYPE, parameter: str) -> bool:
     if not isinstance(parameter, str) or not parameter.startswith("report_"):
         return False
@@ -4619,50 +4771,67 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report = _get_comment_report(parts[2])
         try:
             page, index = int(parts[3]), int(parts[4])
-            comment = report.get("comments", [])[index] if report else None
-        except (ValueError, IndexError, TypeError):
-            comment = None
-            
-        # submission.get("anonymous")
-        
-        if not isinstance(comment, dict):
+        except ValueError:
+            page, index = 1, -1
+        detail_text, detail_markup = _report_comment_detail_view(
+            parts[2],
+            report,
+            page,
+            index,
+            can_manage=bool(query.from_user and _can_manage_report_comments(context, query.from_user.id)),
+        )
+        if not detail_text:
             return await query.answer("该评论不存在或已清理。", show_alert=True)
-        text = "\n".join([
-            "💬 评论详情",
-            "",
-            _report_subject_text(report),
-            f"评论日期：{_comment_date(comment)}",
-            f"作者：{comment.get('author') or '用户'}",
-            "",
-            str(comment.get("content") or "[媒体评论]"),
-        ])
-        rows = []
-        link = _fallback_channel_message_link(comment.get("forward_channel_id"), comment.get("forward_message_id"))
-        if link:
-            rows.append([InlineKeyboardButton("🔗 打开转发频道评论", url=link)])
-        comments = report.get("comments", []) if isinstance(report, dict) else []
-        nav_row = []
-        previous_index = index - 1
-        next_index = index + 1
-        if previous_index >= 0:
-            previous_page = previous_index // REPORT_PAGE_SIZE + 1
-            nav_row.append(InlineKeyboardButton(
-                "⬅️ 上一条",
-                callback_data=f"publish:report_detail:{parts[2]}:{previous_page}:{previous_index}",
-            ))
-        nav_row.append(InlineKeyboardButton(
-            "⬅️ 返回报告",
-            callback_data=f"publish:report_page:{parts[2]}:{page}",
-        ))
-        if next_index < len(comments):
-            next_page = next_index // REPORT_PAGE_SIZE + 1
-            nav_row.append(InlineKeyboardButton(
-                "➡️ 下一条",
-                callback_data=f"publish:report_detail:{parts[2]}:{next_page}:{next_index}",
-            ))
-        rows.append(nav_row)
         await query.answer()
-        return await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows), disable_web_page_preview=True)
+        return await query.edit_message_text(
+            detail_text,
+            reply_markup=detail_markup,
+            disable_web_page_preview=True,
+        )
+
+    if action in {"rce", "rcd"}:
+        parts = query.data.split(":")
+        if len(parts) != 5:
+            return await query.answer("报告评论参数无效。", show_alert=True)
+        if not query.from_user or not _can_manage_report_comments(context, query.from_user.id):
+            return await query.answer("仅管理员可以编辑或删除评论。", show_alert=True)
+        report_id = parts[2]
+        try:
+            page, index = int(parts[3]), int(parts[4])
+        except ValueError:
+            return await query.answer("报告评论参数无效。", show_alert=True)
+        data = _load_comment_reports()
+        resolved_id = _resolve_report_id(data, report_id)
+        report = data.get("reports", {}).get(resolved_id)
+        comments = report.get("comments", []) if isinstance(report, dict) else []
+        if not isinstance(comments, list) or index < 0 or index >= len(comments):
+            return await query.answer("该评论不存在或已清理。", show_alert=True)
+
+        if action == "rce":
+            context.user_data[REPORT_COMMENT_EDIT_KEY] = {
+                "report_id": report_id,
+                "page": page,
+                "index": index,
+                "chat_id": query.message.chat_id if query.message else None,
+                "message_id": query.message.message_id if query.message else None,
+            }
+            await query.answer()
+            return await query.edit_message_text(
+                "✏️ 请发送新的评论内容。\n\n"
+                "只会修改评论正文；作者、日期、转发消息等其他信息保持不变。\n"
+                "发送“取消”可放弃修改。"
+            )
+
+        comments.pop(index)
+        data["reports"][resolved_id] = report
+        _save_comment_reports(data)
+        text, markup = _report_list_view(report_id, report, page)
+        await query.answer("✅ 评论已删除。")
+        return await query.edit_message_text(
+            text,
+            reply_markup=markup,
+            disable_web_page_preview=True,
+        )
 
     if action == "checkin_view":
         parts = query.data.split(":")
@@ -6902,6 +7071,8 @@ async def _keyword_search_interceptor(update: Update, context: ContextTypes.DEFA
         raise ApplicationHandlerStop
     if await _handle_checkin_settings_input(update, context):
         raise ApplicationHandlerStop
+    if await _handle_report_comment_edit_input(update, context):
+        raise ApplicationHandlerStop
     if await _handle_report_username_migration_input(update, context):
         raise ApplicationHandlerStop
     if await _handle_group_keyword_reply_settings_input(update, context):
@@ -6976,6 +7147,8 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if await _handle_user_mark_settings_input(update, context):
         raise ApplicationHandlerStop
     if await _handle_checkin_settings_input(update, context):
+        raise ApplicationHandlerStop
+    if await _handle_report_comment_edit_input(update, context):
         raise ApplicationHandlerStop
     if await _handle_report_username_migration_input(update, context):
         raise ApplicationHandlerStop

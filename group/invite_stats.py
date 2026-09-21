@@ -96,62 +96,62 @@ def update_invite_stats_by_user(
 
 
 @register_command("邀请链接")
-async def create_personal_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.effective_chat or not update.effective_user:
-        return
+# async def create_personal_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+#     if not update.message or not update.effective_chat or not update.effective_user:
+#         return
 
-    chat = update.effective_chat
-    if chat.type not in ("group", "supergroup"):
-        return await safe_reply(update, context, "⚠️ 该命令只能在群里使用。")
+#     chat = update.effective_chat
+#     if chat.type not in ("group", "supergroup"):
+#         return await safe_reply(update, context, "⚠️ 该命令只能在群里使用。")
 
-    user = update.effective_user
-    chat_key = str(chat.id)
-    stats_data = load_invite_stats()
-    invited_count = get_user_invite_count(stats_data, chat.id, user.id)
-    link_map_data = load_invite_link_map()
-    group_link_map = link_map_data.setdefault(chat_key, {})
+#     user = update.effective_user
+#     chat_key = str(chat.id)
+#     stats_data = load_invite_stats()
+#     invited_count = get_user_invite_count(stats_data, chat.id, user.id)
+#     link_map_data = load_invite_link_map()
+#     group_link_map = link_map_data.setdefault(chat_key, {})
 
-    # 同群同用户复用已有链接，避免每次生成新链接
-    existing_link = None
-    existing_created_at = -1
-    for link, info in group_link_map.items():
-        if int(info.get("inviter_id", 0)) != int(user.id):
-            continue
-        ts = int(info.get("created_at", 0))
-        if ts >= existing_created_at:
-            existing_created_at = ts
-            existing_link = link
+#     # 同群同用户复用已有链接，避免每次生成新链接
+#     existing_link = None
+#     existing_created_at = -1
+#     for link, info in group_link_map.items():
+#         if int(info.get("inviter_id", 0)) != int(user.id):
+#             continue
+#         ts = int(info.get("created_at", 0))
+#         if ts >= existing_created_at:
+#             existing_created_at = ts
+#             existing_link = link
 
-    if existing_link:
-        msg = format_personal_link_text(user.full_name, existing_link, invited_count)
-        return await safe_reply(update, context, msg, html=True)
+#     if existing_link:
+#         msg = format_personal_link_text(user.full_name, existing_link, invited_count)
+#         return await safe_reply(update, context, msg, html=True)
 
-    # 机器人无创建邀请链接权限时，静默跳过（多机器人同群场景）
-    try:
-        bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
-        can_invite = bool(getattr(bot_member, "can_invite_users", False))
-        if not can_invite:
-            return
-    except Exception:
-        return
+#     # 机器人无创建邀请链接权限时，静默跳过（多机器人同群场景）
+#     try:
+#         bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
+#         can_invite = bool(getattr(bot_member, "can_invite_users", False))
+#         if not can_invite:
+#             return
+#     except Exception:
+#         return
 
-    try:
-        link_obj = await context.bot.create_chat_invite_link(
-            chat_id=chat.id,
-            name=f"inviter:{user.id}",
-        )
-    except Exception as e:
-        return await safe_reply(update, context, f"❌ 生成链接失败：{e}")
+#     try:
+#         link_obj = await context.bot.create_chat_invite_link(
+#             chat_id=chat.id,
+#             name=f"inviter:{user.id}",
+#         )
+#     except Exception as e:
+#         return await safe_reply(update, context, f"❌ 生成链接失败：{e}")
 
-    group_link_map[link_obj.invite_link] = {
-        "inviter_id": user.id,
-        "inviter_name": user.full_name,
-        "created_at": int(update.message.date.timestamp()) if update.message.date else 0,
-    }
-    save_invite_link_map(link_map_data)
+#     group_link_map[link_obj.invite_link] = {
+#         "inviter_id": user.id,
+#         "inviter_name": user.full_name,
+#         "created_at": int(update.message.date.timestamp()) if update.message.date else 0,
+#     }
+#     save_invite_link_map(link_map_data)
 
-    msg = format_personal_link_text(user.full_name, link_obj.invite_link, invited_count)
-    await safe_reply(update, context, msg, html=True)
+#     msg = format_personal_link_text(user.full_name, link_obj.invite_link, invited_count)
+#     await safe_reply(update, context, msg, html=True)
 
 
 
@@ -239,6 +239,7 @@ async def create_personal_invite_link(update: Update, context: ContextTypes.DEFA
         group_link_map[existing_link] = {
             "inviter_id": user.id,
             "inviter_name": user.full_name,
+            "inviter_username": user.username,
             "created_at": (
                 int(update.message.date.timestamp())
                 if update.message.date else 0
@@ -256,7 +257,7 @@ async def create_personal_invite_link(update: Update, context: ContextTypes.DEFA
         return
 
     # 最终给用户的是机器人短链接
-    bot_link = f"https://t.me/{bot_username}?start={invite_code}"
+    bot_link = f"https://t.me/{bot_username}?start=invite_{invite_code}"
 
     msg = format_personal_bot_link_text(
         user.full_name,

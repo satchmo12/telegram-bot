@@ -19,7 +19,7 @@ from telegram.ext import (
 from telethon import TelegramClient, functions, types
 
 
-BOT_TOKEN="8815482999:AAEYSrIB9bv8v2SolDHL5oQktg9_oIlIBgM"
+BOT_TOKEN="8698760312:AAGmk_O7lXxRIsId9Az2mEqhti1U1byf_TE"
 API_ID=38759669
 API_HASH="da5506797f6c82027d20712a9ef180fa"
 

@@ -336,11 +336,12 @@ async def owner_reply_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bind_runtime_bot_context(context)
+
     user = update.effective_user
     chat = update.effective_chat
 
-
     user_data = context.user_data or {}
+
     # 投稿及审核拒绝原因由投稿模块处理；不要再走私聊双向转发。
     if (
         user_data.get(WAITING_POST)
@@ -350,84 +351,279 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
         or user_data.get("publish_template_flow")
         or user_data.get("publish_keyword_label_input")
     ):
-        print("[private_forward_router] 忽略：当前正在投稿、关键词搜索或填写拒绝原因")
+        print(
+            "[private_forward_router] 忽略：当前正在投稿、关键词搜索或填写拒绝原因"
+        )
         return
 
     if (
         str(context.application.bot_data.get("name", "")).strip() == MASTER_BOT_NAME
         and (
-            isinstance(user_data.get(PRIVATE_FORWARD_SELF_SERVICE_STAGE_KEY), dict)
-            or isinstance(user_data.get(MULTI_BOT_STAGE_KEY), dict)
+            isinstance(
+                user_data.get(PRIVATE_FORWARD_SELF_SERVICE_STAGE_KEY),
+                dict,
+            )
+            or isinstance(
+                user_data.get(MULTI_BOT_STAGE_KEY),
+                dict,
+            )
             or user_data.get(REPLY_BOTTLE)
         )
     ):
-        print("[private_forward_router] 忽略：主机器人当前处于自助/多机器人输入阶段")
+        print(
+            "[private_forward_router] 忽略：主机器人当前处于自助/多机器人输入阶段"
+        )
         return
 
-
-    # ()
-    # msg = update.message
+    # 获取消息
     msg = get_message(update)
 
     if not msg:
         return
 
-    if msg:
-        if msg.text:
-            matched_command = get_matched_command(msg.text)
-            if matched_command:
-                print(
-                    f"[private_forward_router] 忽略：命中命令 {matched_command}"
-                )
-                return
-        sender_chat = getattr(msg, "sender_chat", None)
-        forward_origin = getattr(msg, "forward_origin", None)
-        origin_chat = getattr(forward_origin, "chat", None) if forward_origin else None
+    # =========================================================
+    # 1. 优先处理“转发消息”
+    #
+    # 注意：
+    # 转发的频道消息里面可能包含 custom_emoji，
+    # 所以这里必须先判断 forward_origin，
+    # 不能先判断会员表情。
+    # =========================================================
 
-        channel = None
-        if (
-            sender_chat
-            and getattr(sender_chat, "type", None)
-            and sender_chat.type.name == "CHANNEL"
-        ):
-            channel = sender_chat
-        elif (
-            origin_chat
-            and getattr(origin_chat, "type", None)
-            and origin_chat.type.name == "CHANNEL"
-        ):
-            channel = origin_chat
+    forward_origin = getattr(msg, "forward_origin", None)
 
-        if channel:
-            username = getattr(channel, "username", "") or ""
-            title = getattr(channel, "title", "") or ""
-            channel_id = f"<code>{channel.id}</code>"
-            origin_msg_id = (
-                getattr(forward_origin, "message_id", None) if forward_origin else None
+    if forward_origin:
+        print(
+            "[private_forward_router] 检测到转发消息:",
+            repr(forward_origin),
+        )
+
+        # -----------------------------------------------------
+        # 1.1 转发的是普通用户消息
+        # -----------------------------------------------------
+        sender_user = getattr(forward_origin, "sender_user", None)
+
+        if sender_user:
+            print(
+                f"[private_forward_router] 转发用户消息，用户ID={sender_user.id}"
             )
-            msg_id_val = origin_msg_id if origin_msg_id is not None else msg.message_id
-            msg_id = f"<code>{msg_id_val}</code>"
-            if username:
-                text = (
-                    f"✅ 频道ID：{channel_id} 点击红色数字拷贝\n"
-                    f"消息ID：{msg_id}\n"
-                    f"频道用户名：@{username}\n"
-                    f"频道名：{title}"
-                )
-            else:
-                text = f"✅ 频道ID：{channel_id}\n消息ID：{msg_id}\n频道名：{title}"
-            await msg.reply_text(text, parse_mode="HTML")
+
+            await msg.reply_text(
+                f"✅ 用户ID：<code>{sender_user.id}</code>",
+                parse_mode="HTML",
+            )
             return
 
-    # 主机器人私聊 AI：开启后不再转发给主人（关闭后才会转发）
+        # -----------------------------------------------------
+        # 1.2 转发的是频道消息
+        # -----------------------------------------------------
+        origin_chat = getattr(forward_origin, "chat", None)
+
+        if origin_chat:
+            chat_type = getattr(origin_chat, "type", None)
+
+            # python-telegram-bot 的 Chat.type 一般是字符串
+            # 同时兼容枚举/对象形式
+            chat_type_name = getattr(chat_type, "name", None)
+
+            if (
+                chat_type == "channel"
+                or chat_type == "CHANNEL"
+                or chat_type_name == "CHANNEL"
+            ):
+                channel = origin_chat
+
+                username = getattr(channel, "username", "") or ""
+                title = getattr(channel, "title", "") or ""
+                channel_id = channel.id
+
+                # 转发来源消息 ID
+                origin_msg_id = getattr(
+                    forward_origin,
+                    "message_id",
+                    None,
+                )
+
+                msg_id_val = (
+                    origin_msg_id
+                    if origin_msg_id is not None
+                    else msg.message_id
+                )
+
+                print(
+                    f"[private_forward_router] 转发频道消息："
+                    f"channel_id={channel_id}, "
+                    f"message_id={msg_id_val}, "
+                    f"username={username}, "
+                    f"title={title}"
+                )
+
+                channel_id_text = f"<code>{channel_id}</code>"
+                msg_id_text = f"<code>{msg_id_val}</code>"
+
+                if username:
+                    text = (
+                        f"✅ 频道ID：{channel_id_text}\n"
+                        f"消息ID：{msg_id_text}\n"
+                        f"频道用户名：@{username}\n"
+                        f"频道名：{title}"
+                    )
+                else:
+                    text = (
+                        f"✅ 频道ID：{channel_id_text}\n"
+                        f"消息ID：{msg_id_text}\n"
+                        f"频道名：{title}"
+                    )
+
+                await msg.reply_text(
+                    text,
+                    parse_mode="HTML",
+                )
+                return
+
+        # -----------------------------------------------------
+        # 1.3 如果是其他类型的转发消息
+        # -----------------------------------------------------
+        print(
+            "[private_forward_router] 转发消息，但没有识别到用户或频道"
+        )
+
+    # =========================================================
+    # 2. 非转发消息，才检查会员/自定义表情 ID
+    # =========================================================
+
+    for entity in msg.entities or []:
+        if entity.type == "custom_emoji":
+            emoji_id = entity.custom_emoji_id
+
+            print(
+                f"[private_forward_router] 检测到会员表情，ID={emoji_id}"
+            )
+
+            await msg.reply_text(
+                f"会员表情 ID：\n<code>{emoji_id}</code>",
+                parse_mode="HTML",
+            )
+            return
+
+    # =========================================================
+    # 3. 检查命令
+    # =========================================================
+
+    if msg.text:
+        matched_command = get_matched_command(msg.text)
+
+        if matched_command:
+            print(
+                f"[private_forward_router] 忽略：命中命令 {matched_command}"
+            )
+            return
+
+    # =========================================================
+    # 4. 判断频道
+    #
+    # 这里保留你原来的逻辑。
+    # 主要用于 sender_chat 等场景。
+    # =========================================================
+
+    sender_chat = getattr(msg, "sender_chat", None)
+
+    forward_origin = getattr(msg, "forward_origin", None)
+
+    origin_chat = (
+        getattr(forward_origin, "chat", None)
+        if forward_origin
+        else None
+    )
+
+    channel = None
+
+    if (
+        sender_chat
+        and getattr(sender_chat, "type", None)
+        and (
+            sender_chat.type == "channel"
+            or sender_chat.type == "CHANNEL"
+            or getattr(sender_chat.type, "name", None) == "CHANNEL"
+        )
+    ):
+        channel = sender_chat
+
+    elif (
+        origin_chat
+        and getattr(origin_chat, "type", None)
+        and (
+            origin_chat.type == "channel"
+            or origin_chat.type == "CHANNEL"
+            or getattr(origin_chat.type, "name", None) == "CHANNEL"
+        )
+    ):
+        channel = origin_chat
+
+    if channel:
+        username = getattr(channel, "username", "") or ""
+        title = getattr(channel, "title", "") or ""
+        channel_id = f"<code>{channel.id}</code>"
+
+        origin_msg_id = (
+            getattr(forward_origin, "message_id", None)
+            if forward_origin
+            else None
+        )
+
+        msg_id_val = (
+            origin_msg_id
+            if origin_msg_id is not None
+            else msg.message_id
+        )
+
+        msg_id = f"<code>{msg_id_val}</code>"
+
+        if username:
+            text = (
+                f"✅ 频道ID：{channel_id} 点击红色数字拷贝\n"
+                f"消息ID：{msg_id}\n"
+                f"频道用户名：@{username}\n"
+                f"频道名：{title}"
+            )
+        else:
+            text = (
+                f"✅ 频道ID：{channel_id}\n"
+                f"消息ID：{msg_id}\n"
+                f"频道名：{title}"
+            )
+
+        await msg.reply_text(
+            text,
+            parse_mode="HTML",
+        )
+        return
+
+    # =========================================================
+    # 5. 主机器人私聊 AI
+    #
+    # 开启后不再转发给主人
+    # =========================================================
+
     if await handle_gemini_ai(update, context):
         raise ApplicationHandlerStop
 
-    # 机器人转发
+    # =========================================================
+    # 6. 机器人转发
+    # =========================================================
+
     await forward_to_owner(update, context)
-    # 客服机器人自动回复
+
+    # =========================================================
+    # 7. 客服机器人自动回复
+    # =========================================================
+
     await handle_customer_qa(update, context)
-    # 客服机器人修改功能
+
+    # =========================================================
+    # 8. 客服机器人修改功能
+    # =========================================================
+
     await handle_media(update, context)
     # await forward_to_owner(update, context)
 
@@ -489,12 +685,17 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """兜底 /start：保证未启用 verification 的机器人也能响应。"""
     if not update.message:
         return
-    
-    # 开始验证
-    if await handle_join_start(update, context):
-        return
 
     if context.args:
+        
+        # 开始验证
+        start_param = context.args[0]
+        if start_param.startswith("invite_"):
+            invite_code = start_param[len("invite_"):]
+            print("进入邀请功能:", invite_code)
+            if await handle_join_start(update, context):
+                return
+
         if await handle_comment_start_parameter(update, context, context.args[0]):
             return
         if await handle_report_start_parameter(update, context, context.args[0]):
@@ -1187,7 +1388,7 @@ async def handle_join_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return False
 
     text = update.message.text or ""
-
+    start_param = context.args[0]
     if not text.startswith("/start"):
         return False
 
@@ -1198,7 +1399,9 @@ async def handle_join_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 短邀请码，例如：
     # /start aK72xP
-    invite_code = parts[1].strip()
+    # invite_code = parts[1].strip()
+    
+    invite_code = start_param[len("invite_"):].strip()
 
     if not invite_code:
         return False
@@ -1219,6 +1422,25 @@ async def handle_join_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             invite_link = link
             inviter_id = int(info.get("inviter_id", 0))
             inviter_name = info.get("inviter_name") or "好友"
+            
+            inviter_username = info.get("inviter_username")
+
+            if inviter_username:
+                username = inviter_username.lstrip("@")
+
+                inviter_display = (
+                    f'<a href="https://t.me/{html.escape(username)}">'
+                    f'{html.escape(inviter_name)}'
+                    f'</a>'
+                )
+            elif inviter_id:
+                inviter_display = (
+                    f'<a href="tg://user?id={inviter_id}">'
+                    f'{html.escape(inviter_name)}'
+                    f'</a>'
+                )
+            else:
+                inviter_display = html.escape(inviter_name)
 
             try:
                 chat_id = int(chat_key)
@@ -1257,10 +1479,12 @@ async def handle_join_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"👋 欢迎你！\n\n"
-        f"📢 群聊：{chat_title}\n"
-        f"👤 邀请人：{inviter_name}\n\n"
+        f"📢 群聊：{html.escape(chat_title)}\n"
+        f"👤 邀请人：{inviter_display}\n\n"
         f"点击下面按钮加入群聊 👇",
         reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
     )
 
     return True

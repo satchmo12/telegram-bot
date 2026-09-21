@@ -217,11 +217,42 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @register_command("我的积分", "积分")
 async def my_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user, chat_id = update.effective_user, update.effective_chat.id
-    ensure_user_exists(chat_id, user.id, user.full_name)
-    points = get_points(chat_id, user.id)
-    await safe_reply(update, context, f"🏅 当前积分：{points} 分")
+    user = update.effective_user
+    chat_id = str(update.effective_chat.id) if update.effective_chat else ""
+    text = (update.effective_message.text or "").strip()
 
+    # 获取群配置
+    group_config = get_group_whitelist(context).get(chat_id, {})
+
+    # 获取积分别名
+    points_alias = str(
+        group_config.get("points_alias") or ""
+    ).strip()
+    
+    print("points_alias===",points_alias)
+
+    # 如果设置了别名，只响应别名
+    if points_alias:
+        if text != points_alias:
+            return
+    else:
+        # 没有设置别名，响应默认命令
+        if text != "我的积分":
+            return
+
+    ensure_user_exists(
+        chat_id,
+        user.id,
+        user.full_name,
+    )
+
+    points = get_points(chat_id, user.id)
+
+    await safe_reply(
+        update,
+        context,
+        text = f"🏅 当前{points_alias or '积分'}：{points} 分",
+    )
 
 def format_rich_item(i, item):
     uid, info = item
@@ -350,13 +381,32 @@ async def top_charm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_html("\n".join(lines), disable_web_page_preview=True)
 
 
-@register_command("积分排行")
+@register_command("积分排行", "邀请积分排名", "邀请积分排行")
 async def top_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    
+    chat_id = str(update.effective_chat.id) if update.effective_chat else ""
+    text = (update.effective_message.text or "").strip()
+
+    # 获取群配置
+    group_config = get_group_whitelist(context).get(chat_id, {})
+
+    # 获取积分别名
+    points_alias = str(
+        group_config.get("points_alias") or ""
+    ).strip()
+
+
+    # 如果设置了别名，只响应别名
+    if points_alias:
+        if text != points_alias + "排名" and text != points_alias + "排行":
+            return
+            
+            
     await show_rank(
         update=update,
         context=context,
         field="points",
-        title="🏆 积分排行榜",
+        title=f"🏆 {points_alias or '积分'}排行榜",
         prefix="points",
         format_factory=get_points_formatter,
         empty_text="目前还没有任何人的积分记录。",

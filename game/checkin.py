@@ -14,6 +14,18 @@ from utils import CHECKIN_FILE, get_group_whitelist, load_json, safe_reply, save
 async def daycheckin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     user = update.effective_user
+
+    # 检查本群是否开启签到
+    group_cfg = get_group_whitelist(context).get(chat_id, {})
+    points_cfg = get_checkin_points_config(group_cfg)
+
+    if not points_cfg["enabled"]:
+        return await safe_reply(
+            update,
+            context,
+            "❌ 本群签到未开启"
+        )
+
     today = datetime.utcnow().strftime("%Y-%m-%d")
 
     checkin_data = load_json(CHECKIN_FILE)
@@ -24,7 +36,9 @@ async def daycheckin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         checkin_data[chat_id][today] = {}
 
     if str(user.id) in checkin_data[chat_id][today]:
-        return await safe_reply(update, context,
+        return await safe_reply(
+            update,
+            context,
             f"✅ {user.first_name}，你今天已经签到过了！"
         )
 
@@ -32,20 +46,18 @@ async def daycheckin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     checkin_data[chat_id][today][str(user.id)] = user.full_name
     save_json(CHECKIN_FILE, checkin_data)
 
-    # 签到积分按当前群配置发放；关闭时仍可签到，但不增加积分。
-    group_cfg = get_group_whitelist(context).get(chat_id, {})
-    points_cfg = get_checkin_points_config(group_cfg)
-    awarded = points_cfg["amount"] if points_cfg["enabled"] else 0
-    if awarded:
-        change_points(chat_id, user.id, awarded)
-    points = get_points(chat_id, user.id)
-    reward_text = (
-        f"你获得了 {awarded} 积分，" if awarded else "本群签到积分未开启，"
-    )
-    await safe_reply(update, context,
-        f"🎉 签到成功，{user.full_name}！{reward_text}当前积分：{points} 🎯"
-    )
+    # 发放签到积分
+    awarded = points_cfg["amount"]
+    change_points(chat_id, user.id, awarded)
 
+    points = get_points(chat_id, user.id)
+
+    await safe_reply(
+        update,
+        context,
+        f"🎉 签到成功，{user.full_name}！"
+        f"你获得了 {awarded} 积分，当前积分：{points} 🎯"
+    )
 
 @register_command("签到统计")
 async def checkin_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
