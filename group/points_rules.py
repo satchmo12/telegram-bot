@@ -13,6 +13,8 @@ INVITE_POINTS_AMOUNT_MIN = 1
 INVITE_POINTS_AMOUNT_MAX = 500
 INVITE_POINTS_DAILY_LIMIT_MIN = 1
 INVITE_POINTS_DAILY_LIMIT_MAX = 10000
+CHECKIN_POINTS_AMOUNT_MIN = 1
+CHECKIN_POINTS_AMOUNT_MAX = 500
 
 
 def _today_key() -> str:
@@ -43,6 +45,21 @@ def get_talk_points_config(cfg: dict) -> dict:
             TALK_POINTS_MIN_LENGTH_MIN,
             TALK_POINTS_MIN_LENGTH_MAX,
             5,
+        ),
+    }
+
+
+def get_checkin_points_config(cfg: dict) -> dict:
+    cfg = cfg if isinstance(cfg, dict) else {}
+    return {
+        # Preserve the historical behavior (签到默认获得 10 分) until a group
+        # explicitly turns the new switch off.
+        "enabled": bool(cfg.get("checkin_points_enabled", True)),
+        "amount": _clamp(
+            cfg.get("checkin_points_amount", 10),
+            CHECKIN_POINTS_AMOUNT_MIN,
+            CHECKIN_POINTS_AMOUNT_MAX,
+            10,
         ),
     }
 

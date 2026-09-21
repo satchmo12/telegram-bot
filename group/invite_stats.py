@@ -1,8 +1,9 @@
 from telegram import Update
-from telegram.ext import CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import ChatMemberHandler, CommandHandler, MessageHandler, ContextTypes, filters
 from html import escape
 from html import escape as html_escape
-
+import secrets
+import string
 from command_router import register_command
 from group.points_rules import award_invite_points
 from utils import get_group_whitelist, load_json, save_json, safe_reply
@@ -154,7 +155,7 @@ async def create_personal_invite_link(update: Update, context: ContextTypes.DEFA
 
 
 
-@register_command("邀请链接")
+@register_command("邀请链接", "邀请")
 async def create_personal_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_chat or not update.effective_user:
         return
@@ -176,9 +177,10 @@ async def create_personal_invite_link(update: Update, context: ContextTypes.DEFA
     link_map_data = load_invite_link_map()
     group_link_map = link_map_data.setdefault(chat_key, {})
 
-    # 查找当前用户已有的群邀请链接
+    # 同群同用户复用已有链接
     existing_link = None
     existing_created_at = -1
+    invite_code = None
 
     for link, info in group_link_map.items():
         if int(info.get("inviter_id", 0)) != int(user.id):
@@ -189,9 +191,19 @@ async def create_personal_invite_link(update: Update, context: ContextTypes.DEFA
         if ts >= existing_created_at:
             existing_created_at = ts
             existing_link = link
+            invite_code = info.get("invite_code")
 
-    # 机器人没有创建邀请链接权限
-    if not existing_link:
+    # 已经存在群邀请链接
+    if existing_link:
+        # 老数据没有短码，则补一个
+        if not invite_code:
+            invite_code = generate_invite_code()
+
+            group_link_map[existing_link]["invite_code"] = invite_code
+            save_invite_link_map(link_map_data)
+
+    else:
+        # 机器人无创建邀请链接权限时，静默跳过
         try:
             bot_member = await context.bot.get_chat_member(
                 chat.id,
@@ -208,23 +220,12 @@ async def create_personal_invite_link(update: Update, context: ContextTypes.DEFA
         except Exception:
             return
 
+        # 创建真实群邀请链接
         try:
             link_obj = await context.bot.create_chat_invite_link(
                 chat_id=chat.id,
                 name=f"inviter:{user.id}",
             )
-
-            existing_link = link_obj.invite_link
-
-            group_link_map[existing_link] = {
-                "inviter_id": user.id,
-                "inviter_name": user.full_name,
-                "created_at": int(update.message.date.timestamp())
-                if update.message.date else 0,
-            }
-
-            save_invite_link_map(link_map_data)
-
         except Exception as e:
             return await safe_reply(
                 update,
@@ -232,28 +233,36 @@ async def create_personal_invite_link(update: Update, context: ContextTypes.DEFA
                 f"❌ 生成链接失败：{e}",
             )
 
-    # 获取机器人用户名
+        existing_link = link_obj.invite_link
+        invite_code = generate_invite_code()
+
+        group_link_map[existing_link] = {
+            "inviter_id": user.id,
+            "inviter_name": user.full_name,
+            "created_at": (
+                int(update.message.date.timestamp())
+                if update.message.date else 0
+            ),
+            "invite_code": invite_code,
+        }
+
+        save_invite_link_map(link_map_data)
+
+    # 获取当前机器人用户名
     try:
         bot_info = await context.bot.get_me()
         bot_username = bot_info.username
     except Exception:
         return
 
-    # 生成机器人 Start Link
-    start_param = f"join_{chat.id}_{user.id}"
-
-    bot_link = (
-        f"https://t.me/{bot_username}"
-        f"?start={start_param}"
-    )
+    # 最终给用户的是机器人短链接
+    bot_link = f"https://t.me/{bot_username}?start={invite_code}"
 
     msg = format_personal_bot_link_text(
         user.full_name,
         bot_link,
         invited_count,
     )
-    
-    format_personal_link_text
 
     await safe_reply(
         update,
@@ -287,9 +296,66 @@ def format_personal_bot_link_text(
 #         f'<a href="{html.escape(bot_link, quote=True)}">{html.escape(bot_link)}</a>\n\n'
 #         f"👥 已邀请：{invited_count} 人"
     # )
-    
+
+def generate_invite_code(length: int = 6) -> str:
+    chars = string.ascii_letters + string.digits
+    return "".join(secrets.choice(chars) for _ in range(length))
+
+async def _credit_invite_join(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    new_member_ids: list[int],
+    used_invite_link: str,
+) -> list[int]:
+    """Record and award one or more joins attributable to a tracked link.
+
+    Both service messages and chat-member updates can report the same join.
+    ``update_invite_stats_by_user`` de-duplicates invitees, so only the first
+    event can generate points.
+    """
+    if not used_invite_link or not new_member_ids:
+        return []
+    link_map_data = load_invite_link_map()
+    owner_info = (link_map_data.get(str(chat_id), {}) or {}).get(used_invite_link)
+    if not isinstance(owner_info, dict):
+        print(f"[邀请积分] 未找到邀请链接映射 chat={chat_id} link={used_invite_link[:48]}")
+        return []
+    inviter_id = int(owner_info.get("inviter_id", 0) or 0)
+    inviter_name = str(owner_info.get("inviter_name") or "未知用户")
+    if inviter_id <= 0:
+        print(f"[邀请积分] 邀请链接缺少邀请人 chat={chat_id} link={used_invite_link[:48]}")
+        return []
+
+    stats_data = load_invite_stats()
+    added_invitees = update_invite_stats_by_user(
+        stats_data, chat_id, inviter_id, inviter_name, new_member_ids
+    )
+    if not added_invitees:
+        return []
+    try:
+        group_cfg = get_group_whitelist(context).get(str(chat_id), {})
+        awarded = award_invite_points(str(chat_id), inviter_id, added_invitees, group_cfg)
+        if not bool((group_cfg or {}).get("invite_points_enabled", False)):
+            print(f"[邀请积分] 已记录邀请但本群未开启邀请积分 chat={chat_id} inviter={inviter_id}")
+        elif awarded <= 0:
+            print(
+                f"[邀请积分] 已记录邀请但未发分（请检查每日上限） "
+                f"chat={chat_id} inviter={inviter_id} "
+                f"amount={group_cfg.get('invite_points_amount')} "
+                f"daily_limit={group_cfg.get('invite_points_daily_limit')}"
+            )
+        else:
+            print(
+                f"[邀请积分] 已发放 chat={chat_id} inviter={inviter_id} "
+                f"invitees={len(added_invitees)} points={awarded}"
+            )
+    except Exception as exc:
+        print(f"⚠️ 邀请积分发放失败: chat={chat_id} inviter={inviter_id}, {exc}")
+    return added_invitees
+
+
 async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.new_chat_members:
+    if not update.message or not update.message.new_chat_members or not update.effective_chat:
         return
 
     chat_id = update.effective_chat.id
@@ -297,41 +363,45 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not new_member_ids:
         return
 
-    used_invite_link = None
     invite_link_obj = getattr(update.message, "invite_link", None)
-    if invite_link_obj:
-        used_invite_link = getattr(invite_link_obj, "invite_link", None)
-
-    link_map_data = load_invite_link_map()
-    stats_data = load_invite_stats()
-
+    used_invite_link = getattr(invite_link_obj, "invite_link", None) if invite_link_obj else None
     if used_invite_link:
-        group_link_map = link_map_data.get(str(chat_id), {})
-        owner_info = group_link_map.get(used_invite_link)
-        if owner_info:
-            inviter_id = int(owner_info.get("inviter_id", 0))
-            inviter_name = owner_info.get("inviter_name", "未知用户")
-            if inviter_id:
-                added_invitees = update_invite_stats_by_user(
-                    stats_data, chat_id, inviter_id, inviter_name, new_member_ids
-                )
-                try:
-                    group_cfg = get_group_whitelist(context).get(str(chat_id), {})
-                    award_invite_points(str(chat_id), inviter_id, added_invitees, group_cfg)
-                except Exception as e:
-                    print(f"⚠️ 邀请积分发放失败: chat={chat_id} inviter={inviter_id}, {e}")
-                return
+        await _credit_invite_join(context, chat_id, new_member_ids, used_invite_link)
+        return
 
+    # Retain the legacy fallback for ordinary manual additions. It has no
+    # invite-link attribution, but preserves existing invitation statistics.
     inviter = update.message.from_user
     if inviter and any(uid != inviter.id for uid in new_member_ids):
         added_invitees = update_invite_stats_by_user(
-            stats_data, chat_id, inviter.id, inviter.full_name, new_member_ids
+            load_invite_stats(), chat_id, inviter.id, inviter.full_name, new_member_ids
         )
         try:
             group_cfg = get_group_whitelist(context).get(str(chat_id), {})
             award_invite_points(str(chat_id), inviter.id, added_invitees, group_cfg)
-        except Exception as e:
-            print(f"⚠️ 邀请积分发放失败: chat={chat_id} inviter={inviter.id}, {e}")
+        except Exception as exc:
+            print(f"⚠️ 邀请积分发放失败: chat={chat_id} inviter={inviter.id}, {exc}")
+
+
+async def handle_chat_member_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Capture joins where Telegram omits the new_chat_members service message.
+
+    Telegram attaches the exact invite link to ChatMemberUpdated.invite_link.
+    This makes invitation attribution reliable for users who enter via a link.
+    """
+    change = getattr(update, "chat_member", None)
+    if not change or not getattr(change, "chat", None) or not getattr(change, "new_chat_member", None):
+        return
+    old_status = str(getattr(getattr(change, "old_chat_member", None), "status", ""))
+    new_status = str(getattr(change.new_chat_member, "status", ""))
+    if old_status not in {"left", "kicked"} or new_status not in {"member", "administrator", "restricted"}:
+        return
+    invite_link_obj = getattr(change, "invite_link", None)
+    used_invite_link = getattr(invite_link_obj, "invite_link", None) if invite_link_obj else None
+    user = getattr(change.new_chat_member, "user", None)
+    if not used_invite_link or not user or getattr(user, "is_bot", False):
+        return
+    await _credit_invite_join(context, int(change.chat.id), [int(user.id)], used_invite_link)
 
 
 @register_command("邀请统计")
@@ -369,5 +439,8 @@ def register_invite_handlers(app):
         MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member),
         group=10,
     )
+    # Some joins arrive only as a chat_member update; that update contains the
+    # invite link used by the joining user.
+    app.add_handler(ChatMemberHandler(handle_chat_member_join, ChatMemberHandler.CHAT_MEMBER), group=10)
     app.add_handler(CommandHandler("invites", show_invites))
     app.add_handler(CommandHandler("link", create_personal_invite_link))

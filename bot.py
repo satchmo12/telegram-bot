@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 from customer.customer_qa import handle_customer_qa, handle_business_connection
 from customer.editUserInfo import handle_media
+from group.invite_stats import load_invite_link_map
 from tool.utils.update_helper import get_message
 load_dotenv(override=True)
 
@@ -489,9 +490,9 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
     
-    # # 开始验证
-    # if await handle_join_start(update, context):
-    #     return
+    # 开始验证
+    if await handle_join_start(update, context):
+        return
 
     if context.args:
         if await handle_comment_start_parameter(update, context, context.args[0]):
@@ -1195,29 +1196,38 @@ async def handle_join_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(parts) < 2:
         return False
 
-    payload = parts[1].strip()
+    # 短邀请码，例如：
+    # /start aK72xP
+    invite_code = parts[1].strip()
 
-    if not payload.startswith("join_"):
+    if not invite_code:
         return False
 
-    try:
-        _, chat_id, inviter_id = payload.split("_", 2)
-
-        chat_id = int(chat_id)
-        inviter_id = int(inviter_id)
-
-    except (ValueError, TypeError):
-        return False
-
-    # 找到对应群邀请链接
+    # 查找邀请码对应的群邀请链接
     link_map_data = load_invite_link_map()
-    group_link_map = link_map_data.get(str(chat_id), {})
 
     invite_link = None
+    inviter_id = None
+    inviter_name = "好友"
+    chat_id = None
 
-    for link, info in group_link_map.items():
-        if int(info.get("inviter_id", 0)) == inviter_id:
+    for chat_key, group_link_map in link_map_data.items():
+        for link, info in group_link_map.items():
+            if info.get("invite_code") != invite_code:
+                continue
+
             invite_link = link
+            inviter_id = int(info.get("inviter_id", 0))
+            inviter_name = info.get("inviter_name") or "好友"
+
+            try:
+                chat_id = int(chat_key)
+            except (ValueError, TypeError):
+                chat_id = None
+
+            break
+
+        if invite_link:
             break
 
     if not invite_link:
@@ -1226,12 +1236,15 @@ async def handle_join_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return True
 
-    # 获取群信息
-    try:
-        chat = await context.bot.get_chat(chat_id)
-        chat_title = chat.title or "群聊"
-    except Exception:
-        chat_title = "群聊"
+    # 获取群名称
+    chat_title = "群聊"
+
+    if chat_id:
+        try:
+            chat = await context.bot.get_chat(chat_id)
+            chat_title = chat.title or "群聊"
+        except Exception:
+            pass
 
     keyboard = [
         [
@@ -1241,16 +1254,6 @@ async def handle_join_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         ]
     ]
-
-    inviter_name = "好友"
-
-    for info in group_link_map.values():
-        if int(info.get("inviter_id", 0)) == inviter_id:
-            inviter_name = info.get(
-                "inviter_name",
-                "好友",
-            )
-            break
 
     await update.message.reply_text(
         f"👋 欢迎你！\n\n"

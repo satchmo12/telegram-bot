@@ -6,7 +6,8 @@ from telegram.ext import (
 from datetime import datetime
 from command_router import register_command
 from info.economy import change_points, get_points
-from utils import CHECKIN_FILE, load_json, safe_reply, save_json
+from group.points_rules import get_checkin_points_config
+from utils import CHECKIN_FILE, get_group_whitelist, load_json, safe_reply, save_json
 
 
 @register_command("签到")
@@ -31,11 +32,18 @@ async def daycheckin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     checkin_data[chat_id][today][str(user.id)] = user.full_name
     save_json(CHECKIN_FILE, checkin_data)
 
-    # 加积分
-    change_points(chat_id, user.id, 10)
+    # 签到积分按当前群配置发放；关闭时仍可签到，但不增加积分。
+    group_cfg = get_group_whitelist(context).get(chat_id, {})
+    points_cfg = get_checkin_points_config(group_cfg)
+    awarded = points_cfg["amount"] if points_cfg["enabled"] else 0
+    if awarded:
+        change_points(chat_id, user.id, awarded)
     points = get_points(chat_id, user.id)
+    reward_text = (
+        f"你获得了 {awarded} 积分，" if awarded else "本群签到积分未开启，"
+    )
     await safe_reply(update, context,
-        f"🎉 签到成功，{user.full_name}！你获得了 10 积分，当前积分：{points} 🎯"
+        f"🎉 签到成功，{user.full_name}！{reward_text}当前积分：{points} 🎯"
     )
 
 

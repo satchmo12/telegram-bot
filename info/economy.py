@@ -205,7 +205,7 @@ async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_reply(update, context, msg)
 
 
-@register_command("我的金币")
+@register_command("我的金币", "金币")
 async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, chat_id = update.effective_user, update.effective_chat.id
     ensure_user_exists(chat_id, user.id, user.full_name)
@@ -215,7 +215,7 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-@register_command("我的积分")
+@register_command("我的积分", "积分")
 async def my_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, chat_id = update.effective_user, update.effective_chat.id
     ensure_user_exists(chat_id, user.id, user.full_name)

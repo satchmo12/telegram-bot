@@ -28,6 +28,8 @@ from game.points_lottery_core import (
     update_prize as update_points_lottery_prize,
 )
 from group.points_rules import (
+    CHECKIN_POINTS_AMOUNT_MAX,
+    CHECKIN_POINTS_AMOUNT_MIN,
     INVITE_POINTS_AMOUNT_MAX,
     INVITE_POINTS_AMOUNT_MIN,
     INVITE_POINTS_DAILY_LIMIT_MAX,
@@ -38,6 +40,7 @@ from group.points_rules import (
     TALK_POINTS_DAILY_LIMIT_MIN,
     TALK_POINTS_MIN_LENGTH_MAX,
     TALK_POINTS_MIN_LENGTH_MIN,
+    get_checkin_points_config,
     get_invite_points_config,
     get_talk_points_config,
 )
@@ -90,6 +93,7 @@ TOGGLE_FIELDS = [
 LOTTERY_TOGGLE_FIELDS = [
     ("points_lottery_enabled", "积分抽奖"),
     ("talk_points_enabled", "发言积分"),
+    ("checkin_points_enabled", "签到积分"),
     ("invite_points_enabled", "邀请积分"),
 ]
 
@@ -260,6 +264,7 @@ def _build_lottery_prizes_keyboard(chat_id: str) -> InlineKeyboardMarkup:
 
 def _build_lottery_settings_text(chat_id: str, cfg: dict) -> str:
     talk_points = get_talk_points_config(cfg)
+    checkin_points = get_checkin_points_config(cfg)
     invite_points = get_invite_points_config(cfg)
     lottery_cfg = get_points_lottery_config(cfg)
     prize_count = len(list_points_lottery_prizes(chat_id))
@@ -267,11 +272,14 @@ def _build_lottery_settings_text(chat_id: str, cfg: dict) -> str:
         "🎰 积分抽奖设置",
         f"积分抽奖：{_toggle_text(bool(cfg.get('points_lottery_enabled', False)))}",
         f"发言积分：{_toggle_text(bool(cfg.get('talk_points_enabled', False)))}",
+        f"签到积分：{_toggle_text(bool(cfg.get('checkin_points_enabled', True)))}",
         f"邀请积分：{_toggle_text(bool(cfg.get('invite_points_enabled', False)))}",
         f"抽奖积分：单次 {lottery_cfg['cost']} 分",
         f"奖池设置：{prize_count} 个奖品",
         f"抽奖显示文案：{html.escape(str(lottery_cfg.get('display_text', '') or '奖池丰厚，祝您好运。'))}",
         f"发言积分规则：每次 {talk_points['amount']} 分 每日上限 {talk_points['daily_limit']} 分 最小字数 {talk_points['min_length']}",
+        f"签到积分规则：每次签到 {checkin_points['amount']} 分",
+        f"积分别名：{html.escape(str(cfg.get('points_alias') or '未设置'))}",
         f"邀请积分规则：每邀请 1 人 {invite_points['amount']} 分 每日上限 {invite_points['daily_limit']} 分",
     ]
     return "\n".join(lines)
@@ -307,6 +315,18 @@ def _build_lottery_settings_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardM
             InlineKeyboardButton(
                 "💬 发言积分规则",
                 callback_data=f"{CALLBACK_PREFIX}:talk_points:{chat_id}",
+            ),
+            InlineKeyboardButton(
+                "📅 签到积分规则",
+                callback_data=f"{CALLBACK_PREFIX}:checkin_points:{chat_id}",
+            ),
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "🪙 积分别名",
+                callback_data=f"{CALLBACK_PREFIX}:points_alias:{chat_id}",
             ),
             InlineKeyboardButton(
                 "👥 邀请积分规则",
@@ -880,6 +900,7 @@ def _build_group_panel_text(
         _normalize_business_coop_link(cfg.get("business_coop_link", "")) or "未设置"
     )
     talk_points = get_talk_points_config(cfg)
+    checkin_points = get_checkin_points_config(cfg)
     invite_points = get_invite_points_config(cfg)
     lottery_cfg = get_points_lottery_config(cfg)
     prize_count = len(list_points_lottery_prizes(chat_id))
@@ -2131,7 +2152,29 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                 "请输入模式：间隔 或 定时",
                 reply_markup=back_markup,
             )
-    if action in {"talk_points", "invite_points"} and len(parts) >= 3:
+    if action == "points_alias" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        cfg = data.get(chat_id_str, {})
+        current_alias = str((cfg or {}).get("points_alias") or "未设置")
+        context.user_data["group_setting_chat_id"] = chat_id_str
+        context.user_data["group_setting_stage"] = "points_alias"
+        await query.answer()
+        return await query.edit_message_text(
+            "请输入积分别名。用户发送该文字即可查询自己的积分。\n"
+            f"当前：{html.escape(current_alias)}\n"
+            "例如：比特币。发送“无”可清空别名。",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:lottery_menu:{chat_id_str}")
+            ]]),
+            parse_mode="HTML",
+        )
+
+    if action in {"talk_points", "checkin_points", "invite_points"} and len(parts) >= 3:
         chat_id_str = parts[2]
         chat_id = _parse_chat_id(chat_id_str)
         if chat_id is None:
@@ -2162,6 +2205,20 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                     f"每日上限 {TALK_POINTS_DAILY_LIMIT_MIN}-{TALK_POINTS_DAILY_LIMIT_MAX}，"
                     f"最小字数 {TALK_POINTS_MIN_LENGTH_MIN}-{TALK_POINTS_MIN_LENGTH_MAX}\n"
                     "示例：1 50 5"
+                ),
+                reply_markup=back_markup,
+            )
+        if action == "checkin_points":
+            cfg = data.get(chat_id_str, {})
+            rules = get_checkin_points_config(cfg if isinstance(cfg, dict) else {})
+            context.user_data["group_setting_stage"] = "checkin_points"
+            await query.answer()
+            return await query.edit_message_text(
+                (
+                    "请输入每次签到获得的积分。\n"
+                    f"当前：{rules['amount']} 分\n"
+                    f"范围：{CHECKIN_POINTS_AMOUNT_MIN}-{CHECKIN_POINTS_AMOUNT_MAX}\n"
+                    "示例：10"
                 ),
                 reply_markup=back_markup,
             )
@@ -2507,6 +2564,8 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
         "business_coop",
         "group_broadcast",
         "talk_points",
+        "points_alias",
+        "checkin_points",
         "invite_points",
         "lottery_cost",
         "lottery_display_text",
@@ -2834,6 +2893,28 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
             await update.message.reply_text(
                 f"✅ 已设置发言积分规则：每次 {amount} 分，每日上限 {daily_limit} 分，最小字数 {min_length}"
             )
+        elif stage == "points_alias":
+            if text in {"无", "-", "清空"}:
+                cfg["points_alias"] = ""
+                await update.message.reply_text("✅ 已清空积分别名。")
+            else:
+                alias = text.strip()
+                if not alias or len(alias) > 30 or any(char.isspace() for char in alias):
+                    return await update.message.reply_text(
+                        "❗ 别名不能为空、不能含空格，且不能超过 30 个字符。"
+                    )
+                cfg["points_alias"] = alias
+                await update.message.reply_text(f"✅ 已设置积分别名：{alias}")
+        elif stage == "checkin_points":
+            if not text or not text.isdigit():
+                return await update.message.reply_text("❗ 请输入签到获得的积分数字。")
+            amount = int(text)
+            if not (CHECKIN_POINTS_AMOUNT_MIN <= amount <= CHECKIN_POINTS_AMOUNT_MAX):
+                return await update.message.reply_text(
+                    f"❗ 签到积分范围：{CHECKIN_POINTS_AMOUNT_MIN}-{CHECKIN_POINTS_AMOUNT_MAX}"
+                )
+            cfg["checkin_points_amount"] = amount
+            await update.message.reply_text(f"✅ 已设置签到积分：每次签到获得 {amount} 分")
         elif stage == "invite_points":
             if not text:
                 return await update.message.reply_text("❗ 请输入 2 个数字，例如：5 50")
@@ -2852,6 +2933,10 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
             ):
                 return await update.message.reply_text(
                     f"❗ 每日上限范围：{INVITE_POINTS_DAILY_LIMIT_MIN}-{INVITE_POINTS_DAILY_LIMIT_MAX}"
+                )
+            if daily_limit < amount:
+                return await update.message.reply_text(
+                    "❗ 每日邀请积分上限不能小于每邀请积分，否则一次邀请也无法获得积分。"
                 )
             cfg["invite_points_amount"] = amount
             cfg["invite_points_daily_limit"] = daily_limit

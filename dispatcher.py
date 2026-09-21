@@ -22,7 +22,7 @@ from chat.gemini_chat import handle_gemini_ai
 from info.economy import my_points, top_points, top_richest
 from translate.my_deep_translator import auto_translate
 from slave.action_handler import apply_action
-from utils import safe_reply
+from utils import get_group_whitelist, safe_reply
 from feature_flags import is_feature_enabled
 from channel.channel_config import handle_channel_config_text
 from channel.telethon_login import handle_telethon_login_text
@@ -178,8 +178,14 @@ async def handle_text(update, context):
     elif text == "💰我的积分":
         await my_points(update, context)
         return True
+
+    chat_id = str(update.effective_chat.id) if update.effective_chat else ""
+    points_alias = str(get_group_whitelist(context).get(chat_id, {}).get("points_alias") or "").strip()
+    if points_alias and text == points_alias:
+        await my_points(update, context)
+        return True
     
-    elif text == "🏆排行榜":
+    if text == "🏆排行榜":
         await top_points(update, context)
         return True
 
