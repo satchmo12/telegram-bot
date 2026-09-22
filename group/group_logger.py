@@ -113,6 +113,7 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "talk_points_daily_limit": 20,
             "talk_points_min_length": 5,
             "invite_points_enabled": False,
+            "invite_username_enabled": False,
             "invite_points_amount": 100,
             "invite_points_daily_limit": 500,
         }

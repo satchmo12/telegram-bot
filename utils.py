@@ -532,10 +532,12 @@ GROUP_CONFIG_DEFAULTS = {
     "talk_points_daily_limit": 20,
     "talk_points_min_length": 5,
     "checkin_points_enabled": True,
+    
     "checkin_points_amount": 10,
     # Optional plain-text alias that opens the user's points balance, e.g. 比特币.
     "points_alias": "",
     "invite_points_enabled": False,
+    "invite_username_enabled": False,
     "invite_points_amount": 100,
     "invite_points_daily_limit": 500,
     "force_subscribe": False,

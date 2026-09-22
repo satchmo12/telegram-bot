@@ -45,5 +45,6 @@
     "checkin_online_text": "在线宝宝",
     "user_mark_enabled": false,
     "user_mark_report_chat_id": null,
-    "user_mark_labels": []
+    "user_mark_labels": [],
+    "bottom_comment_buttons_enabled": false
 }

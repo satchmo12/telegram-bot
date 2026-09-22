@@ -38,6 +38,7 @@ PENDING_SUBMISSIONS_FILE = "data/pending_submissions.json"
 CALLBACK_PREFIX = "publish"
 BUTTON_TEXT_MAX_LENGTH = 64
 MAX_PUBLISH_BUTTONS = 20
+BUTTON_CONFIG_KEYS = frozenset({"buttons", "comment_buttons"})
 PENDING_PROOF_KEY = "publish_pending_proof_id"
 REJECT_REASON_KEY = "publish_reject_reason"
 COMMENT_TARGET_KEY = "publish_comment_target"
@@ -95,6 +96,8 @@ def load_publish_config():
         "ads_enabled": False,
         "ads": [],
         "buttons": [],
+        # Buttons used only for comments mirrored to the forwarding channel.
+        "comment_buttons": [],
         # Keep existing bots' public buttons visible until an owner changes
         # this setting in 投稿配置.
         "bottom_buttons_enabled": True,
@@ -106,6 +109,9 @@ def load_publish_config():
         # Comments are submitted through review and mirrored to forward_channel_id.
         "comment_forward_enabled": False,
         "forward_channel_id": None,
+        
+        "bottom_comment_buttons_enabled": False,
+        
         # Generate a public Telegram deep link for comments under admin posts.
         "report_link_enabled": False,
         # Structured template publishing for administrators.
@@ -3618,9 +3624,16 @@ def _append_published_submission(
 
 
 def _review_prompt_text(submission: dict) -> str:
-    proof_status = "已上传" if submission.get("proof_message_id") else "未要求"
+    has_proof = (
+        submission.get("proof_chat_id") is not None
+        and submission.get("proof_message_id") is not None
+    )
+    proof_status = "已上传" if has_proof else "未要求"
+    
+    
+    
     return (
-        "📝 收到新的投稿，请审核。\n"
+        f"📝 收到新的{'匿名' if submission.get('anonymous') else '实名'}投稿，请审核。\n"
         f"投稿人：{submission.get('author', '未知用户')}\n"
         f"审核凭证：{proof_status}\n"
         f"投稿编号：{submission.get('id', '未知')}"
@@ -3660,19 +3673,21 @@ async def _send_submission_for_review(
         from_chat_id=submission["user_chat_id"],
         message_id=submission["user_message_id"],
     )
-    # if submission.get("proof_message_id"):
-    #     if submission.get("anonymous"):
-    #         await context.bot.copy_message(
-    #             chat_id=owner_id,
-    #             from_chat_id=submission["proof_chat_id"],
-    #             message_id=submission["proof_message_id"],
-    #         )
-    #     else:
-    await context.bot.forward_message(
-        chat_id=owner_id,
-        from_chat_id=submission["proof_chat_id"],
-        message_id=submission["proof_message_id"],
-    )
+    # Proof is optional.  Normal submissions have no proof_* fields, so do
+    # not index them unconditionally (which previously raised KeyError).
+    proof_chat_id = submission.get("proof_chat_id")
+    proof_message_id = submission.get("proof_message_id")
+    if proof_chat_id is not None and proof_message_id is not None:
+        await context.bot.forward_message(
+            chat_id=owner_id,
+            from_chat_id=proof_chat_id,
+            message_id=proof_message_id,
+        )
+    elif proof_chat_id is not None or proof_message_id is not None:
+        print(
+            "审核凭证数据不完整，跳过转发凭证 "
+            f"submission={submission_id}"
+        )
 
     # Send review work to the owner and every delegated reviewer. Each recipient
     # gets independent controls; the persisted submission state prevents duplicate publishing.
@@ -3928,37 +3943,96 @@ async def _copy_submission_to_channel(
     target_channel_id,
     config: dict,
     *,
+    button_key: str = "buttons",
     add_comment_button: bool = False,
     register_keywords: bool = True,
 ):
     """Copy original user content to a channel and optionally append comment action."""
-    # The main post cannot have inline markup: Telegram otherwise hides its
-    # native comment thread.
+
+    # 主频道帖子如果需要保留 Telegram 原生评论入口，则不添加 InlineKeyboard。
+    # 否则根据 button_key 添加对应的底部按钮。
+    reply_markup = None
+
+    if not add_comment_button:
+        reply_markup = publish_buttons_keyboard(
+            config,
+            button_key=button_key,
+        )
+
     published = await context.bot.copy_message(
         chat_id=target_channel_id,
         from_chat_id=submission["user_chat_id"],
         message_id=submission["user_message_id"],
-        # Never attach report markup to the main post: Telegram would replace
-        # its native discussion button with this inline keyboard.
-        reply_markup=None if add_comment_button else publish_buttons_keyboard(config),
+        reply_markup=reply_markup,
     )
+
     if register_keywords and submission.get("keyword_entries"):
         _register_post_keywords(
             submission["keyword_entries"],
             target_channel_id,
             published.message_id,
         )
+
         _register_checkin_post(
             config,
             int(target_channel_id),
             published.message_id,
             submission["keyword_entries"],
         )
+
     if add_comment_button:
         # 暂时停用“参与讨论请点击下方按钮”辅助消息及其评论按钮。
         # 主频道正文保持无 InlineKeyboard，避免影响 Telegram 原生评论显示。
         pass
+
     return published
+
+
+def _reply_target_not_found(exc: Exception) -> bool:
+    """Whether Telegram rejected a reply because its parent message is stale."""
+    detail = str(exc).lower()
+    return (
+        "message to be replied not found" in detail
+        or "reply message not found" in detail
+    )
+
+
+async def _refresh_discussion_mapping_for_post(
+    context: ContextTypes.DEFAULT_TYPE,
+    config: dict,
+    channel_id: int,
+    message_id: int,
+    comment_map: dict,
+) -> dict:
+    """Re-resolve one post's linked-discussion parent via the protocol account.
+
+    Stored discussion mappings can become invalid after a linked group migration,
+    a manual deletion, or a channel clone.  Remove the stale value first because
+    _restore_cloned_discussion_mappings intentionally skips keys that already
+    exist in the map.
+    """
+    map_key = _comment_map_key(channel_id, message_id)
+    comment_map.pop(map_key, None)
+    keyword_data = _load_keyword_map()
+    _resolved, _failed, changed = await _restore_cloned_discussion_mappings(
+        context,
+        config=config,
+        target_channel_id=channel_id,
+        target_message_ids=[message_id],
+        comment_map=comment_map,
+        keyword_data=keyword_data,
+    )
+    if changed:
+        _save_comment_map(comment_map)
+        _save_keyword_map(keyword_data)
+
+    mapping = comment_map.get(map_key)
+    if not isinstance(mapping, dict):
+        raise RuntimeError(
+            "未能重新获取该主帖的讨论组消息。请确认频道已绑定讨论组，"
+            "且配置的协议号可访问频道及讨论组。"
+        )
+    return mapping
 
 
 async def _publish_comment_and_forward(
@@ -3981,47 +4055,72 @@ async def _publish_comment_and_forward(
     if not isinstance(mapping, dict):
         # A post copied into a replacement channel may have entered its linked
         # discussion group before that channel became the configured main
-        # channel, so the normal update listener had no reason to store it.
-        # Resolve it on demand through the configured protocol account.
-        keyword_data = _load_keyword_map()
-        resolved, _failed, changed = await _restore_cloned_discussion_mappings(
+        # channel, so resolve and persist its native discussion parent now.
+        mapping = await _refresh_discussion_mapping_for_post(
             context,
-            config=config,
-            target_channel_id=main_channel_id,
-            target_message_ids=[main_message_id],
-            comment_map=comment_map,
-            keyword_data=keyword_data,
+            config,
+            main_channel_id,
+            main_message_id,
+            comment_map,
         )
-        if changed:
-            _save_comment_map(comment_map)
-            _save_keyword_map(keyword_data)
-        mapping = comment_map.get(_comment_map_key(main_channel_id, main_message_id))
-        if not isinstance(mapping, dict):
-            raise RuntimeError(
-                "未找到主频道帖子的讨论组映射。请确认新频道已绑定讨论组、"
-                "协议号可访问该频道及讨论组，且机器人是讨论组管理员。"
-            )
 
-    discussion_chat_id = mapping.get("discussion_chat_id")
-    discussion_message_id = mapping.get("discussion_message_id")
+    discussion_chat_id = _as_int(mapping.get("discussion_chat_id"))
+    discussion_message_id = _as_int(mapping.get("discussion_message_id"))
     if discussion_chat_id is None or discussion_message_id is None:
         raise RuntimeError("评论讨论组映射无效")
 
     # Main posts created in comment mode have no inline markup, so this reply
     # is shown as a native comment below the original channel post.
+    try:
+        await context.bot.copy_message(
+            chat_id=discussion_chat_id,
+            from_chat_id=submission["user_chat_id"],
+            message_id=submission["user_message_id"],
+            reply_to_message_id=discussion_message_id,
+        )
+    except BadRequest as exc:
+        if not _reply_target_not_found(exc):
+            raise
 
-    await context.bot.copy_message(
-        chat_id=discussion_chat_id,
-        from_chat_id=submission["user_chat_id"],
-        message_id=submission["user_message_id"],
-        reply_to_message_id=discussion_message_id,
-    )
+        # The map existed but pointed at a deleted/migrated automatic-forward
+        # message. Rebuild it once, then retry exactly once; never fall back to
+        # a standalone group message because it would not be a channel comment.
+        print(
+            "评论讨论组父消息失效，正在刷新映射 "
+            f"channel={main_channel_id} message={main_message_id}: {exc}"
+        )
+        mapping = await _refresh_discussion_mapping_for_post(
+            context,
+            config,
+            main_channel_id,
+            main_message_id,
+            comment_map,
+        )
+        discussion_chat_id = _as_int(mapping.get("discussion_chat_id"))
+        discussion_message_id = _as_int(mapping.get("discussion_message_id"))
+        if discussion_chat_id is None or discussion_message_id is None:
+            raise RuntimeError("重新获取的评论讨论组映射无效")
+        try:
+            await context.bot.copy_message(
+                chat_id=discussion_chat_id,
+                from_chat_id=submission["user_chat_id"],
+                message_id=submission["user_message_id"],
+                reply_to_message_id=discussion_message_id,
+            )
+        except BadRequest as retry_exc:
+            if _reply_target_not_found(retry_exc):
+                raise RuntimeError(
+                    "该主帖在讨论组中的父消息不存在或已被删除，无法作为评论发布。"
+                    "请确认频道的讨论组未迁移、主帖仍可打开，然后重新审核。"
+                ) from retry_exc
+            raise
     submission["forward_channel_id"] = forward_channel_id
     forwarded = await _copy_submission_to_channel(
         context,
         submission,
         forward_channel_id,
         config,
+        button_key="comment_buttons",
     )
     _append_report_comment(submission, forwarded)
     await _publish_comment_to_backup_discussion(
@@ -4170,19 +4269,31 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
     return await query.answer("未知审核操作。", show_alert=True)
 
 
-def _publish_buttons(config: dict) -> list[dict]:
-    """Return valid custom buttons from the current publish configuration."""
-    buttons = config.get("buttons", []) if isinstance(config, dict) else []
+def _button_config_key(button_key: str) -> str:
+    """Return a supported button collection key, defaulting safely to posts."""
+    return button_key if button_key in BUTTON_CONFIG_KEYS else "buttons"
+
+
+def _publish_buttons(
+    config: dict,
+    button_key: str = "buttons",
+) -> list[dict]:
+    """Return valid custom buttons from the selected publish configuration."""
+    button_key = _button_config_key(button_key)
+    buttons = config.get(button_key, []) if isinstance(config, dict) else []
     if not isinstance(buttons, list):
         return []
     return [button for button in buttons if isinstance(button, dict)]
 
 
-def _button_settings_text(config: dict) -> str:
-    buttons = _publish_buttons(config)
+def _button_settings_text(config: dict, button_key: str = "buttons") -> str:
+    button_key = _button_config_key(button_key)
+    buttons = _publish_buttons(config, button_key)
+    is_comment_button = button_key == "comment_buttons"
+    subject = "评论" if is_comment_button else "投稿"
     lines = [
-        "🔘 投稿按钮设置",
-        "投稿发布到频道时，会在消息下方附加这些链接按钮。",
+        f"🔘 {subject}按钮设置",
+        f"{subject}发布到频道时，会在消息下方附加这些链接按钮。",
         "",
     ]
     if not buttons:
@@ -4196,61 +4307,68 @@ def _button_settings_text(config: dict) -> str:
     return "\n".join(lines)
 
 
+def _comment_button_settings_text(config: dict) -> str:
+    """Compatibility wrapper for the comment-button settings screen."""
+    return _button_settings_text(config, "comment_buttons")
+
+
 def publish_buttons_keyboard(
     config: dict,
     *,
+    button_key: str = "buttons",
     comment_channel_id=None,
     comment_message_id=None,
     comment_url: str = None,
 ):
-    """Build buttons for a published post, including an optional comment action."""
-    rows = []
-    if bool(config.get("bottom_buttons_enabled", True)):
-        for button in _publish_buttons(config):
-            button_text = str(button.get("text", "")).strip()
-            button_url = str(button.get("url", "")).strip()
-            if button_text and button_url:
-                rows.append([InlineKeyboardButton(button_text, url=button_url)])
+    """Build the custom URL keyboard for a published post or comment."""
+    button_key = _button_config_key(button_key)
+    enabled_key = (
+        "bottom_comment_buttons_enabled"
+        if button_key == "comment_buttons"
+        else "bottom_buttons_enabled"
+    )
+    enabled_default = False if button_key == "comment_buttons" else True
+    if not bool(config.get(enabled_key, enabled_default)):
+        return None
 
-    # 不展示评论按钮
-    # if (
-    #     bool(config.get("comment_forward_enabled", False))
-    #     and comment_channel_id is not None
-    #     and comment_message_id is not None
-    # ):
-    #     rows.append([
-    #         InlineKeyboardButton(
-    #             "💬 评论",
-    #             url=comment_url,
-    #         )
-    #         if comment_url
-    #         else InlineKeyboardButton(
-    #             "💬 评论",
-    #             callback_data=(
-    #                 f"publish:comment:{comment_channel_id}:{comment_message_id}"
-    #             ),
-    #         )
-    #     ])
+    rows = []
+    for button in _publish_buttons(config, button_key):
+        button_text = str(button.get("text", "")).strip()
+        button_url = str(button.get("url", "")).strip()
+        if button_text and button_url:
+            rows.append([InlineKeyboardButton(button_text, url=button_url)])
     return InlineKeyboardMarkup(rows) if rows else None
 
 
-def publish_button_settings_keyboard(config: dict):
-    buttons = _publish_buttons(config)
-    rows = [[InlineKeyboardButton("➕ 添加按钮", callback_data="publish:button_add")]]
+def publish_button_settings_keyboard(config: dict, button_key: str = "buttons"):
+    button_key = _button_config_key(button_key)
+    buttons = _publish_buttons(config, button_key)
+    rows = [[InlineKeyboardButton(
+        "➕ 添加按钮", callback_data=f"publish:button_add:{button_key}"
+    )]]
     if buttons:
         rows.extend(
             [
-                [InlineKeyboardButton("📝 修改按钮", callback_data="publish:button_edit")],
-                [InlineKeyboardButton("🗑 删除按钮", callback_data="publish:button_delete")],
+                [InlineKeyboardButton(
+                    "📝 修改按钮", callback_data=f"publish:button_edit:{button_key}"
+                )],
+                [InlineKeyboardButton(
+                    "🗑 删除按钮", callback_data=f"publish:button_delete:{button_key}"
+                )],
             ]
         )
     rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="publish:back")])
     return InlineKeyboardMarkup(rows)
 
 
-def _button_selection_keyboard(config: dict, action: str):
+def _button_selection_keyboard(
+    config: dict,
+    action: str,
+    button_key: str = "buttons",
+):
+    button_key = _button_config_key(button_key)
     rows = []
-    for button in _publish_buttons(config):
+    for button in _publish_buttons(config, button_key):
         button_id = button.get("id")
         button_text = str(button.get("text", "未命名"))[:40]
         prefix = "📝" if action == "edit" else "🗑"
@@ -4258,13 +4376,35 @@ def _button_selection_keyboard(config: dict, action: str):
             [
                 InlineKeyboardButton(
                     f"{prefix} #{button_id} {button_text}",
-                    callback_data=f"publish:button_{action}_{button_id}",
+                    callback_data=f"publish:button_{action}:{button_key}:{button_id}",
                 )
             ]
         )
-    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="publish:buttons")])
+    rows.append([
+        InlineKeyboardButton("⬅️ 返回", callback_data=f"publish:{button_key}")
+    ])
     return InlineKeyboardMarkup(rows)
 
+
+def _legacy_button_selection(action: str):
+    """Parse selection callbacks emitted before keys were colon-separated."""
+    for operation in ("edit", "delete"):
+        prefix = f"button_{operation}_"
+        if not action.startswith(prefix):
+            continue
+        payload = action[len(prefix):]
+        for button_key in sorted(BUTTON_CONFIG_KEYS, key=len, reverse=True):
+            keyed_prefix = f"{button_key}_"
+            if payload.startswith(keyed_prefix):
+                payload = payload[len(keyed_prefix):]
+                break
+        else:
+            button_key = "buttons"
+        try:
+            return operation, _button_config_key(button_key), int(payload)
+        except ValueError:
+            return None
+    return None
 
 def _normalize_button_url(value: str):
     url = (value or "").strip()
@@ -4566,6 +4706,8 @@ def _template_format_keyboard() -> InlineKeyboardMarkup:
 # =========================
 def publish_setting_keyboard(config: dict):
     bottom_buttons_enabled = bool(config.get("bottom_buttons_enabled", True))
+    bottom_comment_buttons_enabled = bool(config.get("bottom_comment_buttons_enabled", False))
+    
     proof_required = bool(config.get("proof_required", False))
     reject_reason_required = bool(config.get("reject_reason_required", False))
     comment_forward_enabled = bool(config.get("comment_forward_enabled", False))
@@ -4620,6 +4762,13 @@ def publish_setting_keyboard(config: dict):
                 "📨 转发频道",
                 callback_data="publish:forward_channel",
             ),
+        ],
+        [        
+            InlineKeyboardButton("🔘 评论底部按钮设置", callback_data="publish:comment_buttons"),
+            InlineKeyboardButton(
+                f"{'✅' if bottom_comment_buttons_enabled else '🚫'} 显示评论底部按钮",
+                callback_data="publish:toggle_bottom_comment_buttons",
+            )
         ],
         [
             InlineKeyboardButton(
@@ -4739,6 +4888,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_publish_config()
     channel_id = config.get("channel_id")
     action = query.data.split(":")[1]
+    
+    parts = query.data.split(":")
 
     if action in {"user_mark_open", "user_mark_toggle", "user_mark_confirm", "user_mark_reset"}:
         return await _handle_user_mark_callback(query, context, config)
@@ -5298,6 +5449,16 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_publish_config(config)
         return await query.edit_message_text(
             f"发布底部按钮已{'显示' if config['bottom_buttons_enabled'] else '隐藏'}。",
+            reply_markup=publish_setting_keyboard(config),
+        )
+        
+    if action == "toggle_bottom_comment_buttons":
+        config["bottom_comment_buttons_enabled"] = not bool(
+            config.get("bottom_comment_buttons_enabled", True)
+        )
+        save_publish_config(config)
+        return await query.edit_message_text(
+            f"评论底部按钮已{'显示' if config['bottom_comment_buttons_enabled'] else '隐藏'}。",
             reply_markup=publish_setting_keyboard(config),
         )
 
@@ -5993,81 +6154,89 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
         return
 
-    if action == "buttons":
+    if action in {"buttons", "comment_buttons"}:
         _clear_button_input(context)
+        button_key = "comment_buttons" if action == "comment_buttons" else "buttons"
         return await query.edit_message_text(
-            _button_settings_text(config),
-            reply_markup=publish_button_settings_keyboard(config),
+            _button_settings_text(config, button_key),
+            reply_markup=publish_button_settings_keyboard(config, button_key),
         )
 
     if action == "button_add":
-        buttons = _publish_buttons(config)
+        button_key = _button_config_key(parts[2] if len(parts) > 2 else "buttons")
+        buttons = _publish_buttons(config, button_key)
         if len(buttons) >= MAX_PUBLISH_BUTTONS:
             return await query.edit_message_text(
-                f"最多只能设置 {MAX_PUBLISH_BUTTONS} 个投稿按钮。",
-                reply_markup=publish_button_settings_keyboard(config),
+                f"最多只能设置 {MAX_PUBLISH_BUTTONS} 个按钮。",
+                reply_markup=publish_button_settings_keyboard(config, button_key),
             )
         context.user_data["waiting_post"] = False
-        context.user_data["publish_button_input"] = {"mode": "add", "step": "text"}
+        context.user_data["publish_button_input"] = {
+            "mode": "add",
+            "step": "text",
+            "button_key": button_key,
+        }
         return await query.edit_message_text(
             "请输入按钮文字（最多 64 个字符）。\n例如：加入交流群"
         )
 
-    if action == "button_edit":
-        buttons = _publish_buttons(config)
-        if not buttons:
-            return await query.edit_message_text(
-                "当前未设置按钮。",
-                reply_markup=publish_button_settings_keyboard(config),
-            )
-        return await query.edit_message_text(
-            "请选择要修改的按钮：",
-            reply_markup=_button_selection_keyboard(config, "edit"),
-        )
-
-    if action.startswith("button_edit_"):
+    # New callbacks use publish:button_edit:<key>:<id>.  Parse the old
+    # underscore form as well, so keyboards sent before this update still work.
+    selected_button = None
+    if action in {"button_edit", "button_delete"} and len(parts) == 4:
         try:
-            button_id = int(action.removeprefix("button_edit_"))
+            selected_button = (
+                action.removeprefix("button_"),
+                _button_config_key(parts[2]),
+                int(parts[3]),
+            )
         except ValueError:
             return await query.answer("按钮数据无效", show_alert=True)
-        if not any(button.get("id") == button_id for button in _publish_buttons(config)):
-            return await query.answer("按钮不存在或已删除", show_alert=True)
-        context.user_data["waiting_post"] = False
-        context.user_data["publish_button_input"] = {
-            "mode": "edit",
-            "step": "text",
-            "button_id": button_id,
-        }
-        return await query.edit_message_text(
-            "请输入新的按钮文字（最多 64 个字符）。"
-        )
+    elif len(parts) == 2:
+        selected_button = _legacy_button_selection(action)
 
-    if action == "button_delete":
-        buttons = _publish_buttons(config)
-        if not buttons:
+    if selected_button:
+        operation, button_key, button_id = selected_button
+        buttons = _publish_buttons(config, button_key)
+        if operation == "edit":
+            if not any(button.get("id") == button_id for button in buttons):
+                return await query.answer("按钮不存在或已删除", show_alert=True)
+            context.user_data["waiting_post"] = False
+            context.user_data["publish_button_input"] = {
+                "mode": "edit",
+                "step": "text",
+                "button_id": button_id,
+                "button_key": button_key,
+            }
             return await query.edit_message_text(
-                "当前未设置按钮。",
-                reply_markup=publish_button_settings_keyboard(config),
+                "请输入新的按钮文字（最多 64 个字符）。"
             )
-        return await query.edit_message_text(
-            "请选择要删除的按钮：",
-            reply_markup=_button_selection_keyboard(config, "delete"),
-        )
 
-    if action.startswith("button_delete_"):
-        try:
-            button_id = int(action.removeprefix("button_delete_"))
-        except ValueError:
-            return await query.answer("按钮数据无效", show_alert=True)
-        buttons = _publish_buttons(config)
-        updated_buttons = [button for button in buttons if button.get("id") != button_id]
+        updated_buttons = [
+            button for button in buttons if button.get("id") != button_id
+        ]
         if len(updated_buttons) == len(buttons):
             return await query.answer("按钮不存在或已删除", show_alert=True)
-        config["buttons"] = updated_buttons
+        config[button_key] = updated_buttons
         save_publish_config(config)
         return await query.edit_message_text(
-            "✅ 按钮已删除。\n\n" + _button_settings_text(config),
-            reply_markup=publish_button_settings_keyboard(config),
+            "✅ 按钮已删除。\n\n" + _button_settings_text(config, button_key),
+            reply_markup=publish_button_settings_keyboard(config, button_key),
+        )
+
+    if action in {"button_edit", "button_delete"}:
+        button_key = _button_config_key(parts[2] if len(parts) > 2 else "buttons")
+        buttons = _publish_buttons(config, button_key)
+        if not buttons:
+            return await query.edit_message_text(
+                "当前未设置按钮。",
+                reply_markup=publish_button_settings_keyboard(config, button_key),
+            )
+        operation = "edit" if action == "button_edit" else "delete"
+        prompt = "请选择要修改的按钮：" if operation == "edit" else "请选择要删除的按钮："
+        return await query.edit_message_text(
+            prompt,
+            reply_markup=_button_selection_keyboard(config, operation, button_key),
         )
 
     if action == "back":
@@ -6497,6 +6666,7 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        submission["status"] = "pending"
         pending[submission_id] = submission
         _save_pending_submissions(pending)
         try:
@@ -7191,6 +7361,7 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     button_input = context.user_data.get("publish_button_input")
     if isinstance(button_input, dict):
+        button_key = _button_config_key(button_input.get("button_key", "buttons"))
         value = update.message.text.strip()
         if button_input.get("step") == "text":
             if not value:
@@ -7212,7 +7383,7 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     "❗ 链接格式不正确，请输入完整链接，例如：https://t.me/example"
                 )
 
-            buttons = _publish_buttons(config)
+            buttons = _publish_buttons(config, button_key)
             if button_input.get("mode") == "edit":
                 button_id = button_input.get("button_id")
                 for button in buttons:
@@ -7234,14 +7405,17 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     (int(button.get("id", 0) or 0) for button in buttons), default=0
                 ) + 1
                 buttons.append({"id": button_id, "text": button_input["text"], "url": url})
-                config["buttons"] = buttons
+                config[button_key] = buttons
                 result_text = "✅ 按钮添加成功。"
 
+            # _publish_buttons() filters malformed entries, so persist the
+            # normalized list for both additions and edits.
+            config[button_key] = buttons
             save_publish_config(config)
             _clear_button_input(context)
             return await update.message.reply_text(
-                result_text + "\n\n" + _button_settings_text(config),
-                reply_markup=publish_button_settings_keyboard(config),
+                result_text + "\n\n" + _button_settings_text(config, button_key),
+                reply_markup=publish_button_settings_keyboard(config, button_key),
             )
 
     if context.user_data.get("waiting_forward_channel_id"):

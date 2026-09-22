@@ -95,6 +95,7 @@ LOTTERY_TOGGLE_FIELDS = [
     ("talk_points_enabled", "发言积分"),
     ("checkin_points_enabled", "签到积分"),
     ("invite_points_enabled", "邀请积分"),
+    ("invite_username_enabled", "邀请必须有用户名"),
 ]
 
 TALK_LOTTERY_TOGGLE_FIELDS = [
@@ -274,6 +275,9 @@ def _build_lottery_settings_text(chat_id: str, cfg: dict) -> str:
         f"发言积分：{_toggle_text(bool(cfg.get('talk_points_enabled', False)))}",
         f"签到积分：{_toggle_text(bool(cfg.get('checkin_points_enabled', True)))}",
         f"邀请积分：{_toggle_text(bool(cfg.get('invite_points_enabled', False)))}",
+        f"邀请有用户名：{_toggle_text(bool(cfg.get('invite_username_enabled', False)))}",
+        
+        
         f"抽奖积分：单次 {lottery_cfg['cost']} 分",
         f"奖池设置：{prize_count} 个奖品",
         f"抽奖显示文案：{html.escape(str(lottery_cfg.get('display_text', '') or '奖池丰厚，祝您好运。'))}",

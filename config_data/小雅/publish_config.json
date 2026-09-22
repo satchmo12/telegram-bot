@@ -9,13 +9,53 @@
             "id": 1,
             "text": "Raptor加速器",
             "url": "http://skyk.cc"
+        },
+        {
+            "id": 2,
+            "text": "测试",
+            "url": "https://t.me/example"
+        },
+        {
+            "id": 3,
+            "text": "测试",
+            "url": "https://t.me/iwoai"
+        },
+        {
+            "id": 4,
+            "text": "12312",
+            "url": "https://t.me/iwoai"
+        },
+        {
+            "id": 5,
+            "text": "234",
+            "url": "https://t.me/iwoai"
+        },
+        {
+            "id": 6,
+            "text": "123",
+            "url": "https://t.me/iwoai"
+        },
+        {
+            "id": 7,
+            "text": "123",
+            "url": "https://t.me/iwoai"
+        },
+        {
+            "id": 8,
+            "text": "123",
+            "url": "https://t.me/iwoai"
+        },
+        {
+            "id": 9,
+            "text": "12",
+            "url": "https://baidui.com"
         }
     ],
     "submission_enabled": true,
     "random_view_enabled": false,
-    "bottom_buttons_enabled": false,
-    "proof_required": true,
-    "reject_reason_required": true,
+    "bottom_buttons_enabled": true,
+    "proof_required": false,
+    "reject_reason_required": false,
     "comment_forward_enabled": true,
     "forward_channel_id": -1003968770671,
     "keyword_extract_labels": [
@@ -145,5 +185,13 @@
         "广告",
         "骗子",
         "骚扰"
+    ],
+    "bottom_comment_buttons_enabled": true,
+    "comment_buttons": [
+        {
+            "id": 1,
+            "text": "测试",
+            "url": "https://baidui.com"
+        }
     ]
 }

@@ -5,6 +5,7 @@ from html import escape as html_escape
 import secrets
 import string
 from command_router import register_command
+from group.grouplist import load_users
 from group.points_rules import award_invite_points
 from utils import get_group_whitelist, load_json, save_json, safe_reply
 
@@ -333,9 +334,32 @@ async def _credit_invite_join(
     )
     if not added_invitees:
         return []
+    
+    # 从群用户记录中获取被邀请人信息
+    users = load_users(chat_id)
+        # 只有有 username 的被邀请人才参与积分
+    valid_invitees = []
+    invitee_usernames = {}
+    
+    for user_id in added_invitees:
+        info = users.get(str(user_id), {})
+        username = info.get("username") if isinstance(info, dict) else None
+
+        # 没有 username，不算有效邀请
+        if username:
+            valid_invitees.append(user_id)
+            invitee_usernames[user_id] = username
+            
     try:
         group_cfg = get_group_whitelist(context).get(str(chat_id), {})
-        awarded = award_invite_points(str(chat_id), inviter_id, added_invitees, group_cfg)
+        
+        if bool((group_cfg or {}).get("invite_points_enabled", False)) and  not invitee_usernames[added_invitees]:
+            awarded = 0
+        else:  
+            awarded = award_invite_points(str(chat_id), inviter_id, added_invitees, group_cfg)
+        
+
+
         if not bool((group_cfg or {}).get("invite_points_enabled", False)):
             print(f"[邀请积分] 已记录邀请但本群未开启邀请积分 chat={chat_id} inviter={inviter_id}")
         elif awarded <= 0:
@@ -345,11 +369,55 @@ async def _credit_invite_join(
                 f"amount={group_cfg.get('invite_points_amount')} "
                 f"daily_limit={group_cfg.get('invite_points_daily_limit')}"
             )
+            
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"🎉 邀请成功！\n"
+                        f"👤 邀请人：{inviter_name}\n"
+                        f"👥 成功邀请：{len(added_invitees)} 人\n"
+                        f"🎁 获得积分：+{awarded}"
+                    ),
+                )
+            except Exception as notify_exc:
+                print(
+                    f"⚠️ 邀请积分群内提醒发送失败: "
+                    f"chat={chat_id}, inviter={inviter_id}, {notify_exc}"
+                )
+                            
         else:
             print(
                 f"[邀请积分] 已发放 chat={chat_id} inviter={inviter_id} "
                 f"invitees={len(added_invitees)} points={awarded}"
             )
+            
+             # 在群里提醒邀请成功
+            try:
+                
+                invitee_text = "、".join(
+                f"@{invitee_usernames[user_id]}"
+                for user_id in valid_invitees
+                if user_id in invitee_usernames
+                )
+                
+                
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"🎉 邀请成功！\n"
+                        f"👤 邀请人：{inviter_name}\n"
+                        f"👥 成功邀请：{len(added_invitees)} 人\n"
+                        f"🙋 被邀请人：{invitee_text}\n"
+                        f"🎁 获得积分：+{awarded}"
+                    ),
+                )
+            except Exception as notify_exc:
+                print(
+                    f"⚠️ 邀请积分群内提醒发送失败: "
+                    f"chat={chat_id}, inviter={inviter_id}, {notify_exc}"
+                )
+        
     except Exception as exc:
         print(f"⚠️ 邀请积分发放失败: chat={chat_id} inviter={inviter_id}, {exc}")
     return added_invitees
