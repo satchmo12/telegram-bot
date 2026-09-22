@@ -148,5 +148,13 @@
         "广告",
         "骗子",
         "骚扰"
-    ]
+    ],
+    "comment_buttons": [
+        {
+            "id": 1,
+            "text": "艺术展老师报告区",
+            "url": "https://t.me/+NtE1N4u4M2MzMjJh"
+        }
+    ],
+    "bottom_comment_buttons_enabled": true
 }

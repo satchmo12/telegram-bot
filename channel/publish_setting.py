@@ -537,6 +537,10 @@ async def _publish_comment_to_backup_discussion(
             from_chat_id=submission["user_chat_id"],
             message_id=submission["user_message_id"],
             reply_to_message_id=discussion_message_id,
+            reply_markup=publish_buttons_keyboard(
+                config,
+                button_key="comment_buttons",
+            ),
         )
         submission["backup_discussion_chat_id"] = discussion_chat_id
         submission["backup_discussion_message_id"] = copied.message_id
@@ -2421,9 +2425,35 @@ def _comment_date(comment: dict) -> str:
         return "未知日期"
 
 
+def _comment_created_at(comment: dict) -> int:
+    try:
+        return int(comment.get("created_at", 0) or 0)
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+
+def _report_comments_newest_first(report: dict) -> list[tuple[int, dict]]:
+    """Return report comments ordered newest-first while retaining source indexes."""
+    comments = report.get("comments", []) if isinstance(report, dict) else []
+    if not isinstance(comments, list):
+        return []
+    indexed_comments = [
+        (index, comment)
+        for index, comment in enumerate(comments)
+        if isinstance(comment, dict)
+    ]
+    # The original list index makes entries with the same timestamp stable and
+    # keeps a just-added comment ahead of older entries.
+    return sorted(
+        indexed_comments,
+        key=lambda item: (_comment_created_at(item[1]), item[0]),
+        reverse=True,
+    )
+
+
 def _report_list_view(report_id: str, report: dict, page: int):
-    comments = report.get("comments", []) if isinstance(report.get("comments"), list) else []
-    total = len(comments)
+    ordered_comments = _report_comments_newest_first(report)
+    total = len(ordered_comments)
     pages = max(1, (total + REPORT_PAGE_SIZE - 1) // REPORT_PAGE_SIZE)
     page = max(1, min(page, pages))
     start = (page - 1) * REPORT_PAGE_SIZE
@@ -2431,22 +2461,25 @@ def _report_list_view(report_id: str, report: dict, page: int):
     lines = [
         "📋 帖子评论报告",
         "",
-        f"报告总数：{total} 条评论",
+        f"报告总数：{total} 条评论（最新评论在前）",
         f"当前页：{page}/{pages}",
         _report_subject_text(report),
         "",
         "请选择下方评论查看详情：",
     ]
-    for index, comment in enumerate(comments[start : start + REPORT_PAGE_SIZE], start=start):
+    for position, (index, comment) in enumerate(
+        ordered_comments[start : start + REPORT_PAGE_SIZE],
+        start=start,
+    ):
         author = str(comment.get("author") or "用户")[:28]
         date_text = _comment_date(comment)
         # Do not put comment content into the report overview. It is available
         # only after the viewer selects this entry.
         rows.append([InlineKeyboardButton(
-            f"📅 {date_text} · {index + 1}. {author}",
+            f"📅 {date_text} · {position + 1}. {author}",
             callback_data=f"publish:report_detail:{report_id}:{page}:{index}",
         )])
-    if not comments:
+    if not ordered_comments:
         lines.append("暂无已审核并转发的评论。")
     nav = []
     if page > 1:
@@ -2456,7 +2489,6 @@ def _report_list_view(report_id: str, report: dict, page: int):
     if nav:
         rows.append(nav)
     return "\n".join(lines), InlineKeyboardMarkup(rows)
-
 
 def _can_manage_report_comments(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     """Allow the owner/super-admins and delegated review administrators."""
@@ -2477,6 +2509,14 @@ def _report_comment_detail_view(
     comment = comments[index]
     if not isinstance(comment, dict):
         return None, None
+
+    ordered_comments = _report_comments_newest_first(report)
+    ordered_indexes = [item_index for item_index, _item in ordered_comments]
+    try:
+        position = ordered_indexes.index(index)
+    except ValueError:
+        return None, None
+
     text = "\n".join([
         "💬 评论详情",
         "",
@@ -2495,23 +2535,26 @@ def _report_comment_detail_view(
             InlineKeyboardButton("✏️ 编辑评论", callback_data=f"publish:rce:{report_id}:{page}:{index}"),
             InlineKeyboardButton("🗑 删除评论", callback_data=f"publish:rcd:{report_id}:{page}:{index}"),
         ])
+
     nav_row = []
-    previous_index = index - 1
-    next_index = index + 1
-    if previous_index >= 0:
-        previous_page = previous_index // REPORT_PAGE_SIZE + 1
+    previous_position = position - 1
+    next_position = position + 1
+    if previous_position >= 0:
+        previous_index = ordered_indexes[previous_position]
+        previous_page = previous_position // REPORT_PAGE_SIZE + 1
         nav_row.append(InlineKeyboardButton(
-            "⬅️ 上一条",
+            "⬅️ 上一条",  # newer comment
             callback_data=f"publish:report_detail:{report_id}:{previous_page}:{previous_index}",
         ))
     nav_row.append(InlineKeyboardButton(
         "⬅️ 返回报告",
         callback_data=f"publish:report_page:{report_id}:{page}",
     ))
-    if next_index < len(comments):
-        next_page = next_index // REPORT_PAGE_SIZE + 1
+    if next_position < len(ordered_indexes):
+        next_index = ordered_indexes[next_position]
+        next_page = next_position // REPORT_PAGE_SIZE + 1
         nav_row.append(InlineKeyboardButton(
-            "➡️ 下一条",
+            "➡️ 吓一条",
             callback_data=f"publish:report_detail:{report_id}:{next_page}:{next_index}",
         ))
     rows.append(nav_row)
@@ -4070,13 +4113,20 @@ async def _publish_comment_and_forward(
         raise RuntimeError("评论讨论组映射无效")
 
     # Main posts created in comment mode have no inline markup, so this reply
-    # is shown as a native comment below the original channel post.
+    # is shown as a native comment below the original channel post.  Unlike the
+    # channel post itself, a discussion reply can safely carry the configured
+    # comment buttons.
+    comment_reply_markup = publish_buttons_keyboard(
+        config,
+        button_key="comment_buttons",
+    )
     try:
         await context.bot.copy_message(
             chat_id=discussion_chat_id,
             from_chat_id=submission["user_chat_id"],
             message_id=submission["user_message_id"],
             reply_to_message_id=discussion_message_id,
+            reply_markup=comment_reply_markup,
         )
     except BadRequest as exc:
         if not _reply_target_not_found(exc):
@@ -4106,6 +4156,7 @@ async def _publish_comment_and_forward(
                 from_chat_id=submission["user_chat_id"],
                 message_id=submission["user_message_id"],
                 reply_to_message_id=discussion_message_id,
+                reply_markup=comment_reply_markup,
             )
         except BadRequest as retry_exc:
             if _reply_target_not_found(retry_exc):
@@ -4774,7 +4825,11 @@ def publish_setting_keyboard(config: dict):
             InlineKeyboardButton(
                 f"{'✅' if continuous_submission_enabled else '🚫'} 连续投稿",
                 callback_data="publish:toggle_continuous_submission",
-            )
+            ),
+            # InlineKeyboardButton(
+            #     f"{'✅' if continuous_submission_enabled else '🚫'} 提取历史报告",
+            #     callback_data="publish:toggle_continuous_submission",
+            # )
         ],
         [   
             InlineKeyboardButton(

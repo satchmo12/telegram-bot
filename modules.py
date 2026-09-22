@@ -1,3 +1,4 @@
+from channel.extract_links import register_extract_links_command
 from customer.customer_qa import register_customer_qa_handlers
 from admin_permissions import register_admin_permission_handlers
 from customer.editUserInfo import register_customer_edit_handlers
@@ -24,6 +25,7 @@ def register_all_handlers(app):
     register_message_forward_handlers(app)
     register_virus_handlers(app)
     register_note(app)
+    register_extract_links_command(app)
     register_favorite(app)
     # ai
     # register_ai_group_reply_handlers(app)
