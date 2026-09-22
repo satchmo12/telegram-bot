@@ -802,6 +802,18 @@ async def can_use_command(context, user_id, chat_id):
     if user_id in SUPER_ADMINS:
         return True
 
+    # 👥 机器人“多管理员”面板中配置的管理员。  This is deliberately
+    # independent of Telegram group-admin status: these are trusted per-bot
+    # operators and may be granted management access without making them a
+    # group administrator.  Import lazily because admin_permissions imports
+    # helpers from this module.
+    try:
+        from admin_permissions import get_delegated_admin
+        if get_delegated_admin(context, user_id) is not None:
+            return True
+    except Exception as exc:
+        print(f"读取机器人多管理员配置失败 user={user_id}: {exc}")
+
     try:
         member = await context.bot.get_chat_member(chat_id, user_id)
     except Exception:

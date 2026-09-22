@@ -84,13 +84,42 @@ def update_invite_stats_by_user(
     )
 
     stat["username"] = inviter_name or stat.get("username", "未知用户")
+    if not isinstance(stat.get("invitees"), set):
+        stat["invitees"] = set(stat.get("invitees", []) or [])
+
+    # A person can generate an invite reward only once per group, even if they
+    # leave and later rejoin through a different member's link.  Historical
+    # invitees are retained in the group-wide stats specifically for this
+    # anti-reward-farming check.
+    previously_invited = set()
+    for recorded_stat in group_stats.values():
+        if not isinstance(recorded_stat, dict):
+            continue
+        invitees = recorded_stat.get("invitees", set())
+        if not isinstance(invitees, (set, list, tuple)):
+            continue
+        for recorded_uid in invitees:
+            try:
+                previously_invited.add(str(int(recorded_uid)))
+            except (TypeError, ValueError):
+                continue
 
     added_invitees = []
     for uid in new_member_ids:
-        if uid not in stat["invitees"]:
-            stat["invitees"].add(uid)
-            stat["count"] += 1
-            added_invitees.append(uid)
+        try:
+            invitee_key = str(int(uid))
+        except (TypeError, ValueError):
+            continue
+        if invitee_key in previously_invited:
+            print(
+                f"[邀请积分] 跳过重复入群用户 chat={chat_id} "
+                f"inviter={inviter_id} invitee={invitee_key}"
+            )
+            continue
+        stat["invitees"].add(int(uid))
+        stat["count"] += 1
+        added_invitees.append(int(uid))
+        previously_invited.add(invitee_key)
 
     save_invite_stats(stats_data)
     return added_invitees
@@ -303,11 +332,24 @@ def generate_invite_code(length: int = 6) -> str:
     chars = string.ascii_letters + string.digits
     return "".join(secrets.choice(chars) for _ in range(length))
 
+
+def _user_mention_html(user_id: int, display_name: str) -> str:
+    """Build a Telegram HTML mention that displays a safe nickname."""
+    try:
+        user_id = int(user_id)
+    except (TypeError, ValueError):
+        return html_escape(str(display_name or "用户"))
+    name = html_escape(str(display_name or "用户"))
+    return f'<a href="tg://user?id={user_id}">{name}</a>'
+
+
 async def _credit_invite_join(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
     new_member_ids: list[int],
     used_invite_link: str,
+    member_usernames=None,
+    member_names=None,
 ) -> list[int]:
     """Record and award one or more joins attributable to a tracked link.
 
@@ -334,58 +376,86 @@ async def _credit_invite_join(
     )
     if not added_invitees:
         return []
-    
-    # 从群用户记录中获取被邀请人信息
+    total_invite_count = get_user_invite_count(stats_data, chat_id, inviter_id)
+
+    # The invite handler (group=10) runs before the group-user tracker
+    # (group=12).  For a just-joined member, load_users() can therefore still
+    # be empty even though Telegram supplied a username in this update. Prefer
+    # the username carried by the join update and use persisted data only as a
+    # fallback for older callers.
+    current_usernames = member_usernames if isinstance(member_usernames, dict) else {}
+    current_names = member_names if isinstance(member_names, dict) else {}
     users = load_users(chat_id)
-        # 只有有 username 的被邀请人才参与积分
     valid_invitees = []
     invitee_usernames = {}
-    
+    invitee_names = {}
+
     for user_id in added_invitees:
         info = users.get(str(user_id), {})
-        username = info.get("username") if isinstance(info, dict) else None
+        if not isinstance(info, dict):
+            info = {}
+        username = current_usernames.get(user_id) or info.get("username")
+        username = str(username or "").strip().lstrip("@")
+        display_name = current_names.get(user_id) or info.get("full_name") or f"用户{user_id}"
 
         # 没有 username，不算有效邀请
         if username:
             valid_invitees.append(user_id)
             invitee_usernames[user_id] = username
+            invitee_names[user_id] = str(display_name).strip() or f"用户{user_id}"
             
     try:
         group_cfg = get_group_whitelist(context).get(str(chat_id), {})
-        
-        if bool((group_cfg or {}).get("invite_points_enabled", False)) and  not invitee_usernames[added_invitees]:
+        points_enabled = bool((group_cfg or {}).get("invite_points_enabled", False))
+
+        # Only invitees with a recorded username are eligible for invitation
+        # points.  ``added_invitees`` is a list, so it must never be used as a
+        # dictionary key (the previous expression caused "unhashable type:
+        # 'list'").
+        if not points_enabled:
             awarded = 0
-        else:  
-            awarded = award_invite_points(str(chat_id), inviter_id, added_invitees, group_cfg)
-        
+            no_award_reason = "本群未开启邀请积分"
+        elif not valid_invitees:
+            awarded = 0
+            no_award_reason = "被邀请人没有可用用户名，不参与邀请积分"
+        else:
+            awarded = award_invite_points(
+                str(chat_id), inviter_id, valid_invitees, group_cfg
+            )
+            no_award_reason = "已达到每日上限或本次可发积分为 0"
 
-
-        if not bool((group_cfg or {}).get("invite_points_enabled", False)):
-            print(f"[邀请积分] 已记录邀请但本群未开启邀请积分 chat={chat_id} inviter={inviter_id}")
+        if not points_enabled:
+            print(
+                f"[邀请积分] 已记录邀请但本群未开启邀请积分 "
+                f"chat={chat_id} inviter={inviter_id}"
+            )
         elif awarded <= 0:
             print(
-                f"[邀请积分] 已记录邀请但未发分（请检查每日上限） "
+                f"[邀请积分] 已记录邀请但未发分（{no_award_reason}） "
                 f"chat={chat_id} inviter={inviter_id} "
                 f"amount={group_cfg.get('invite_points_amount')} "
                 f"daily_limit={group_cfg.get('invite_points_daily_limit')}"
             )
-            
+
             try:
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=(
                         f"🎉 邀请成功！\n"
-                        f"👤 邀请人：{inviter_name}\n"
+                        f"👤 邀请人：{_user_mention_html(inviter_id, inviter_name)}\n"
                         f"👥 成功邀请：{len(added_invitees)} 人\n"
+                        f"📊 总邀请人数：{total_invite_count} 人\n"
                         f"🎁 获得积分：+{awarded}"
                     ),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
                 )
             except Exception as notify_exc:
                 print(
                     f"⚠️ 邀请积分群内提醒发送失败: "
                     f"chat={chat_id}, inviter={inviter_id}, {notify_exc}"
                 )
-                            
+
         else:
             print(
                 f"[邀请积分] 已发放 chat={chat_id} inviter={inviter_id} "
@@ -396,21 +466,25 @@ async def _credit_invite_join(
             try:
                 
                 invitee_text = "、".join(
-                f"@{invitee_usernames[user_id]}"
-                for user_id in valid_invitees
-                if user_id in invitee_usernames
+                    _user_mention_html(
+                        user_id,
+                        invitee_names.get(user_id) or invitee_usernames.get(user_id),
+                    )
+                    for user_id in valid_invitees
                 )
-                
-                
+
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=(
                         f"🎉 邀请成功！\n"
-                        f"👤 邀请人：{inviter_name}\n"
+                        f"👤 邀请人：{_user_mention_html(inviter_id, inviter_name)}\n"
                         f"👥 成功邀请：{len(added_invitees)} 人\n"
                         f"🙋 被邀请人：{invitee_text}\n"
+                        f"📊 总邀请人数：{total_invite_count} 人\n"
                         f"🎁 获得积分：+{awarded}"
                     ),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
                 )
             except Exception as notify_exc:
                 print(
@@ -428,14 +502,31 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.effective_chat.id
-    new_member_ids = [u.id for u in update.message.new_chat_members if u]
+    new_members = [member for member in update.message.new_chat_members if member]
+    new_member_ids = [member.id for member in new_members]
     if not new_member_ids:
         return
+    member_usernames = {
+        int(member.id): member.username
+        for member in new_members
+        if getattr(member, "username", None)
+    }
+    member_names = {
+        int(member.id): member.full_name
+        for member in new_members
+    }
 
     invite_link_obj = getattr(update.message, "invite_link", None)
     used_invite_link = getattr(invite_link_obj, "invite_link", None) if invite_link_obj else None
     if used_invite_link:
-        await _credit_invite_join(context, chat_id, new_member_ids, used_invite_link)
+        await _credit_invite_join(
+            context,
+            chat_id,
+            new_member_ids,
+            used_invite_link,
+            member_usernames,
+            member_names,
+        )
         return
 
     # Retain the legacy fallback for ordinary manual additions. It has no
@@ -470,7 +561,14 @@ async def handle_chat_member_join(update: Update, context: ContextTypes.DEFAULT_
     user = getattr(change.new_chat_member, "user", None)
     if not used_invite_link or not user or getattr(user, "is_bot", False):
         return
-    await _credit_invite_join(context, int(change.chat.id), [int(user.id)], used_invite_link)
+    await _credit_invite_join(
+        context,
+        int(change.chat.id),
+        [int(user.id)],
+        used_invite_link,
+        {int(user.id): user.username} if getattr(user, "username", None) else {},
+        {int(user.id): user.full_name},
+    )
 
 
 @register_command("邀请统计")
