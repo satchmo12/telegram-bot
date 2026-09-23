@@ -1420,72 +1420,137 @@ def _parse_fixed_slots(raw: str) -> list[str]:
     return sorted(set(slots))
 
 
+async def _pin_ad_message_if_enabled(bot, chat_id: int, sent_message, ad: dict) -> bool:
+    """Best-effort pinning: lack of pin permission never blocks an ad send."""
+    if not bool(ad.get("pin", False)):
+        return False
+    message_id = getattr(sent_message, "message_id", None)
+    if not message_id:
+        return False
+    try:
+        await bot.pin_chat_message(
+            chat_id=int(chat_id),
+            message_id=message_id,
+            disable_notification=True,
+        )
+        return True
+    except Exception as exc:
+        print(f"⚠️ 广告置顶跳过 chat={chat_id} message={message_id}: {exc}")
+        return False
+
+
+def _global_ad_records(cfg: dict) -> list[dict]:
+    """Read new multi-ad config, with compatibility for the former single ad."""
+    ads = cfg.get("ads") if isinstance(cfg, dict) else None
+    if isinstance(ads, list):
+        return [ad for ad in ads if isinstance(ad, dict)]
+    if not isinstance(cfg, dict):
+        return []
+    # Old configuration: one top-level ad.
+    return [
+        {
+            "id": 1,
+            "enabled": bool(cfg.get("enabled", False)),
+            "mode": cfg.get("mode", AD_PUSH_MODE_INTERVAL),
+            "interval_min": cfg.get("interval_min", AD_PUSH_DEFAULT_INTERVAL_MIN),
+            "times": cfg.get("times", ""),
+            "text": cfg.get("text", ""),
+            GLOBAL_AD_PUSH_MESSAGE_KEY: cfg.get(GLOBAL_AD_PUSH_MESSAGE_KEY),
+            "exclude_group_ids": cfg.get("exclude_group_ids", []),
+        }
+    ]
+
+
 async def _global_ad_push_to_groups(
     context: ContextTypes.DEFAULT_TYPE, groups: dict, now_ts: float, current_hm: str
 ):
     cfg = load_json(GLOBAL_AD_PUSH_FILE)
-    if not isinstance(cfg, dict) or not bool(cfg.get("enabled", False)):
-        return
-
-    payload = cfg.get(GLOBAL_AD_PUSH_MESSAGE_KEY)
-    if not isinstance(payload, dict):
-        text = str(cfg.get("text", "")).strip()
-        payload = {"type": "text", "text": text} if text else None
-    if not payload:
+    if not isinstance(cfg, dict):
         return
 
     runtime_bot = get_runtime_bot_name() or str(getattr(context.bot, "id", "bot"))
-    mode = str(cfg.get("mode", AD_PUSH_MODE_INTERVAL)).strip().lower()
-    excluded = {str(x) for x in cfg.get("exclude_group_ids", []) if str(x).strip()}
-
-    if mode == AD_PUSH_MODE_FIXED:
-        slots = _parse_fixed_slots(str(cfg.get("times", "")))
-        if not slots or current_hm not in slots:
-            return
-        slot_key = f"{runtime_bot}:{current_hm}"
-        if last_global_ad_push_slot.get(runtime_bot) == slot_key:
-            return
-        should_send = True
-    else:
-        interval_min = cfg.get("interval_min", AD_PUSH_DEFAULT_INTERVAL_MIN)
-        if not isinstance(interval_min, int):
-            interval_min = AD_PUSH_DEFAULT_INTERVAL_MIN
-        interval_min = max(
-            AD_PUSH_MIN_INTERVAL_MIN, min(AD_PUSH_MAX_INTERVAL_MIN, interval_min)
-        )
-        current_minute = int(now_ts // 60)
-        offset_min = abs(hash(f"{runtime_bot}:global_ad")) % interval_min
-        should_send = current_minute % interval_min == offset_min
-        if now_ts - last_global_ad_push_ts.get(runtime_bot, 0) < interval_min * 60:
-            should_send = False
-
-    if not should_send:
-        return
-
-    sent = 0
-    for chat_id, group_cfg in list((groups or {}).items()):
-        if str(chat_id) in excluded:
-            continue
-        if not isinstance(group_cfg, dict):
-            continue
-        if not group_cfg.get("enabled", True):
-            continue
-        if not group_cfg.get("bot_enabled", True):
-            continue
-        if not bool(group_cfg.get("bot_in_group", False)):
+    for index, ad in enumerate(_global_ad_records(cfg), start=1):
+        if not bool(ad.get("enabled", False)):
             continue
         try:
-            await send_message_payload(context.bot, chat_id=int(chat_id), payload=payload)
-            sent += 1
-        except Exception as e:
-            print(f"⚠️ 全群广告发送失败: {chat_id}, {e}")
+            ad_id = int(ad.get("id", index))
+        except (TypeError, ValueError):
+            ad_id = index
+        payload = ad.get(GLOBAL_AD_PUSH_MESSAGE_KEY)
+        if not isinstance(payload, dict):
+            text = str(ad.get("text", "")).strip()
+            payload = {"type": "text", "text": text} if text else None
+        if not payload:
+            continue
 
-    if mode == AD_PUSH_MODE_FIXED:
-        last_global_ad_push_slot[runtime_bot] = slot_key
-    else:
-        last_global_ad_push_ts[runtime_bot] = now_ts
-    if sent:
-        print(f"✅ 全群广告已发送到 {sent} 个群")
+        ad_key = f"{runtime_bot}:global_ad:{ad_id}"
+        mode = str(ad.get("mode", AD_PUSH_MODE_INTERVAL)).strip().lower()
+        excluded = {str(x) for x in ad.get("exclude_group_ids", []) if str(x).strip()}
+        if mode == AD_PUSH_MODE_FIXED:
+            slots = _parse_fixed_slots(str(ad.get("times", "")))
+            if not slots or current_hm not in slots:
+                continue
+            slot_key = f"{ad_key}:{current_hm}"
+            if last_global_ad_push_slot.get(ad_key) == slot_key:
+                continue
+            should_send = True
+        else:
+            interval_min = ad.get("interval_min", AD_PUSH_DEFAULT_INTERVAL_MIN)
+            if not isinstance(interval_min, int):
+                interval_min = AD_PUSH_DEFAULT_INTERVAL_MIN
+            interval_min = max(
+                AD_PUSH_MIN_INTERVAL_MIN, min(AD_PUSH_MAX_INTERVAL_MIN, interval_min)
+            )
+            current_minute = int(now_ts // 60)
+            offset_min = abs(hash(ad_key)) % interval_min
+            should_send = current_minute % interval_min == offset_min
+            if now_ts - last_global_ad_push_ts.get(ad_key, 0) < interval_min * 60:
+                should_send = False
+
+        if not should_send:
+            continue
+
+        sent = 0
+        for chat_id, group_cfg in list((groups or {}).items()):
+            if str(chat_id) in excluded:
+                continue
+            if not isinstance(group_cfg, dict):
+                continue
+            if not group_cfg.get("enabled", True) or not group_cfg.get("bot_enabled", True):
+                continue
+            if not bool(group_cfg.get("bot_in_group", False)):
+                continue
+            try:
+                sent_message = await send_message_payload(context.bot, chat_id=int(chat_id), payload=payload)
+                await _pin_ad_message_if_enabled(context.bot, int(chat_id), sent_message, ad)
+                sent += 1
+            except Exception as exc:
+                print(f"⚠️ 全群广告发送失败 ad={ad_id} chat={chat_id}: {exc}")
+
+        if mode == AD_PUSH_MODE_FIXED:
+            last_global_ad_push_slot[ad_key] = slot_key
+        else:
+            last_global_ad_push_ts[ad_key] = now_ts
+        if sent:
+            print(f"✅ 全群广告已发送 ad={ad_id} 至 {sent} 个群")
+
+
+def _group_ad_records(cfg: dict) -> list[dict]:
+    """Read multi-ad group config, retaining compatibility with the old fields."""
+    ads = cfg.get("ad_push_ads") if isinstance(cfg, dict) else None
+    if isinstance(ads, list):
+        return [ad for ad in ads if isinstance(ad, dict)]
+    if not isinstance(cfg, dict):
+        return []
+    return [{
+        "id": 1,
+        "enabled": bool(cfg.get(GROUP_KEY_AD_PUSH_ENABLED, False)),
+        "mode": cfg.get(GROUP_KEY_AD_PUSH_MODE, AD_PUSH_MODE_INTERVAL),
+        "interval_min": cfg.get(GROUP_KEY_AD_PUSH_INTERVAL, AD_PUSH_DEFAULT_INTERVAL_MIN),
+        "times": cfg.get(GROUP_KEY_AD_PUSH_TIMES, ""),
+        "text": cfg.get(GROUP_KEY_AD_PUSH_TEXT, ""),
+        GROUP_KEY_AD_PUSH_MESSAGE: cfg.get(GROUP_KEY_AD_PUSH_MESSAGE),
+    }]
 
 
 async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
@@ -1504,65 +1569,63 @@ async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
 
     await _global_ad_push_to_groups(context, groups, now_ts, current_hm)
 
-    # 复制快照，避免并发写 groups.json 时触发 "dictionary changed size during iteration"
+    # Snapshot avoids errors if groups.json is updated while this task runs.
     for chat_id, cfg in list(groups.items()):
         if not isinstance(cfg, dict):
             continue
-        if not cfg.get("enabled", True):
+        if not cfg.get("enabled", True) or not cfg.get("bot_enabled", True):
             continue
-        if not cfg.get("bot_enabled", True):
-            continue
-        if not bool(cfg.get(GROUP_KEY_AD_PUSH_ENABLED, False)):
-            continue
-
-        payload = cfg.get(GROUP_KEY_AD_PUSH_MESSAGE)
-        if not isinstance(payload, dict):
-            text = str(cfg.get(GROUP_KEY_AD_PUSH_TEXT, "")).strip()
-            if text:
-                payload = {"type": "text", "text": text}
-            else:
-                payload = None
-        if not payload:
-            continue
-
         runtime_chat_key = get_runtime_chat_key(context, str(chat_id))
-        mode = (
-            str(cfg.get(GROUP_KEY_AD_PUSH_MODE, AD_PUSH_MODE_INTERVAL)).strip().lower()
-        )
-
-        if mode == AD_PUSH_MODE_FIXED:
-            slots = _parse_fixed_slots(str(cfg.get(GROUP_KEY_AD_PUSH_TIMES, "")))
-            if not slots or current_hm not in slots:
-                continue
-            slot_key = f"{runtime_chat_key}:{current_hm}"
-            if last_ad_push_slot.get(runtime_chat_key) == slot_key:
+        for index, ad in enumerate(_group_ad_records(cfg), start=1):
+            if not bool(ad.get("enabled", False)):
                 continue
             try:
-                await send_message_payload(context.bot, chat_id=int(chat_id), payload=payload)
-                last_ad_push_slot[runtime_chat_key] = slot_key
-            except Exception as e:
-                print(f"⚠️ 广告定时发送失败: {chat_id}, {e}")
-            continue
+                ad_id = int(ad.get("id", index))
+            except (TypeError, ValueError):
+                ad_id = index
+            payload = ad.get(GROUP_KEY_AD_PUSH_MESSAGE)
+            if not isinstance(payload, dict):
+                ad_text = str(ad.get("text", "")).strip()
+                payload = {"type": "text", "text": ad_text} if ad_text else None
+            if not payload:
+                continue
 
-        interval_min = cfg.get(GROUP_KEY_AD_PUSH_INTERVAL, AD_PUSH_DEFAULT_INTERVAL_MIN)
-        if not isinstance(interval_min, int):
-            interval_min = AD_PUSH_DEFAULT_INTERVAL_MIN
-        interval_min = max(
-            AD_PUSH_MIN_INTERVAL_MIN, min(AD_PUSH_MAX_INTERVAL_MIN, interval_min)
-        )
+            ad_key = f"{runtime_chat_key}:ad:{ad_id}"
+            mode = str(ad.get("mode", AD_PUSH_MODE_INTERVAL)).strip().lower()
+            if mode == AD_PUSH_MODE_FIXED:
+                slots = _parse_fixed_slots(str(ad.get("times", "")))
+                if not slots or current_hm not in slots:
+                    continue
+                slot_key = f"{ad_key}:{current_hm}"
+                if last_ad_push_slot.get(ad_key) == slot_key:
+                    continue
+                try:
+                    sent_message = await send_message_payload(context.bot, chat_id=int(chat_id), payload=payload)
+                    await _pin_ad_message_if_enabled(context.bot, int(chat_id), sent_message, ad)
+                    last_ad_push_slot[ad_key] = slot_key
+                except Exception as exc:
+                    print(f"⚠️ 群广告定时发送失败 ad={ad_id} chat={chat_id}: {exc}")
+                continue
 
-        current_minute = int(now_ts // 60)
-        offset_min = abs(hash(f"{runtime_chat_key}:ad")) % interval_min
-        if current_minute % interval_min != offset_min:
-            continue
-        if now_ts - last_ad_push_ts.get(runtime_chat_key, 0) < interval_min * 60:
-            continue
-
-        try:
-            await send_message_payload(context.bot, chat_id=int(chat_id), payload=payload)
-            last_ad_push_ts[runtime_chat_key] = now_ts
-        except Exception as e:
-            print(f"⚠️ 广告间隔发送失败: {chat_id}, {e}")
+            interval_min = ad.get("interval_min", AD_PUSH_DEFAULT_INTERVAL_MIN)
+            if not isinstance(interval_min, int):
+                interval_min = AD_PUSH_DEFAULT_INTERVAL_MIN
+            interval_min = max(
+                AD_PUSH_MIN_INTERVAL_MIN,
+                min(AD_PUSH_MAX_INTERVAL_MIN, interval_min),
+            )
+            current_minute = int(now_ts // 60)
+            offset_min = abs(hash(ad_key)) % interval_min
+            if current_minute % interval_min != offset_min:
+                continue
+            if now_ts - last_ad_push_ts.get(ad_key, 0) < interval_min * 60:
+                continue
+            try:
+                sent_message = await send_message_payload(context.bot, chat_id=int(chat_id), payload=payload)
+                await _pin_ad_message_if_enabled(context.bot, int(chat_id), sent_message, ad)
+                last_ad_push_ts[ad_key] = now_ts
+            except Exception as exc:
+                print(f"⚠️ 群广告间隔发送失败 ad={ad_id} chat={chat_id}: {exc}")
 
 @group_allowed
 @register_command("叫", "说", "讲")

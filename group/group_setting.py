@@ -376,69 +376,186 @@ async def _open_lottery_settings_panel(
     )
     
     
+MAX_GROUP_ADS = 20
+
+
+def _default_group_ad(ad_id: int) -> dict:
+    return {
+        "id": int(ad_id),
+        "enabled": False,
+        "mode": "interval",
+        "interval_min": 120,
+        "times": "",
+        "text": "",
+        AD_PUSH_MESSAGE_KEY: None,
+        "pin": False,
+    }
+
+
+def _normalize_group_ad(raw: dict, ad_id: int) -> dict:
+    ad = _default_group_ad(ad_id)
+    if isinstance(raw, dict):
+        ad.update({key: raw[key] for key in ad if key in raw})
+    ad["id"] = int(ad_id)
+    ad["enabled"] = bool(ad.get("enabled", False))
+    ad["mode"] = "fixed" if str(ad.get("mode", "interval")).lower() == "fixed" else "interval"
+    try:
+        ad["interval_min"] = max(AD_PUSH_MIN_INTERVAL, min(AD_PUSH_MAX_INTERVAL, int(ad.get("interval_min", 120))))
+    except (TypeError, ValueError):
+        ad["interval_min"] = 120
+    ad["times"] = ",".join(_parse_ad_times(str(ad.get("times", ""))))
+    ad["text"] = str(ad.get("text", "") or "")
+    if not isinstance(ad.get(AD_PUSH_MESSAGE_KEY), dict):
+        ad[AD_PUSH_MESSAGE_KEY] = None
+    ad["pin"] = bool(ad.get("pin", False))
+    return ad
+
+
+def _get_group_ads(cfg: dict) -> list[dict]:
+    ads = cfg.get("ad_push_ads")
+    if not isinstance(ads, list):
+        legacy_configured = bool(
+            cfg.get("ad_push_enabled")
+            or cfg.get(AD_PUSH_MESSAGE_KEY)
+            or str(cfg.get("ad_push_text", "")).strip()
+            or str(cfg.get("ad_push_times", "")).strip()
+        )
+        ads = []
+        if legacy_configured:
+            ads = [_normalize_group_ad({
+                "id": 1,
+                "enabled": cfg.get("ad_push_enabled", False),
+                "mode": cfg.get("ad_push_mode", "interval"),
+                "interval_min": cfg.get("ad_push_interval_min", 120),
+                "times": cfg.get("ad_push_times", ""),
+                "text": cfg.get("ad_push_text", ""),
+                AD_PUSH_MESSAGE_KEY: cfg.get(AD_PUSH_MESSAGE_KEY),
+            }, 1)]
+        cfg["ad_push_ads"] = ads
+
+    normalized = []
+    used = set()
+    for index, raw_ad in enumerate(ads[:MAX_GROUP_ADS], start=1):
+        if not isinstance(raw_ad, dict):
+            continue
+        try:
+            ad_id = int(raw_ad.get("id", index))
+        except (TypeError, ValueError):
+            ad_id = index
+        while ad_id <= 0 or ad_id in used:
+            ad_id += 1
+        used.add(ad_id)
+        normalized.append(_normalize_group_ad(raw_ad, ad_id))
+    cfg["ad_push_ads"] = normalized
+    cfg["ad_push_next_id"] = max(used, default=0) + 1
+    return normalized
+
+
+def _find_group_ad(cfg: dict, ad_id) -> Optional[dict]:
+    try:
+        ad_id = int(ad_id)
+    except (TypeError, ValueError):
+        return None
+    for ad in _get_group_ads(cfg):
+        if ad.get("id") == ad_id:
+            return ad
+    return None
+
+
+def _group_ad_ready(ad: dict) -> bool:
+    return bool(isinstance(ad.get(AD_PUSH_MESSAGE_KEY), dict) or str(ad.get("text", "")).strip())
+
+
 def _build_ad_push_settings_text(chat_id: str, cfg: dict) -> str:
-    mode = str(cfg.get("ad_push_mode", "interval"))
-    interval = int(cfg.get("ad_push_interval_min", 120))
-    times = str(cfg.get("ad_push_times", "")).strip() or "未设置"
-    text = (
-        "已设置"
-        if isinstance(cfg.get(AD_PUSH_MESSAGE_KEY), dict)
-        or str(cfg.get("ad_push_text", "")).strip()
-        else "未设置"
-    )
-    enabled = "✅ 开启" if bool(cfg.get("ad_push_enabled", False)) else "🚫 关闭"
+    ads = _get_group_ads(cfg)
     lines = [
-        "📢 广告推送设置",
-        f"状态：{enabled}",
-        f"模式：{'定时' if mode == 'fixed' else '间隔'}",
-        f"间隔：每 {interval} 分钟",
-        f"定时：{times}",
-        f"消息：{text}",
+        "📢 本群广告推送",
+        f"广告数量：{len(ads)} / {MAX_GROUP_ADS}",
+        "",
+        "每条广告可独立开关、设置间隔/定时模式，并可立即发送。",
     ]
+    if not ads:
+        lines.append("\n当前没有广告，请点击“➕ 新增广告”。")
+    for ad in ads:
+        lines.append(
+            f"#{ad['id']} {'✅' if ad.get('enabled') else '🚫'} "
+            f"{'定时' if ad.get('mode') == 'fixed' else '间隔'} · "
+            f"{'已设置消息' if _group_ad_ready(ad) else '未设置消息'}"
+        )
     return "\n".join(lines)
 
 
 def _build_ad_push_settings_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardMarkup:
-    enabled = bool(cfg.get("ad_push_enabled", False))
-    rows = [
-        [
+    ads = _get_group_ads(cfg)
+    rows = []
+    for ad in ads:
+        ad_id = ad["id"]
+        rows.append([
             InlineKeyboardButton(
-                f"{'✅' if enabled else '🚫'} 广告推送",
-                callback_data=f"{CALLBACK_PREFIX}:toggle:{chat_id}:ad_push_enabled",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "📝 文案设置", callback_data=f"{CALLBACK_PREFIX}:ad_text:{chat_id}"
+                f"{'✅' if ad.get('enabled') else '🚫'} #{ad_id}",
+                callback_data=f"{CALLBACK_PREFIX}:ad_multi_toggle:{chat_id}:{ad_id}",
             ),
             InlineKeyboardButton(
-                "📎 推送消息", callback_data=f"{CALLBACK_PREFIX}:ad_message:{chat_id}"
+                f"⚙️ 编辑广告 #{ad_id}",
+                callback_data=f"{CALLBACK_PREFIX}:ad_multi_open:{chat_id}:{ad_id}",
             ),
-        ],
-        [
-            InlineKeyboardButton(
-                "🔀 推送模式", callback_data=f"{CALLBACK_PREFIX}:ad_mode:{chat_id}"
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "⏱ 广告间隔", callback_data=f"{CALLBACK_PREFIX}:ad_interval:{chat_id}"
-            ),
-            InlineKeyboardButton(
-                "🕒 广告定时", callback_data=f"{CALLBACK_PREFIX}:ad_times:{chat_id}"
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "⬅️ 返回群设置", callback_data=f"{CALLBACK_PREFIX}:open:{chat_id}"
-            )
-        ],
-    ]
+        ])
+    if len(ads) < MAX_GROUP_ADS:
+        rows.append([InlineKeyboardButton("➕ 新增广告", callback_data=f"{CALLBACK_PREFIX}:ad_multi_add:{chat_id}")])
+    rows.append([InlineKeyboardButton("⬅️ 返回群设置", callback_data=f"{CALLBACK_PREFIX}:open:{chat_id}")])
     return InlineKeyboardMarkup(rows)
 
 
-def _default_global_ad_push_config() -> dict:
+def _build_group_ad_detail_text(chat_id: str, ad: dict) -> str:
+    return "\n".join([
+        f"📢 本群广告 #{ad['id']}",
+        f"状态：{'✅ 开启' if ad.get('enabled') else '🚫 关闭'}",
+        f"模式：{'定时' if ad.get('mode') == 'fixed' else '间隔'}",
+        f"间隔：每 {ad.get('interval_min')} 分钟",
+        f"定时：{ad.get('times') or '未设置'}",
+        f"消息：{'已设置' if _group_ad_ready(ad) else '未设置'}",
+        f"置顶：{'✅ 开启' if ad.get('pin') else '🚫 关闭'}（机器人有权限时执行）",
+    ])
+
+
+def _build_group_ad_detail_keyboard(chat_id: str, ad: dict) -> InlineKeyboardMarkup:
+    ad_id = ad["id"]
+    mode = ad.get("mode", "interval")
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"{'✅' if ad.get('enabled') else '🚫'} 启用此广告",
+            callback_data=f"{CALLBACK_PREFIX}:ad_multi_toggle:{chat_id}:{ad_id}",
+        )],
+        [
+            InlineKeyboardButton("📝 文案", callback_data=f"{CALLBACK_PREFIX}:ad_multi_text:{chat_id}:{ad_id}"),
+            InlineKeyboardButton("📎 推送消息", callback_data=f"{CALLBACK_PREFIX}:ad_multi_message:{chat_id}:{ad_id}"),
+        ],
+        [
+            InlineKeyboardButton(f"{'✅' if mode == 'interval' else '⬜'} 间隔模式", callback_data=f"{CALLBACK_PREFIX}:ad_multi_mode_interval:{chat_id}:{ad_id}"),
+            InlineKeyboardButton(f"{'✅' if mode == 'fixed' else '⬜'} 定时模式", callback_data=f"{CALLBACK_PREFIX}:ad_multi_mode_fixed:{chat_id}:{ad_id}"),
+        ],
+        [
+            InlineKeyboardButton("⏱ 设置间隔", callback_data=f"{CALLBACK_PREFIX}:ad_multi_interval:{chat_id}:{ad_id}"),
+            InlineKeyboardButton("🕒 设置定时", callback_data=f"{CALLBACK_PREFIX}:ad_multi_times:{chat_id}:{ad_id}"),
+        ],
+        [
+            InlineKeyboardButton(
+                f"{'✅' if ad.get('pin') else '🚫'} 发送后置顶",
+                callback_data=f"{CALLBACK_PREFIX}:ad_multi_pin:{chat_id}:{ad_id}",
+            ),
+            InlineKeyboardButton("🚀 立即发送", callback_data=f"{CALLBACK_PREFIX}:ad_multi_send_now:{chat_id}:{ad_id}"),
+        ],
+        [InlineKeyboardButton("🗑 删除此广告", callback_data=f"{CALLBACK_PREFIX}:ad_multi_delete:{chat_id}:{ad_id}")],
+        [InlineKeyboardButton("⬅️ 返回广告列表", callback_data=f"{CALLBACK_PREFIX}:ad_push_menu:{chat_id}")],
+    ])
+
+
+MAX_GLOBAL_ADS = 20
+
+
+def _default_global_ad(ad_id: int) -> dict:
     return {
+        "id": int(ad_id),
         "enabled": False,
         "mode": "interval",
         "interval_min": 120,
@@ -446,20 +563,73 @@ def _default_global_ad_push_config() -> dict:
         "text": "",
         GLOBAL_AD_PUSH_MESSAGE_KEY: None,
         "exclude_group_ids": [],
+        "pin": False,
     }
+
+
+def _default_global_ad_push_config() -> dict:
+    return {"ads": [], "next_id": 1}
+
+
+def _normalize_global_ad(raw: dict, ad_id: int) -> dict:
+    ad = _default_global_ad(ad_id)
+    if isinstance(raw, dict):
+        ad.update({key: raw[key] for key in ad if key in raw})
+    ad["id"] = int(ad_id)
+    ad["enabled"] = bool(ad.get("enabled", False))
+    ad["mode"] = "fixed" if str(ad.get("mode", "interval")).lower() == "fixed" else "interval"
+    try:
+        ad["interval_min"] = max(AD_PUSH_MIN_INTERVAL, min(AD_PUSH_MAX_INTERVAL, int(ad.get("interval_min", 120))))
+    except (TypeError, ValueError):
+        ad["interval_min"] = 120
+    ad["times"] = ",".join(_parse_ad_times(str(ad.get("times", ""))))
+    ad["text"] = str(ad.get("text", "") or "")
+    if not isinstance(ad.get(GLOBAL_AD_PUSH_MESSAGE_KEY), dict):
+        ad[GLOBAL_AD_PUSH_MESSAGE_KEY] = None
+    ad["pin"] = bool(ad.get("pin", False))
+    if not isinstance(ad.get("exclude_group_ids"), list):
+        ad["exclude_group_ids"] = []
+    ad["exclude_group_ids"] = list(dict.fromkeys(
+        str(group_id) for group_id in ad["exclude_group_ids"] if str(group_id).strip()
+    ))
+    return ad
 
 
 def _get_global_ad_push_config() -> dict:
     raw = load_json(GLOBAL_AD_PUSH_FILE)
-    cfg = raw if isinstance(raw, dict) else {}
-    defaults = _default_global_ad_push_config()
+    raw = raw if isinstance(raw, dict) else {}
     changed = False
-    for key, value in defaults.items():
-        if key not in cfg:
-            cfg[key] = value
+    ads = raw.get("ads")
+    if not isinstance(ads, list):
+        # Migrate the legacy one-ad configuration into the new list format.
+        legacy_keys = {"enabled", "mode", "interval_min", "times", "text", GLOBAL_AD_PUSH_MESSAGE_KEY, "exclude_group_ids"}
+        if any(key in raw for key in legacy_keys):
+            ads = [_normalize_global_ad(raw, 1)]
+        else:
+            ads = []
+        changed = True
+
+    normalized_ads = []
+    used_ids = set()
+    for index, raw_ad in enumerate(ads[:MAX_GLOBAL_ADS], start=1):
+        if not isinstance(raw_ad, dict):
             changed = True
-    if not isinstance(cfg.get("exclude_group_ids"), list):
-        cfg["exclude_group_ids"] = []
+            continue
+        try:
+            ad_id = int(raw_ad.get("id", index))
+        except (TypeError, ValueError):
+            ad_id = index
+        while ad_id <= 0 or ad_id in used_ids:
+            ad_id += 1
+        used_ids.add(ad_id)
+        ad = _normalize_global_ad(raw_ad, ad_id)
+        if ad != raw_ad:
+            changed = True
+        normalized_ads.append(ad)
+
+    next_id = max(used_ids, default=0) + 1
+    cfg = {"ads": normalized_ads, "next_id": next_id}
+    if raw.get("ads") != normalized_ads or raw.get("next_id") != next_id:
         changed = True
     if changed:
         save_json(GLOBAL_AD_PUSH_FILE, cfg)
@@ -469,11 +639,37 @@ def _get_global_ad_push_config() -> dict:
 def _save_global_ad_push_config(cfg: dict):
     if not isinstance(cfg, dict):
         cfg = _default_global_ad_push_config()
-    save_json(GLOBAL_AD_PUSH_FILE, cfg)
+    ads = cfg.get("ads") if isinstance(cfg.get("ads"), list) else []
+    normalized = {"ads": [], "next_id": 1}
+    used_ids = set()
+    for index, raw_ad in enumerate(ads[:MAX_GLOBAL_ADS], start=1):
+        if not isinstance(raw_ad, dict):
+            continue
+        try:
+            ad_id = int(raw_ad.get("id", index))
+        except (TypeError, ValueError):
+            ad_id = index
+        while ad_id <= 0 or ad_id in used_ids:
+            ad_id += 1
+        used_ids.add(ad_id)
+        normalized["ads"].append(_normalize_global_ad(raw_ad, ad_id))
+    normalized["next_id"] = max(used_ids, default=0) + 1
+    save_json(GLOBAL_AD_PUSH_FILE, normalized)
 
 
-def _global_ad_excluded_groups_text(cfg: dict, groups: dict) -> str:
-    excluded = [str(x) for x in cfg.get("exclude_group_ids", []) if str(x).strip()]
+def _find_global_ad(cfg: dict, ad_id) -> Optional[dict]:
+    try:
+        ad_id = int(ad_id)
+    except (TypeError, ValueError):
+        return None
+    for ad in cfg.get("ads", []):
+        if isinstance(ad, dict) and ad.get("id") == ad_id:
+            return ad
+    return None
+
+
+def _global_ad_excluded_groups_text(ad: dict, groups: dict) -> str:
+    excluded = [str(x) for x in ad.get("exclude_group_ids", []) if str(x).strip()]
     if not excluded:
         return "未设置"
     labels = []
@@ -484,75 +680,177 @@ def _global_ad_excluded_groups_text(cfg: dict, groups: dict) -> str:
     return "、".join(labels) + suffix
 
 
-def _build_global_ad_push_settings_text(cfg: dict, groups: dict) -> str:
-    mode = str(cfg.get("mode", "interval"))
-    interval = int(cfg.get("interval_min", 120))
-    times = str(cfg.get("times", "")).strip() or "未设置"
-    text = (
-        "已设置"
-        if isinstance(cfg.get(GLOBAL_AD_PUSH_MESSAGE_KEY), dict)
-        or str(cfg.get("text", "")).strip()
-        else "未设置"
-    )
-    enabled = "✅ 开启" if bool(cfg.get("enabled", False)) else "🚫 关闭"
-    total_groups = sum(
-        1
-        for _, group_cfg in (groups or {}).items()
+def _active_global_ad_groups(groups: dict) -> list[tuple[str, dict]]:
+    return [
+        (str(chat_id), group_cfg)
+        for chat_id, group_cfg in (groups or {}).items()
         if isinstance(group_cfg, dict)
         and bool(group_cfg.get("bot_in_group", False))
         and bool(group_cfg.get("enabled", True))
         and bool(group_cfg.get("bot_enabled", True))
-    )
-    excluded = len([x for x in cfg.get("exclude_group_ids", []) if str(x).strip()])
-    lines = [
-        "📢 全群广告推送设置",
-        f"状态：{enabled}",
-        f"模式：{'定时' if mode == 'fixed' else '间隔'}",
-        f"间隔：每 {interval} 分钟",
-        f"定时：{times}",
-        f"消息：{text}",
-        f"可发送群：{max(0, total_groups - excluded)} / {total_groups}",
-        f"排除群：{html.escape(_global_ad_excluded_groups_text(cfg, groups))}",
     ]
+
+
+def _global_ad_payload_ready(ad: dict) -> bool:
+    return bool(isinstance(ad.get(GLOBAL_AD_PUSH_MESSAGE_KEY), dict) or str(ad.get("text", "")).strip())
+
+
+def _global_ad_mode_text(ad: dict) -> str:
+    return "定时" if ad.get("mode") == "fixed" else "间隔"
+
+
+def _build_global_ad_push_settings_text(cfg: dict, groups: dict) -> str:
+    ads = cfg.get("ads", [])
+    active_groups = _active_global_ad_groups(groups)
+    lines = [
+        "📢 全群广告推送",
+        f"广告数量：{len(ads)} / {MAX_GLOBAL_ADS}",
+        f"可发送群：{len(active_groups)} 个",
+        "",
+        "选择下方广告进行编辑；每条广告可独立开关、设置模式和排除群。",
+    ]
+    if not ads:
+        lines.append("\n当前没有广告，请点击“➕ 新增广告”。")
+    else:
+        for ad in ads:
+            state = "✅" if ad.get("enabled") else "🚫"
+            ready = "已设置消息" if _global_ad_payload_ready(ad) else "未设置消息"
+            lines.append(f"#{ad['id']} {state} {_global_ad_mode_text(ad)} · {ready}")
     return "\n".join(lines)
 
 
 def _build_global_ad_push_settings_keyboard(cfg: dict) -> InlineKeyboardMarkup:
-    enabled = bool(cfg.get("enabled", False))
-    rows = [
-        [
+    rows = []
+    for ad in cfg.get("ads", []):
+        ad_id = ad.get("id")
+        rows.append([
             InlineKeyboardButton(
-                f"{'✅' if enabled else '🚫'} 全群广告推送",
-                callback_data=f"{CALLBACK_PREFIX}:global_ad_toggle",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "📝 文案设置", callback_data=f"{CALLBACK_PREFIX}:global_ad_text"
+                f"{'✅' if ad.get('enabled') else '🚫'} #{ad_id}",
+                callback_data=f"{CALLBACK_PREFIX}:global_ad_toggle:{ad_id}",
             ),
             InlineKeyboardButton(
-                "📎 推送消息", callback_data=f"{CALLBACK_PREFIX}:global_ad_message"
+                f"⚙️ 编辑广告 #{ad_id}",
+                callback_data=f"{CALLBACK_PREFIX}:global_ad_open:{ad_id}",
             ),
-        ],
-        [
-            InlineKeyboardButton(
-                "🔀 推送模式", callback_data=f"{CALLBACK_PREFIX}:global_ad_mode"
-            ),
-            InlineKeyboardButton(
-                "🚫 排除群", callback_data=f"{CALLBACK_PREFIX}:global_ad_excludes"
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "⏱ 广告间隔", callback_data=f"{CALLBACK_PREFIX}:global_ad_interval"
-            ),
-            InlineKeyboardButton(
-                "🕒 广告定时", callback_data=f"{CALLBACK_PREFIX}:global_ad_times"
-            ),
-        ],
-        [InlineKeyboardButton("⬅️ 返回", callback_data="start:back")],
-    ]
+        ])
+    if len(cfg.get("ads", [])) < MAX_GLOBAL_ADS:
+        rows.append([InlineKeyboardButton("➕ 新增广告", callback_data=f"{CALLBACK_PREFIX}:global_ad_add")])
+    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
     return InlineKeyboardMarkup(rows)
+
+
+def _build_global_ad_detail_text(ad: dict, groups: dict) -> str:
+    total_groups = len(_active_global_ad_groups(groups))
+    excluded = len(ad.get("exclude_group_ids", []))
+    message = "已设置" if _global_ad_payload_ready(ad) else "未设置"
+    return "\n".join([
+        f"📢 全群广告 #{ad['id']}",
+        f"状态：{'✅ 开启' if ad.get('enabled') else '🚫 关闭'}",
+        f"模式：{_global_ad_mode_text(ad)}",
+        f"间隔：每 {ad.get('interval_min')} 分钟",
+        f"定时：{ad.get('times') or '未设置'}",
+        f"消息：{message}",
+        f"可发送群：{max(0, total_groups - excluded)} / {total_groups}",
+        f"排除群：{html.escape(_global_ad_excluded_groups_text(ad, groups))}",
+        f"置顶：{'✅ 开启' if ad.get('pin') else '🚫 关闭'}（机器人有权限时执行）",
+    ])
+
+
+def _build_global_ad_detail_keyboard(ad: dict) -> InlineKeyboardMarkup:
+    ad_id = ad["id"]
+    mode = ad.get("mode", "interval")
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"{'✅' if ad.get('enabled') else '🚫'} 启用此广告",
+            callback_data=f"{CALLBACK_PREFIX}:global_ad_toggle:{ad_id}",
+        )],
+        [
+            InlineKeyboardButton("📝 文案", callback_data=f"{CALLBACK_PREFIX}:global_ad_text:{ad_id}"),
+            InlineKeyboardButton("📎 推送消息", callback_data=f"{CALLBACK_PREFIX}:global_ad_message:{ad_id}"),
+        ],
+        [
+            InlineKeyboardButton(
+                f"{'✅' if mode == 'interval' else '⬜'} 间隔模式",
+                callback_data=f"{CALLBACK_PREFIX}:global_ad_mode_interval:{ad_id}",
+            ),
+            InlineKeyboardButton(
+                f"{'✅' if mode == 'fixed' else '⬜'} 定时模式",
+                callback_data=f"{CALLBACK_PREFIX}:global_ad_mode_fixed:{ad_id}",
+            ),
+        ],
+        [
+            InlineKeyboardButton("⏱ 设置间隔", callback_data=f"{CALLBACK_PREFIX}:global_ad_interval:{ad_id}"),
+            InlineKeyboardButton("🕒 设置定时", callback_data=f"{CALLBACK_PREFIX}:global_ad_times:{ad_id}"),
+        ],
+        [
+            InlineKeyboardButton("🚫 排除群", callback_data=f"{CALLBACK_PREFIX}:global_ad_excludes:{ad_id}"),
+            InlineKeyboardButton(
+                f"{'✅' if ad.get('pin') else '🚫'} 发送后置顶",
+                callback_data=f"{CALLBACK_PREFIX}:global_ad_pin:{ad_id}",
+            ),
+        ],
+        [InlineKeyboardButton("🚀 立即发送", callback_data=f"{CALLBACK_PREFIX}:global_ad_send_now:{ad_id}")],
+        [InlineKeyboardButton("🗑 删除此广告", callback_data=f"{CALLBACK_PREFIX}:global_ad_delete:{ad_id}")],
+        [InlineKeyboardButton("⬅️ 返回广告列表", callback_data=f"{CALLBACK_PREFIX}:global_ad_menu")],
+    ])
+
+
+def _build_global_ad_exclude_keyboard(ad: dict, groups: dict) -> InlineKeyboardMarkup:
+    excluded = {str(item) for item in ad.get("exclude_group_ids", [])}
+    rows = []
+    for chat_id, group_cfg in _active_global_ad_groups(groups):
+        title = _group_title(chat_id, group_cfg)[:35]
+        rows.append([InlineKeyboardButton(
+            f"{'🚫' if chat_id in excluded else '✅'} {title}",
+            callback_data=f"{CALLBACK_PREFIX}:global_ad_exclude_toggle:{ad['id']}:{chat_id}",
+        )])
+    if not rows:
+        rows.append([InlineKeyboardButton("当前没有可选择的群", callback_data=f"{CALLBACK_PREFIX}:global_ad_open:{ad['id']}")])
+    rows.append([InlineKeyboardButton("⬅️ 返回广告", callback_data=f"{CALLBACK_PREFIX}:global_ad_open:{ad['id']}")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _pin_ad_message_if_enabled(context: ContextTypes.DEFAULT_TYPE, chat_id: int, sent_message, ad: dict) -> bool:
+    """Pin an ad message only when the option is enabled and Bot API permits it."""
+    if not bool(ad.get("pin", False)):
+        return False
+    message_id = getattr(sent_message, "message_id", None)
+    if not message_id:
+        return False
+    try:
+        await context.bot.pin_chat_message(
+            chat_id=chat_id,
+            message_id=message_id,
+            disable_notification=True,
+        )
+        return True
+    except Exception as exc:
+        # Sending succeeded; pin privilege is optional, so do not fail the ad.
+        print(f"⚠️ 广告置顶跳过 chat={chat_id} message={message_id}: {exc}")
+        return False
+
+
+async def _send_global_ad_now(
+    context: ContextTypes.DEFAULT_TYPE, ad: dict, groups: dict
+) -> tuple[int, int, str]:
+    if not _global_ad_payload_ready(ad):
+        return 0, 0, "请先设置广告文案或推送消息。"
+    payload = ad.get(GLOBAL_AD_PUSH_MESSAGE_KEY)
+    if not isinstance(payload, dict):
+        payload = {"type": "text", "text": str(ad.get("text", "")).strip()}
+    excluded = {str(item) for item in ad.get("exclude_group_ids", [])}
+    sent = failed = 0
+    for chat_id, _group_cfg in _active_global_ad_groups(groups):
+        if chat_id in excluded:
+            continue
+        try:
+            sent_message = await send_message_payload(context.bot, chat_id=int(chat_id), payload=payload)
+            await _pin_ad_message_if_enabled(context, int(chat_id), sent_message, ad)
+            sent += 1
+        except Exception as exc:
+            failed += 1
+            print(f"⚠️ 全群广告立即发送失败 ad={ad.get('id')} chat={chat_id}: {exc}")
+    return sent, failed, ""
 
 
 async def _open_global_ad_push_settings_panel(query, context: ContextTypes.DEFAULT_TYPE):
@@ -891,15 +1189,7 @@ def _build_group_panel_text(
     username_text = f"@{username}" if username else "未设置"
     spam_limit_value = int(cfg.get("spam_limit_max_per_minute", 10))
     interval = int(cfg.get("active_speak_interval_min", ACTIVE_SPEAK_DEFAULT_INTERVAL))
-    ad_mode = str(cfg.get("ad_push_mode", "interval"))
-    ad_interval = int(cfg.get("ad_push_interval_min", 120))
-    ad_times = str(cfg.get("ad_push_times", "")).strip() or "未设置"
-    ad_has_text = (
-        "已设置"
-        if isinstance(cfg.get(AD_PUSH_MESSAGE_KEY), dict)
-        or str(cfg.get("ad_push_text", "")).strip()
-        else "未设置"
-    )
+    group_ads = _get_group_ads(cfg)
     business_coop = (
         _normalize_business_coop_link(cfg.get("business_coop_link", "")) or "未设置"
     )
@@ -959,11 +1249,9 @@ def _build_group_panel_text(
         lines.append(
             f"邀请积分规则：每邀请 1 人 {invite_points['amount']} 分 每日上限 {invite_points['daily_limit']} 分"
         )
-    if bot_is_admin and bool(cfg.get("ad_push_enabled", False)):
-        lines.append(
-            f"广告推送：模式={'定时' if ad_mode == 'fixed' else '间隔'} "
-            f"间隔={ad_interval} 分钟 定时={ad_times} 文案={ad_has_text}"
-        )
+    if bot_is_admin and group_ads:
+        enabled_ad_count = sum(1 for ad in group_ads if ad.get("enabled"))
+        lines.append(f"广告推送：{enabled_ad_count}/{len(group_ads)} 条已开启")
     if bot_is_admin and bool(cfg.get("force_subscribe", False)):
         force_channel = _get_force_channel(chat_id)
         lines.append(f"强制关注频道：{force_channel if force_channel else '未设置'}")
@@ -1671,82 +1959,156 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             reply_markup=_build_global_ai_reply_settings_keyboard(cfg),
         )
 
-    if action == "global_ad_menu":
-        if not has_admin_permission(context, user_id, "global_ad_config"):
-            return await query.answer("你没有全群广告推送权限。", show_alert=True)
-        return await _open_global_ad_push_settings_panel(query, context)
-
-    if action == "global_ad_toggle":
+    if action.startswith("global_ad"):
         if not has_admin_permission(context, user_id, "global_ad_config"):
             return await query.answer("你没有全群广告推送权限。", show_alert=True)
         cfg = _get_global_ad_push_config()
-        cfg["enabled"] = not bool(cfg.get("enabled", False))
-        _save_global_ad_push_config(cfg)
-        await query.answer("✅ 已更新", show_alert=False)
-        return await query.edit_message_text(
-            _build_global_ad_push_settings_text(cfg, data),
-            reply_markup=_build_global_ad_push_settings_keyboard(cfg),
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
+        groups = get_group_whitelist(context)
 
-    if action in {
-        "global_ad_text",
-        "global_ad_message",
-        "global_ad_interval",
-        "global_ad_times",
-        "global_ad_mode",
-        "global_ad_excludes",
-    }:
-        if not has_admin_permission(context, user_id, "global_ad_config"):
-            return await query.answer("你没有全群广告推送权限。", show_alert=True)
-        stage_map = {
-            "global_ad_text": "global_ad_text",
-            "global_ad_message": "global_ad_message",
-            "global_ad_interval": "global_ad_interval",
-            "global_ad_times": "global_ad_times",
-            "global_ad_mode": "global_ad_mode",
-            "global_ad_excludes": "global_ad_excludes",
-        }
-        context.user_data["group_setting_stage"] = stage_map[action]
-        back_markup = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:global_ad_back")]]
-        )
-        await query.answer()
-        if action == "global_ad_text":
+        if action in {"global_ad_menu", "global_ad_back"}:
+            context.user_data.pop("group_setting_stage", None)
+            await query.answer()
             return await query.edit_message_text(
-                "请输入全群广告文案，发送「清空」可移除。",
-                reply_markup=back_markup,
+                _build_global_ad_push_settings_text(cfg, groups),
+                reply_markup=_build_global_ad_push_settings_keyboard(cfg),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
             )
-        if action == "global_ad_message":
+
+        if action == "global_ad_add":
+            if len(cfg.get("ads", [])) >= MAX_GLOBAL_ADS:
+                return await query.answer(f"最多只能设置 {MAX_GLOBAL_ADS} 条广告。", show_alert=True)
+            ad_id = int(cfg.get("next_id", 1) or 1)
+            cfg.setdefault("ads", []).append(_default_global_ad(ad_id))
+            cfg["next_id"] = ad_id + 1
+            _save_global_ad_push_config(cfg)
+            ad = _find_global_ad(cfg, ad_id)
+            await query.answer("已新增广告，请继续设置内容。")
             return await query.edit_message_text(
-                "请发送要用于全群广告推送的消息。\n支持文本、图片、视频、文件、语音等常见类型。\n发送“清空”可移除当前消息。",
-                reply_markup=back_markup,
+                _build_global_ad_detail_text(ad, groups),
+                reply_markup=_build_global_ad_detail_keyboard(ad),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
             )
-        if action == "global_ad_interval":
+
+        try:
+            ad_id = int(parts[2])
+        except (IndexError, ValueError):
+            return await query.answer("广告参数无效。", show_alert=True)
+        ad = _find_global_ad(cfg, ad_id)
+        if not ad:
+            return await query.answer("广告不存在或已删除。", show_alert=True)
+
+        if action == "global_ad_open":
+            await query.answer()
             return await query.edit_message_text(
-                f"请输入全群广告推送间隔（分钟，{AD_PUSH_MIN_INTERVAL}-{AD_PUSH_MAX_INTERVAL}）。",
-                reply_markup=back_markup,
+                _build_global_ad_detail_text(ad, groups),
+                reply_markup=_build_global_ad_detail_keyboard(ad),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
             )
-        if action == "global_ad_times":
+
+        if action == "global_ad_toggle":
+            ad["enabled"] = not bool(ad.get("enabled", False))
+            _save_global_ad_push_config(cfg)
+            await query.answer("已开启此广告" if ad["enabled"] else "已关闭此广告")
             return await query.edit_message_text(
-                "请输入定时时间，如：09:00,12:30,21:00",
-                reply_markup=back_markup,
+                _build_global_ad_detail_text(ad, groups),
+                reply_markup=_build_global_ad_detail_keyboard(ad),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
             )
-        if action == "global_ad_mode":
+
+        if action == "global_ad_delete":
+            cfg["ads"] = [item for item in cfg.get("ads", []) if item.get("id") != ad_id]
+            _save_global_ad_push_config(cfg)
+            await query.answer("广告已删除。")
             return await query.edit_message_text(
-                "请输入模式：间隔 或 定时",
-                reply_markup=back_markup,
+                _build_global_ad_push_settings_text(cfg, groups),
+                reply_markup=_build_global_ad_push_settings_keyboard(cfg),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
             )
+
+        if action in {"global_ad_mode_interval", "global_ad_mode_fixed"}:
+            ad["mode"] = "fixed" if action.endswith("fixed") else "interval"
+            _save_global_ad_push_config(cfg)
+            await query.answer(f"已切换为{_global_ad_mode_text(ad)}模式")
+            return await query.edit_message_text(
+                _build_global_ad_detail_text(ad, groups),
+                reply_markup=_build_global_ad_detail_keyboard(ad),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+
         if action == "global_ad_excludes":
+            await query.answer()
             return await query.edit_message_text(
-                "请输入要排除的群ID，支持空格、逗号或换行分隔。\n发送「清空」可移除全部排除群。",
-                reply_markup=back_markup,
+                f"🚫 广告 #{ad_id} 排除群设置\n\n点击群名称切换“排除/发送”。",
+                reply_markup=_build_global_ad_exclude_keyboard(ad, groups),
             )
 
-    if action == "global_ad_back":
-        context.user_data.pop("group_setting_stage", None)
-        return await _open_global_ad_push_settings_panel(query, context)
+        if action == "global_ad_exclude_toggle":
+            if len(parts) < 4:
+                return await query.answer("群参数无效。", show_alert=True)
+            chat_id = str(parts[3])
+            available = {group_id for group_id, _cfg in _active_global_ad_groups(groups)}
+            if chat_id not in available:
+                return await query.answer("该群不在当前机器人可发送的群列表中。", show_alert=True)
+            excluded = [str(item) for item in ad.get("exclude_group_ids", [])]
+            if chat_id in excluded:
+                excluded.remove(chat_id)
+                tip = "已恢复向该群发送"
+            else:
+                excluded.append(chat_id)
+                tip = "已排除该群"
+            ad["exclude_group_ids"] = excluded
+            _save_global_ad_push_config(cfg)
+            await query.answer(tip)
+            return await query.edit_message_reply_markup(
+                reply_markup=_build_global_ad_exclude_keyboard(ad, groups)
+            )
+
+        if action == "global_ad_pin":
+            ad["pin"] = not bool(ad.get("pin", False))
+            _save_global_ad_push_config(cfg)
+            await query.answer("已开启发送后置顶" if ad["pin"] else "已关闭发送后置顶")
+            return await query.edit_message_text(
+                _build_global_ad_detail_text(ad, groups),
+                reply_markup=_build_global_ad_detail_keyboard(ad),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+
+        if action == "global_ad_send_now":
+            await query.answer("正在立即发送…")
+            sent, failed, reason = await _send_global_ad_now(context, ad, groups)
+            if reason:
+                return await query.message.reply_text(f"❌ {reason}")
+            return await query.message.reply_text(
+                f"🚀 广告 #{ad_id} 已立即发送：成功 {sent} 个群，失败 {failed} 个群。"
+            )
+
+        if action in {"global_ad_text", "global_ad_message", "global_ad_interval", "global_ad_times"}:
+            field = action.removeprefix("global_ad_")
+            context.user_data["group_setting_stage"] = {
+                "kind": "global_ad",
+                "field": field,
+                "ad_id": ad_id,
+            }
+            back_markup = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ 返回广告", callback_data=f"{CALLBACK_PREFIX}:global_ad_open:{ad_id}")]]
+            )
+            prompts = {
+                "text": "请输入广告文案；发送“清空”可移除。",
+                "message": "请发送要用于全群推送的消息。支持文本、图片、视频、文件、语音等；发送“清空”可移除。",
+                "interval": f"请输入广告间隔（分钟，{AD_PUSH_MIN_INTERVAL}-{AD_PUSH_MAX_INTERVAL}）。",
+                "times": "请输入定时时间，如：09:00,12:30,21:00",
+            }
+            await query.answer()
+            return await query.edit_message_text(prompts[field], reply_markup=back_markup)
+
+        return await query.answer("未知广告操作。", show_alert=True)
 
     if action == "list":
         visible_data = await _visible_group_data_for_user(context, user_id, data)
@@ -1918,6 +2280,123 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         chat_id_str = parts[2]
         await query.answer()
         return await _open_ad_push_settings_panel(query, context, chat_id_str, user_id)
+
+    if action.startswith("ad_multi_"):
+        if len(parts) < 3:
+            return await query.answer("群参数无效。", show_alert=True)
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return await query.answer("群ID无效。", show_alert=True)
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        if not await _is_bot_group_admin(context, chat_id):
+            return await query.answer("机器人不是该群管理员，无法配置此项。", show_alert=True)
+        cfg = data.get(chat_id_str, {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        ads = _get_group_ads(cfg)
+
+        if action == "ad_multi_add":
+            if len(ads) >= MAX_GROUP_ADS:
+                return await query.answer(f"最多只能设置 {MAX_GROUP_ADS} 条广告。", show_alert=True)
+            ad_id = int(cfg.get("ad_push_next_id", 1) or 1)
+            ads.append(_default_group_ad(ad_id))
+            cfg["ad_push_ads"] = ads
+            cfg["ad_push_next_id"] = ad_id + 1
+            data[chat_id_str] = cfg
+            save_json(GROUP_LIST_FILE, data)
+            ad = _find_group_ad(cfg, ad_id)
+            await query.answer("已新增广告，请继续设置内容。")
+            return await query.edit_message_text(
+                _build_group_ad_detail_text(chat_id_str, ad),
+                reply_markup=_build_group_ad_detail_keyboard(chat_id_str, ad),
+            )
+
+        try:
+            ad_id = int(parts[3])
+        except (IndexError, ValueError):
+            return await query.answer("广告参数无效。", show_alert=True)
+        ad = _find_group_ad(cfg, ad_id)
+        if not ad:
+            return await query.answer("广告不存在或已删除。", show_alert=True)
+
+        if action == "ad_multi_open":
+            await query.answer()
+            return await query.edit_message_text(
+                _build_group_ad_detail_text(chat_id_str, ad),
+                reply_markup=_build_group_ad_detail_keyboard(chat_id_str, ad),
+            )
+        if action == "ad_multi_toggle":
+            ad["enabled"] = not bool(ad.get("enabled", False))
+            data[chat_id_str] = cfg
+            save_json(GROUP_LIST_FILE, data)
+            await query.answer("已开启此广告" if ad["enabled"] else "已关闭此广告")
+            return await query.edit_message_text(
+                _build_group_ad_detail_text(chat_id_str, ad),
+                reply_markup=_build_group_ad_detail_keyboard(chat_id_str, ad),
+            )
+        if action == "ad_multi_delete":
+            cfg["ad_push_ads"] = [item for item in ads if item.get("id") != ad_id]
+            data[chat_id_str] = cfg
+            save_json(GROUP_LIST_FILE, data)
+            await query.answer("广告已删除。")
+            return await query.edit_message_text(
+                _build_ad_push_settings_text(chat_id_str, cfg),
+                reply_markup=_build_ad_push_settings_keyboard(chat_id_str, cfg),
+            )
+        if action in {"ad_multi_mode_interval", "ad_multi_mode_fixed"}:
+            ad["mode"] = "fixed" if action.endswith("fixed") else "interval"
+            data[chat_id_str] = cfg
+            save_json(GROUP_LIST_FILE, data)
+            await query.answer("已切换推送模式")
+            return await query.edit_message_text(
+                _build_group_ad_detail_text(chat_id_str, ad),
+                reply_markup=_build_group_ad_detail_keyboard(chat_id_str, ad),
+            )
+        if action == "ad_multi_pin":
+            ad["pin"] = not bool(ad.get("pin", False))
+            data[chat_id_str] = cfg
+            save_json(GROUP_LIST_FILE, data)
+            await query.answer("已开启发送后置顶" if ad["pin"] else "已关闭发送后置顶")
+            return await query.edit_message_text(
+                _build_group_ad_detail_text(chat_id_str, ad),
+                reply_markup=_build_group_ad_detail_keyboard(chat_id_str, ad),
+            )
+        if action == "ad_multi_send_now":
+            if not _group_ad_ready(ad):
+                return await query.answer("请先设置广告文案或推送消息。", show_alert=True)
+            payload = ad.get(AD_PUSH_MESSAGE_KEY)
+            if not isinstance(payload, dict):
+                payload = {"type": "text", "text": str(ad.get("text", "")).strip()}
+            try:
+                sent_message = await send_message_payload(context.bot, chat_id=chat_id, payload=payload)
+                await _pin_ad_message_if_enabled(context, chat_id, sent_message, ad)
+            except Exception as exc:
+                return await query.answer(f"发送失败：{exc}", show_alert=True)
+            return await query.answer("🚀 已立即发送。", show_alert=True)
+        if action in {"ad_multi_text", "ad_multi_message", "ad_multi_interval", "ad_multi_times"}:
+            field = action.removeprefix("ad_multi_")
+            context.user_data["group_setting_stage"] = {
+                "kind": "group_ad",
+                "field": field,
+                "chat_id": chat_id_str,
+                "ad_id": ad_id,
+            }
+            prompts = {
+                "text": "请输入广告文案；发送“清空”可移除。",
+                "message": "请发送要推送的消息。支持文本、图片、视频、文件、语音等；发送“清空”可移除。",
+                "interval": f"请输入广告间隔（分钟，{AD_PUSH_MIN_INTERVAL}-{AD_PUSH_MAX_INTERVAL}）。",
+                "times": "请输入定时时间，如：09:00,12:30,21:00",
+            }
+            await query.answer()
+            return await query.edit_message_text(
+                prompts[field],
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⬅️ 返回广告", callback_data=f"{CALLBACK_PREFIX}:ad_multi_open:{chat_id_str}:{ad_id}")
+                ]]),
+            )
+        return await query.answer("未知广告操作。", show_alert=True)
 
     if action == "force_subscribe_menu" and len(parts) >= 3:
         chat_id_str = parts[2]
@@ -2552,12 +3031,145 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
         return
     stage = context.user_data.get("group_setting_stage")
 
-    if stage in {"talk_lottery_prize_add", "talk_lottery_prize_edit", "talk_lottery_trigger_rate"}:
+    if isinstance(stage, str) and stage in {"talk_lottery_prize_add", "talk_lottery_prize_edit", "talk_lottery_trigger_rate"}:
         handled = await _handle_talk_lottery_text(
             update, context, stage, str(context.user_data.get("group_setting_chat_id") or "")
         )
         if handled:
             raise ApplicationHandlerStop
+
+    if isinstance(stage, dict) and stage.get("kind") == "group_ad":
+        user = update.effective_user
+        chat_id_str = str(stage.get("chat_id") or "")
+        chat_id = _parse_chat_id(chat_id_str)
+        if not user or chat_id is None or not await _can_manage_group(context, user.id, chat_id):
+            context.user_data.pop("group_setting_stage", None)
+            return await update.message.reply_text("❌ 你没有该群的广告推送设置权限。")
+        data = get_group_whitelist(context)
+        cfg = data.get(chat_id_str, {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        ad = _find_group_ad(cfg, stage.get("ad_id"))
+        if not ad:
+            context.user_data.pop("group_setting_stage", None)
+            return await update.message.reply_text("❌ 该广告不存在或已删除。")
+        field = str(stage.get("field") or "")
+        text_value = (update.message.text or "").strip()
+        if text_value in {"取消", "返回"}:
+            context.user_data.pop("group_setting_stage", None)
+            return await update.message.reply_text("✅ 已取消。")
+        if field == "message":
+            if text_value in {"清空", "关闭"}:
+                ad[AD_PUSH_MESSAGE_KEY] = None
+                ad["text"] = ""
+            else:
+                try:
+                    ad[AD_PUSH_MESSAGE_KEY] = build_message_payload(update.message)
+                    ad["text"] = ""
+                except Exception as exc:
+                    return await update.message.reply_text(f"❌ 暂不支持该消息类型：{exc}")
+        elif field == "text":
+            if not text_value:
+                return await update.message.reply_text("❗ 请输入广告文案。")
+            if text_value in {"清空", "关闭"}:
+                ad[AD_PUSH_MESSAGE_KEY] = None
+                ad["text"] = ""
+            else:
+                ad[AD_PUSH_MESSAGE_KEY] = None
+                ad["text"] = text_value
+        elif field == "interval":
+            if not text_value.isdigit():
+                return await update.message.reply_text("❗ 请输入数字分钟。")
+            interval = int(text_value)
+            if not AD_PUSH_MIN_INTERVAL <= interval <= AD_PUSH_MAX_INTERVAL:
+                return await update.message.reply_text(f"❗ 间隔范围：{AD_PUSH_MIN_INTERVAL}-{AD_PUSH_MAX_INTERVAL} 分钟")
+            ad["interval_min"] = interval
+            ad["mode"] = "interval"
+        elif field == "times":
+            slots = _parse_ad_times(text_value)
+            if not slots:
+                return await update.message.reply_text("❗ 时间格式示例：09:00,12:30,21:00")
+            ad["times"] = ",".join(slots)
+            ad["mode"] = "fixed"
+        else:
+            context.user_data.pop("group_setting_stage", None)
+            return await update.message.reply_text("❌ 广告设置步骤无效。")
+        context.user_data.pop("group_setting_stage", None)
+        data[chat_id_str] = cfg
+        save_json(GROUP_LIST_FILE, data)
+        await update.message.reply_text(
+            _build_group_ad_detail_text(chat_id_str, ad),
+            reply_markup=_build_group_ad_detail_keyboard(chat_id_str, ad),
+        )
+        raise ApplicationHandlerStop
+
+    if isinstance(stage, dict) and stage.get("kind") == "global_ad":
+        user = update.effective_user
+        if not user or not has_admin_permission(context, user.id, "global_ad_config"):
+            context.user_data.pop("group_setting_stage", None)
+            return await update.message.reply_text("❌ 你没有全群广告推送权限。")
+        field = str(stage.get("field") or "")
+        ad_id = stage.get("ad_id")
+        cfg = _get_global_ad_push_config()
+        ad = _find_global_ad(cfg, ad_id)
+        if not ad:
+            context.user_data.pop("group_setting_stage", None)
+            return await update.message.reply_text("❌ 该广告不存在或已删除。")
+
+        text_value = (update.message.text or "").strip()
+        if text_value in {"取消", "返回"}:
+            context.user_data.pop("group_setting_stage", None)
+            return await update.message.reply_text("✅ 已取消。")
+
+        if field == "message":
+            if text_value in {"清空", "关闭"}:
+                ad[GLOBAL_AD_PUSH_MESSAGE_KEY] = None
+                ad["text"] = ""
+            else:
+                try:
+                    ad[GLOBAL_AD_PUSH_MESSAGE_KEY] = build_message_payload(update.message)
+                    ad["text"] = ""
+                except Exception as exc:
+                    return await update.message.reply_text(f"❌ 暂不支持该消息类型：{exc}")
+        elif field == "text":
+            if not text_value:
+                return await update.message.reply_text("❗ 请输入广告文案。")
+            if text_value in {"清空", "关闭"}:
+                ad[GLOBAL_AD_PUSH_MESSAGE_KEY] = None
+                ad["text"] = ""
+            else:
+                ad[GLOBAL_AD_PUSH_MESSAGE_KEY] = None
+                ad["text"] = text_value
+        elif field == "interval":
+            if not text_value.isdigit():
+                return await update.message.reply_text("❗ 请输入数字分钟。")
+            interval = int(text_value)
+            if not AD_PUSH_MIN_INTERVAL <= interval <= AD_PUSH_MAX_INTERVAL:
+                return await update.message.reply_text(
+                    f"❗ 间隔范围：{AD_PUSH_MIN_INTERVAL}-{AD_PUSH_MAX_INTERVAL} 分钟"
+                )
+            ad["interval_min"] = interval
+            ad["mode"] = "interval"
+        elif field == "times":
+            slots = _parse_ad_times(text_value)
+            if not slots:
+                return await update.message.reply_text("❗ 时间格式示例：09:00,12:30,21:00")
+            ad["times"] = ",".join(slots)
+            ad["mode"] = "fixed"
+        else:
+            context.user_data.pop("group_setting_stage", None)
+            return await update.message.reply_text("❌ 广告设置步骤无效。")
+
+        context.user_data.pop("group_setting_stage", None)
+        _save_global_ad_push_config(cfg)
+        groups = get_group_whitelist(context)
+        await update.message.reply_text(
+            _build_global_ad_detail_text(ad, groups),
+            reply_markup=_build_global_ad_detail_keyboard(ad),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        raise ApplicationHandlerStop
 
     if stage not in {
         "force_channel",
@@ -2580,12 +3192,6 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
         "lottery_display_text",
         "lottery_prize_add",
         "lottery_prize_edit",
-        "global_ad_text",
-        "global_ad_message",
-        "global_ad_interval",
-        "global_ad_times",
-        "global_ad_mode",
-        "global_ad_excludes",
     }:
         return
 
@@ -2593,94 +3199,6 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
     message = update.message
     if not message:
         return
-
-    if stage in {
-        "global_ad_text",
-        "global_ad_message",
-        "global_ad_interval",
-        "global_ad_times",
-        "global_ad_mode",
-        "global_ad_excludes",
-    }:
-        if not update.effective_user or not _is_current_bot_owner(
-            context, update.effective_user.id
-        ):
-            context.user_data.pop("group_setting_stage", None)
-            return await update.message.reply_text("❌ 只有机器人所有者可以设置。")
-
-        cfg = _get_global_ad_push_config()
-        if text in {"取消", "返回"}:
-            context.user_data.pop("group_setting_stage", None)
-            await update.message.reply_text("✅ 已取消。")
-        elif stage == "global_ad_message":
-            if text in {"清空", "关闭"}:
-                cfg[GLOBAL_AD_PUSH_MESSAGE_KEY] = None
-                cfg["text"] = ""
-                await update.message.reply_text("✅ 已清空全群推送消息。")
-            else:
-                try:
-                    cfg[GLOBAL_AD_PUSH_MESSAGE_KEY] = build_message_payload(message)
-                    cfg["text"] = ""
-                    await update.message.reply_text("✅ 全群推送消息已保存。")
-                except Exception as e:
-                    return await update.message.reply_text(f"❌ 暂不支持该消息类型：{e}")
-        elif stage == "global_ad_text":
-            if not text:
-                return await update.message.reply_text("❗ 请输入全群广告文案。")
-            if text in {"清空", "关闭"}:
-                cfg[GLOBAL_AD_PUSH_MESSAGE_KEY] = None
-                cfg["text"] = ""
-                await update.message.reply_text("✅ 已清空全群广告文案。")
-            else:
-                cfg[GLOBAL_AD_PUSH_MESSAGE_KEY] = None
-                cfg["text"] = text
-                await update.message.reply_text("✅ 全群广告文案已保存。")
-        elif stage == "global_ad_interval":
-            if not text or not text.isdigit():
-                return await update.message.reply_text("❗ 请输入数字分钟。")
-            interval = int(text)
-            if interval < AD_PUSH_MIN_INTERVAL or interval > AD_PUSH_MAX_INTERVAL:
-                return await update.message.reply_text(
-                    f"❗ 间隔范围：{AD_PUSH_MIN_INTERVAL}-{AD_PUSH_MAX_INTERVAL} 分钟"
-                )
-            cfg["mode"] = "interval"
-            cfg["interval_min"] = interval
-            await update.message.reply_text(f"✅ 已设置全群广告间隔：每 {interval} 分钟")
-        elif stage == "global_ad_times":
-            slots = _parse_ad_times(text)
-            if not slots:
-                return await update.message.reply_text(
-                    "❗ 时间格式示例：09:00,12:30,21:00"
-                )
-            cfg["mode"] = "fixed"
-            cfg["times"] = ",".join(slots)
-            await update.message.reply_text(f"✅ 已设置全群广告定时：{','.join(slots)}")
-        elif stage == "global_ad_mode":
-            if text not in {"间隔", "定时"}:
-                return await update.message.reply_text("❗ 模式仅支持：间隔 或 定时")
-            cfg["mode"] = "interval" if text == "间隔" else "fixed"
-            await update.message.reply_text(f"✅ 已切换全群广告推送模式为：{text}")
-        elif stage == "global_ad_excludes":
-            if text in {"清空", "关闭"}:
-                cfg["exclude_group_ids"] = []
-                await update.message.reply_text("✅ 已清空排除群。")
-            else:
-                ids = _parse_group_id_list(text)
-                if not ids:
-                    return await update.message.reply_text("❗ 请发送有效的群ID。")
-                cfg["exclude_group_ids"] = ids
-                await update.message.reply_text(f"✅ 已设置排除群：{len(ids)} 个。")
-
-        context.user_data.pop("group_setting_stage", None)
-        _save_global_ad_push_config(cfg)
-        groups = get_group_whitelist(context)
-        await update.message.reply_text(
-            _build_global_ad_push_settings_text(cfg, groups),
-            reply_markup=_build_global_ad_push_settings_keyboard(cfg),
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-        raise ApplicationHandlerStop
 
     chat_id_str = context.user_data.get("group_setting_chat_id")
     if not chat_id_str:
