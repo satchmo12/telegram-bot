@@ -498,9 +498,9 @@ async def ai_group_reply_handler(
         ChatType.GROUP,
         ChatType.SUPERGROUP,
     ):
-        print(
-            f"[AI][SKIP] 不是群聊，chat.type={chat.type}"
-        )
+        # print(
+        #     f"[AI][SKIP] 不是群聊，chat.type={chat.type}"
+        # )
         return
 
     chat_id = chat.id
@@ -510,7 +510,7 @@ async def ai_group_reply_handler(
     # ========================================================
 
     if not is_global_ai_reply_enabled():
-        print(f"[AI][SKIP] AI 回复总开关未开启，跳过群 {chat_id}")
+        # print(f"[AI][SKIP] AI 回复总开关未开启，跳过群 {chat_id}")
         return
 
     # ========================================================

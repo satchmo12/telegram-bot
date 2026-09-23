@@ -67,7 +67,11 @@ from utils import (
     safe_reply,
     save_json,
 )
-from channel.channel_force import unmute_force_subscribe_chat
+from channel.channel_force import (
+    get_force_subscribe_targets,
+    set_force_subscribe_targets,
+    unmute_force_subscribe_chat,
+)
 from forward.message_forward import build_message_payload, send_message_payload
 
 CALLBACK_PREFIX = "gcfg"
@@ -158,22 +162,21 @@ def _group_title(chat_id: str, cfg: dict) -> str:
     return title or f"群 {chat_id}"
 
 
+def _get_force_channels(chat_id: str) -> list[str]:
+    return get_force_subscribe_targets(chat_id)
+
+
+def _set_force_channels(chat_id: str, targets) -> None:
+    set_force_subscribe_targets(chat_id, targets)
+
+
 def _get_force_channel(chat_id: str) -> str:
-    data = load_json(FORCE_SUBSCRIBE_FILE)
-    if not isinstance(data, dict):
-        return ""
-    return str(data.get(chat_id, "")).strip()
+    """Compatibility helper for old call sites that only display one target."""
+    return "、".join(_get_force_channels(chat_id))
 
 
 def _set_force_channel(chat_id: str, channel_username: str):
-    data = load_json(FORCE_SUBSCRIBE_FILE)
-    if not isinstance(data, dict):
-        data = {}
-    if channel_username:
-        data[chat_id] = channel_username
-    else:
-        data.pop(chat_id, None)
-    save_json(FORCE_SUBSCRIBE_FILE, data)
+    _set_force_channels(chat_id, [channel_username] if channel_username else [])
 
 
 def _mark_force_subscribe_set_ts(chat_id: str, ts: Optional[int] = None):
@@ -893,12 +896,12 @@ async def _open_ad_push_settings_panel(
 def _build_force_subscribe_settings_text(chat_id: str, cfg: dict) -> str:
     force_on = bool(cfg.get("force_subscribe", False))
     new_only = bool(cfg.get("force_subscribe_new_only", False))
-    force_channel = _get_force_channel(chat_id)
+    force_channels = _get_force_channels(chat_id)
     lines = [
         "📢 强制关注设置",
         f"强制关注：{_toggle_text(force_on)}",
         f"仅新成员：{_toggle_text(new_only)}",
-        f"关注频道：{force_channel if force_channel else '未设置'}",
+        f"关注频道/群组：{'、'.join(force_channels) if force_channels else '未设置'}",
     ]
     return "\n".join(lines)
 
@@ -930,6 +933,58 @@ def _build_force_subscribe_settings_keyboard(
         ],
     ]
     return InlineKeyboardMarkup(rows)
+
+
+def _build_force_target_manager_keyboard(chat_id: str, targets: list[str]) -> InlineKeyboardMarkup:
+    rows = []
+    for index, target in enumerate(targets):
+        rows.append([
+            InlineKeyboardButton(
+                f"🗑 移除 {target}",
+                callback_data=f"{CALLBACK_PREFIX}:force_channel_remove:{chat_id}:{index}",
+            )
+        ])
+    if len(targets) < 10:
+        rows.append([
+            InlineKeyboardButton(
+                "➕ 添加频道/群组",
+                callback_data=f"{CALLBACK_PREFIX}:force_channel_add:{chat_id}",
+            )
+        ])
+    if targets:
+        rows.append([
+            InlineKeyboardButton(
+                "🧹 清空全部",
+                callback_data=f"{CALLBACK_PREFIX}:force_channel_clear:{chat_id}",
+            )
+        ])
+    rows.append([
+        InlineKeyboardButton(
+            "⬅️ 返回强制关注设置",
+            callback_data=f"{CALLBACK_PREFIX}:force_subscribe_back",
+        )
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _force_target_manager_text(chat_id: str) -> str:
+    targets = _get_force_channels(chat_id)
+    text = "📢 关注频道/群组管理\n\n"
+    if targets:
+        text += "当前目标：\n" + "\n".join(
+            f"{index + 1}. {target}" for index, target in enumerate(targets)
+        )
+    else:
+        text += "当前未设置关注目标。"
+    return text + "\n\n可单独添加或移除，不会影响其他已设置目标。"
+
+
+async def _open_force_target_manager(query, context: ContextTypes.DEFAULT_TYPE, chat_id: str):
+    targets = _get_force_channels(chat_id)
+    return await query.edit_message_text(
+        _force_target_manager_text(chat_id),
+        reply_markup=_build_force_target_manager_keyboard(chat_id, targets),
+    )
 
 
 async def _open_force_subscribe_settings_panel(
@@ -1253,8 +1308,8 @@ def _build_group_panel_text(
         enabled_ad_count = sum(1 for ad in group_ads if ad.get("enabled"))
         lines.append(f"广告推送：{enabled_ad_count}/{len(group_ads)} 条已开启")
     if bot_is_admin and bool(cfg.get("force_subscribe", False)):
-        force_channel = _get_force_channel(chat_id)
-        lines.append(f"强制关注频道：{force_channel if force_channel else '未设置'}")
+        force_channels = _get_force_channels(chat_id)
+        lines.append(f"强制关注：{'、'.join(force_channels) if force_channels else '未设置'}")
     if str(cfg.get("business_coop_link", "")).strip():
         lines.append(f"商业合作：{html.escape(business_coop)}")
     lines.append("")
@@ -2495,30 +2550,50 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         if not await _can_manage_group(context, user_id, chat_id):
             return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
         if not await _is_bot_group_admin(context, chat_id):
-            return await query.answer(
-                "机器人不是该群管理员，无法配置此项。", show_alert=True
-            )
-        context.user_data["group_setting_stage"] = "force_channel"
+            return await query.answer("机器人不是该群管理员，无法配置此项。", show_alert=True)
+        context.user_data["group_setting_chat_id"] = chat_id_str
+        await query.answer()
+        return await _open_force_target_manager(query, context, chat_id_str)
+
+    if action == "force_channel_add" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        if len(_get_force_channels(chat_id_str)) >= 10:
+            return await query.answer("最多只能设置 10 个关注目标。", show_alert=True)
+        context.user_data["group_setting_stage"] = "force_channel_add"
         context.user_data["group_setting_chat_id"] = chat_id_str
         await query.answer()
         return await query.edit_message_text(
-            "请输入要强制关注的频道用户名（如 @example）。\n"
-            "发送「清空」可移除当前设置。",
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            "🧹 清除",
-                            callback_data=f"{CALLBACK_PREFIX}:force_channel_clear:{chat_id_str}",
-                        ),
-                        InlineKeyboardButton(
-                            "⬅️ 返回",
-                            callback_data=f"{CALLBACK_PREFIX}:force_subscribe_back",
-                        ),
-                    ]
-                ]
-            ),
+            "请输入要添加的公开频道或群组用户名，例如：@example\n\n"
+            "只会新增这一个目标，不会覆盖已有设置。",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ 返回目标列表", callback_data=f"{CALLBACK_PREFIX}:force_channel:{chat_id_str}")
+            ]]),
         )
+
+    if action == "force_channel_remove" and len(parts) >= 4:
+        chat_id_str, index_raw = parts[2], parts[3]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        try:
+            index = int(index_raw)
+        except ValueError:
+            return await query.answer("目标参数无效。", show_alert=True)
+        targets = _get_force_channels(chat_id_str)
+        if index < 0 or index >= len(targets):
+            return await query.answer("目标不存在或已删除。", show_alert=True)
+        removed = targets.pop(index)
+        _set_force_channels(chat_id_str, targets)
+        _mark_force_subscribe_set_ts(chat_id_str)
+        await query.answer(f"已移除 {removed}")
+        return await _open_force_target_manager(query, context, chat_id_str)
     if action == "business_coop" and len(parts) >= 3:
         chat_id_str = parts[2]
         chat_id = _parse_chat_id(chat_id_str)
@@ -2944,11 +3019,11 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             return await query.answer(
                 "机器人不是该群管理员，无法配置此项。", show_alert=True
             )
-        _set_force_channel(chat_id_str, "")
+        _set_force_channels(chat_id_str, [])
         context.user_data.pop("group_setting_stage", None)
         context.user_data.pop("group_setting_chat_id", None)
         await query.answer("✅ 已清空", show_alert=False)
-        return await _open_group_panel(query, context, chat_id_str, user_id)
+        return await _open_force_target_manager(query, context, chat_id_str)
     if action == "force_subscribe_back":
         context.user_data.pop("group_setting_stage", None)
         chat_id_str = context.user_data.pop("group_setting_chat_id", None)
@@ -3173,6 +3248,7 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
 
     if stage not in {
         "force_channel",
+        "force_channel_add",
         "active_speak_interval",
         "ai_reply_probability",
         "ai_reply_hourly_limit",
@@ -3209,23 +3285,39 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
     if not isinstance(cfg, dict):
         cfg = {}
 
-    if stage == "force_channel":
+    if stage in {"force_channel", "force_channel_add"}:
         if not text:
-            return await update.message.reply_text("❗ 请发送频道用户名文本。")
+            return await update.message.reply_text("❗ 请发送频道或群组用户名。")
         if text in {"清空", "取消", "关闭"}:
-            _set_force_channel(chat_id_str, "")
+            if stage == "force_channel_add" and text == "取消":
+                context.user_data.pop("group_setting_stage", None)
+                context.user_data.pop("group_setting_chat_id", None)
+                return await update.message.reply_text("✅ 已取消添加。")
+            _set_force_channels(chat_id_str, [])
             context.user_data.pop("group_setting_stage", None)
             context.user_data.pop("group_setting_chat_id", None)
-            await update.message.reply_text("✅ 已清空强制关注频道设置。")
+            await update.message.reply_text("✅ 已清空强制关注频道/群组设置。")
         else:
-            if not text.startswith("@"):
-                text = f"@{text}"
-            _set_force_channel(chat_id_str, text)
+            # The add screen accepts one target, preventing accidental overwrite
+            # of every existing channel/group when changing a single item.
+            new_target = text.replace("，", ",").replace("\n", ",").split(",")[0].strip().split()[0]
+            targets = _get_force_channels(chat_id_str)
+            _set_force_channels(chat_id_str, targets + [new_target])
+            saved_targets = _get_force_channels(chat_id_str)
+            if len(saved_targets) == len(targets):
+                return await update.message.reply_text("❗ 目标无效、重复，或已达到 10 个上限。")
             _mark_force_subscribe_set_ts(chat_id_str)
             cfg["force_subscribe"] = True
+            data[chat_id_str] = cfg
+            save_json(GROUP_LIST_FILE, data)
             context.user_data.pop("group_setting_stage", None)
             context.user_data.pop("group_setting_chat_id", None)
-            await update.message.reply_text(f"✅ 已设置强制关注频道为：{text}")
+            await update.message.reply_text(
+                f"✅ 已添加强制关注目标：{saved_targets[-1]}\n\n"
+                + _force_target_manager_text(chat_id_str),
+                reply_markup=_build_force_target_manager_keyboard(chat_id_str, saved_targets),
+            )
+            raise ApplicationHandlerStop
     elif stage == "business_coop":
         if not text:
             return await update.message.reply_text("❗ 请发送商业合作链接文本。")
