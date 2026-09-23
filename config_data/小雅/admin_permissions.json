@@ -1,9 +1,3 @@
 {
-    "admins": {
-        "6819879789": {
-            "name": "",
-            "username": "",
-            "permissions": []
-        }
-    }
+    "admins": {}
 }

@@ -22,6 +22,7 @@ from command_router import register_command
 from game.voice_reply import group_tts_voice, tts_voice_reply
 from forward.message_forward import send_message_payload
 from utils import (
+    bot_now,
     AD_KEYWORDS_FILE,
     BOT_OWNER_ID,
     GROUP_LIST_FILE,
@@ -1496,7 +1497,7 @@ async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
         print(f"[定时广告] 检测到配置已更新: bot={get_runtime_bot_name()}")
     groups = load_json(GROUP_LIST_FILE)
     now_ts = time.time()
-    current_hm = time.strftime("%H:%M")
+    current_hm = bot_now(context).strftime("%H:%M")
 
     if not isinstance(groups, dict) or not groups:
         return

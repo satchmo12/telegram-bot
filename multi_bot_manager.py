@@ -20,8 +20,10 @@ from multi_bot_registry import (
     get_managed_bot_by_name,
     load_all_bot_configs,
     save_managed_bot,
+    normalize_bot_timezone,
     update_managed_bot_auto_start,
     update_managed_bot_features,
+    update_bot_timezone,
 )
 from runtime_bot_manager import (
     get_running_app,
@@ -30,7 +32,7 @@ from runtime_bot_manager import (
     stop_bot,
     update_running_bot_features,
 )
-from utils import BOT_USER_FILE, get_runtime_owner_id, is_bot_owner, is_super_admin, load_json, safe_reply
+from utils import BOT_USER_FILE, get_runtime_owner_id, is_bot_owner, is_super_admin, load_json, safe_reply, set_bot_timezone
 
 CALLBACK_PREFIX = "mbot"
 SELF_SERVICE_CALLBACK_PREFIX = "pfbot"
@@ -49,6 +51,16 @@ MANAGED_FEATURES = [
     ("market_price", "市场行情"),
     ("my_bot", "智能回复"),
 ]
+TIMEZONE_OPTIONS = (
+    ("Asia/Shanghai", "🇨🇳 北京时间 UTC+8"),
+    ("Asia/Dubai", "🇦🇪 迪拜时间 UTC+4"),
+    ("UTC", "🌐 UTC+0"),
+    ("Asia/Tokyo", "🇯🇵 东京时间 UTC+9"),
+    ("America/New_York", "🇺🇸 纽约时间"),
+)
+TIMEZONE_LABELS = dict(TIMEZONE_OPTIONS)
+
+
 RESTART_HINT_FEATURES = {
     "economy",
     "entertainment",
@@ -290,6 +302,7 @@ async def _finalize_clone_creation(
             "name": state.get("new_name"),
             "token": state.get("new_token"),
             "owner_id": owner_id,
+            "timezone": state.get("source_timezone", "Asia/Shanghai"),
             "enabled": True,
             "auto_start": False,
             "enabled_features": features,
@@ -472,6 +485,25 @@ def _build_bot_link(bot_username: str) -> str:
     return f'<a href="https://t.me/{html.escape(username)}">@{html.escape(username)}</a>'
 
 
+def _timezone_label(value: str) -> str:
+    timezone_name = normalize_bot_timezone(value)
+    return TIMEZONE_LABELS.get(timezone_name, timezone_name)
+
+
+def _build_timezone_keyboard(name: str, current_timezone: str) -> InlineKeyboardMarkup:
+    current_timezone = normalize_bot_timezone(current_timezone)
+    rows = []
+    for timezone_name, label in TIMEZONE_OPTIONS:
+        rows.append([
+            InlineKeyboardButton(
+                f"{'✅ ' if timezone_name == current_timezone else ''}{label}",
+                callback_data=f"{CALLBACK_PREFIX}:timezone_set:{name}:{timezone_name}",
+            )
+        ])
+    rows.append([InlineKeyboardButton("⬅️ 返回机器人详情", callback_data=f"{CALLBACK_PREFIX}:open:{name}")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def _build_detail_text(cfg: dict) -> str:
     name = cfg.get("name", "")
     running = "运行中" if is_bot_running(name) else "未运行"
@@ -483,6 +515,7 @@ async def _build_detail_text(cfg: dict) -> str:
         f"状态：{running}",
         f"归属：{_build_owner_link(owner_id)}",
         f"机器人：{_build_bot_link(bot_username)}",
+        f"时区：{html.escape(_timezone_label(cfg.get('timezone', 'Asia/Shanghai')))}",
     ]
     return "\n".join(lines)
 
@@ -504,6 +537,14 @@ def _build_detail_keyboard(cfg: dict, *, can_edit: bool, can_control: bool) -> I
     #     rows.append(
     #         [InlineKeyboardButton("🧬 克隆机器人", callback_data=f"{CALLBACK_PREFIX}:clone:{name}")]
     #     )
+
+    if can_edit:
+        rows.append([
+            InlineKeyboardButton(
+                f"🕒 时区：{_timezone_label(cfg.get('timezone', 'Asia/Shanghai'))}",
+                callback_data=f"{CALLBACK_PREFIX}:timezone:{name}",
+            )
+        ])
 
     if can_edit and cfg.get("managed"):
         enabled_features = set(cfg.get("enabled_features", []))
@@ -669,6 +710,7 @@ async def handle_multi_bot_callback(update: Update, context: ContextTypes.DEFAUL
             "stage": "clone_await_token",
             "source_name": name,
             "source_owner_id": int(cfg.get("owner_id") or 0),
+            "source_timezone": cfg.get("timezone", "Asia/Shanghai"),
             "prompt_message_id": getattr(getattr(query, "message", None), "message_id", None),
         }
         return await query.edit_message_text(
@@ -712,6 +754,35 @@ async def handle_multi_bot_callback(update: Update, context: ContextTypes.DEFAUL
         await query.answer(msg[:180], show_alert=not ok)
         fresh = get_bot_config_by_name(name) or cfg
         return await _show_detail(query, fresh)
+
+    if action == "timezone":
+        if not cfg:
+            return await query.answer("机器人不存在。", show_alert=True)
+        if not _can_edit_bot(cfg, query.from_user.id):
+            return await query.answer("仅机器人所有者或超级管理员可修改时区。", show_alert=True)
+        await query.answer()
+        return await query.edit_message_text(
+            "🕒 选择机器人时区。\n\n"
+            "该设置会用于每日积分、发言统计日期、定时广告时段和后续显示时间。",
+            reply_markup=_build_timezone_keyboard(name, cfg.get("timezone")),
+        )
+
+    if action == "timezone_set":
+        if not cfg:
+            return await query.answer("机器人不存在。", show_alert=True)
+        if not _can_edit_bot(cfg, query.from_user.id):
+            return await query.answer("仅机器人所有者或超级管理员可修改时区。", show_alert=True)
+        if feature_key not in TIMEZONE_LABELS:
+            return await query.answer("时区参数无效。", show_alert=True)
+        updated = update_bot_timezone(name, feature_key)
+        if not updated:
+            return await query.answer("保存时区失败。", show_alert=True)
+        app = get_running_app(name)
+        if app:
+            app.bot_data["timezone"] = updated["timezone"]
+        set_bot_timezone(name, updated["timezone"])
+        await query.answer(f"已设置为 {_timezone_label(updated['timezone'])}")
+        return await _show_detail(query, get_bot_config_by_name(name) or updated)
 
     if action == "feature_toggle":
         managed = get_managed_bot_by_name(name)

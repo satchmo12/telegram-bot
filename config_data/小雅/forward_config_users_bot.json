@@ -1,42 +1,7 @@
 {
     "users": {
         "6085551760": {
-            "forward_rules": [
-                {
-                    "name": "未命名",
-                    "sources": [
-                        -1003878817420
-                    ],
-                    "targets": [
-                        -1003985436767
-                    ],
-                    "source_title": "沙雕行为鉴赏",
-                    "target_title": "2",
-                    "enabled": true,
-                    "mode": "listen",
-                    "filter": "all",
-                    "exclude_channels": [],
-                    "show_contact": true,
-                    "replace_channel_user": "",
-                    "replace_group_name": "",
-                    "replace_submit_user": "",
-                    "clear_links": false,
-                    "skip_links": false,
-                    "start_id": "",
-                    "end_id": "",
-                    "include_words": [],
-                    "replace_words": [],
-                    "block_words": [],
-                    "cut_words": [
-                        "💬护照办理咨询以下联系方式💬",
-                        "✅订阅频道"
-                    ],
-                    "suffix": "",
-                    "media_replace": "",
-                    "speed": "",
-                    "session_name": ""
-                }
-            ]
+            "forward_rules": []
         }
     }
 }

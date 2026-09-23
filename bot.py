@@ -83,6 +83,7 @@ from utils import (
     save_json,
     is_bot_owner,
     set_bot_owner,
+    set_bot_timezone,
     set_runtime_bot_name,
 )
 
@@ -293,6 +294,7 @@ def load_startup_bot_configs():
 def bind_runtime_bot_context(context: ContextTypes.DEFAULT_TYPE):
     bot_name = context.application.bot_data.get("name", "")
     set_runtime_bot_name(bot_name)
+    set_bot_timezone(bot_name, context.application.bot_data.get("timezone", "Asia/Shanghai"))
 
 
 async def runtime_context_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -940,11 +942,11 @@ def _build_start_panel_rows(
 
     if "channel" in enabled:
         channel_row = []
-        if can_use("channel_config") and show_custom_button("channel_clone"):
+        if  show_custom_button("channel_clone"):
             channel_row.append(InlineKeyboardButton("📣克隆频道", callback_data="chcfg:back"))
-        if can_use("bot_channel_config") and show_custom_button("bot_channel_config"):
+        if  show_custom_button("bot_channel_config"):
             channel_row.append(InlineKeyboardButton("📣机器人频道配置", callback_data="chcfg:bot"))
-        if can_use("telethon_manage") and show_custom_button("telethon_manage"):
+        if  show_custom_button("telethon_manage"):
             channel_row.append(InlineKeyboardButton("📱管理协议号(可群发)", callback_data="tlogin:list"))
        
         if channel_row:
@@ -954,7 +956,7 @@ def _build_start_panel_rows(
 
     if "group" in enabled:
         group_row = []
-        if can_use("group_config") and show_custom_button("group_config"):
+        if show_custom_button("group_config"):
             group_row.append(InlineKeyboardButton("👥群配置", callback_data="gcfg:list"))
         if can_use("global_ad_config") and show_custom_button("global_ad_config"):
             group_row.append(InlineKeyboardButton("📢全群广告推送", callback_data="gcfg:global_ad_menu"))
@@ -1114,10 +1116,12 @@ def create_app(bot_cfg: dict):
     app.bot_data["owner_id"] = owner_id  # ✅ 绑定到当前机器人
     app.bot_data["token"] = token
     app.bot_data["name"] = bot_name
+    app.bot_data["timezone"] = bot_cfg.get("timezone", "Asia/Shanghai")
     app.bot_data["enabled_features"] = set(bot_cfg.get("enabled_features", []))
     # Custom command edits can refresh Telegram's slash-command menu immediately.
     app.bot_data["refresh_bot_commands"] = set_bot_commands
     set_bot_owner(bot_name, owner_id)
+    set_bot_timezone(bot_name, app.bot_data["timezone"])
 
     app.add_handler(BusinessConnectionHandler(handle_business_connection))
     app.add_handler(TypeHandler(Update, runtime_context_handler), group=-1000)
@@ -1374,6 +1378,10 @@ async def leave_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def post_init_setup(app):
     set_runtime_bot_name(app.bot_data.get("name", ""))
+    set_bot_timezone(
+        app.bot_data.get("name", ""),
+        app.bot_data.get("timezone", "Asia/Shanghai"),
+    )
     write_startup_debug(f"[post_init_setup] bot={app.bot_data.get('name')} post-init start")
     ensure_info_migrated()
     await set_bot_commands(app)  # 直接 await，事件循环已运行

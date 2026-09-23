@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 import calendar
 from command_router import register_command
 from tool.pagination_helper import generic_pagination_callback, send_paginated_list
-from utils import get_bot_path, get_group_whitelist, is_admin, is_bot_admin, load_json, save_json, safe_reply
+from utils import bot_now, get_bot_path, get_group_whitelist, is_admin, is_bot_admin, load_json, save_json, safe_reply
 from group.points_rules import award_talk_points
 
 # Version 1 stored every group in one growing JSON file. Version 2 keeps one
@@ -209,7 +209,7 @@ async def count_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or update.effective_user.is_bot:
         return
 
-    now = datetime.now()
+    now = bot_now(context)
     now_ts = time.time()
     _cleanup_freq_cache(now_ts)
     chat_id = str(update.effective_chat.id)
@@ -309,7 +309,7 @@ async def count_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # @register_command("发言排行", "发言统计")
 # async def talk_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #     args = context.args
-#     now = datetime.now()
+#     now = bot_now(context)
 #     today = now.strftime("%Y-%m-%d")
 #     this_month = now.strftime("%Y-%m")
 #     yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -396,7 +396,7 @@ async def count_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @register_command("发言排行", "发言统计")
 async def talk_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
-    now = datetime.now()
+    now = bot_now(context)
     today = now.strftime("%Y-%m-%d")
     this_month = now.strftime("%Y-%m")
     yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")

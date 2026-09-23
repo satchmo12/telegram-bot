@@ -19,6 +19,7 @@ BJ_TZ = timezone(timedelta(hours=8))
 from channel.channel_config import USER_MESSAGE_FILE
 from utils import (
     BOT_USER_FILE,
+    bot_datetime_from_timestamp,
     _can_manage,
     is_shared_session_name,
     is_super_admin,
@@ -2419,8 +2420,11 @@ def _report_subject_text(report: dict) -> str:
 
 
 def _comment_date(comment: dict) -> str:
+    """Display report-comment time in the current bot's configured timezone."""
     try:
-        return datetime.fromtimestamp(int(comment.get("created_at", 0) or 0)).strftime("%Y-%m-%d %H:%M")
+        return bot_datetime_from_timestamp(
+            int(comment.get("created_at", 0) or 0)
+        ).strftime("%Y-%m-%d %H:%M")
     except Exception:
         return "未知日期"
 

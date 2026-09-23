@@ -1,7 +1,5 @@
-from datetime import datetime
-
 from info.economy import change_points
-from utils import POINTS_REWARD_LOG_FILE, load_json, save_json
+from utils import POINTS_REWARD_LOG_FILE, bot_now, load_json, save_json
 
 TALK_POINTS_AMOUNT_MIN = 1
 TALK_POINTS_AMOUNT_MAX = 100
@@ -18,7 +16,7 @@ CHECKIN_POINTS_AMOUNT_MAX = 500
 
 
 def _today_key() -> str:
-    return datetime.utcnow().strftime("%Y-%m-%d")
+    return bot_now().strftime("%Y-%m-%d")
 
 
 def _clamp(value, min_value: int, max_value: int, default: int) -> int:

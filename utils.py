@@ -5,6 +5,8 @@ import time
 from functools import wraps
 from typing import Optional
 from contextvars import ContextVar
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from telegram import Bot, Message, Update, User
 import telegram
 from telegram.ext import ContextTypes
@@ -113,6 +115,8 @@ CACHE_TTL = 300  # 缓存有效时间（秒）
 BOT_OWNER_ID = 6085551760  # 默认主人ID（各机器人可在 TOKEN_CONFIG 中覆盖）
 BOT_RUNTIME_NAME: ContextVar[str] = ContextVar("BOT_RUNTIME_NAME", default="")
 BOT_OWNER_MAP = {}
+DEFAULT_BOT_TIMEZONE = "Asia/Shanghai"
+BOT_TIMEZONE_MAP = {}
 
 SHARED_SESSION_NAME = "main"
 
@@ -135,6 +139,41 @@ def set_bot_owner(bot_name: str, owner_id: int):
         BOT_OWNER_MAP[str(bot_name).strip()] = int(owner_id)
     except Exception:
         pass
+
+
+def normalize_bot_timezone(value: str) -> str:
+    """Return a valid IANA timezone, defaulting to Beijing time."""
+    candidate = str(value or "").strip() or DEFAULT_BOT_TIMEZONE
+    try:
+        ZoneInfo(candidate)
+    except (ZoneInfoNotFoundError, ValueError):
+        return DEFAULT_BOT_TIMEZONE
+    return candidate
+
+
+def set_bot_timezone(bot_name: str, timezone_name: str) -> None:
+    if bot_name:
+        BOT_TIMEZONE_MAP[str(bot_name).strip()] = normalize_bot_timezone(timezone_name)
+
+
+def get_runtime_timezone() -> str:
+    return BOT_TIMEZONE_MAP.get(get_runtime_bot_name(), DEFAULT_BOT_TIMEZONE)
+
+
+def get_bot_timezone(context: Optional[ContextTypes.DEFAULT_TYPE] = None) -> str:
+    if context and getattr(context, "application", None):
+        return normalize_bot_timezone(context.application.bot_data.get("timezone"))
+    return get_runtime_timezone()
+
+
+def bot_now(context: Optional[ContextTypes.DEFAULT_TYPE] = None) -> datetime:
+    """Current wall-clock time in the selected bot timezone."""
+    return datetime.now(ZoneInfo(get_bot_timezone(context)))
+
+
+def bot_datetime_from_timestamp(timestamp, context: Optional[ContextTypes.DEFAULT_TYPE] = None) -> datetime:
+    """Format a Unix timestamp in the selected bot timezone."""
+    return datetime.fromtimestamp(float(timestamp), ZoneInfo(get_bot_timezone(context)))
 
 
 def get_runtime_owner_id() -> int:
@@ -801,6 +840,14 @@ async def can_use_command(context, user_id, chat_id):
     # ⭐ 超级管理员
     if user_id in SUPER_ADMINS:
         return True
+
+    # 🤖 当前机器人的所有者。每个多开机器人都在 app.bot_data 中保存自己
+    # 的 owner_id；所有者不需要额外出现在“多管理员”列表里。
+    try:
+        if int(user_id) == _owner_id(context):
+            return True
+    except (TypeError, ValueError):
+        pass
 
     # 👥 机器人“多管理员”面板中配置的管理员。  This is deliberately
     # independent of Telegram group-admin status: these are trusted per-bot

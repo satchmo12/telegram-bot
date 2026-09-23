@@ -4,11 +4,25 @@ import re
 import time
 import json
 from typing import Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from feature_flags import ALL_FEATURES, parse_feature_list, sanitize_features
 
 MANAGED_BOTS_FILE = "data/managed_bots.json"
+BOT_TIMEZONES_FILE = "config_data/bot_timezones.json"
 DEFAULT_OWNER_ID = 6085551760
+DEFAULT_BOT_TIMEZONE = "Asia/Shanghai"
+
+
+def normalize_bot_timezone(value: str) -> str:
+    """Validate an IANA timezone and fall back to Beijing time."""
+    candidate = str(value or "").strip() or DEFAULT_BOT_TIMEZONE
+    try:
+        ZoneInfo(candidate)
+    except (ZoneInfoNotFoundError, ValueError):
+        return DEFAULT_BOT_TIMEZONE
+    return candidate
+
 
 
 def env_int(name: str, default: int) -> int:
@@ -47,6 +61,7 @@ def load_env_bot_configs() -> list[dict]:
         enabled = env_bool(f"BOT_ENABLE_{key}", True)
         raw_features = str(os.getenv(f"BOT_FEATURES_{key}", "")).strip()
         raw_disable_features = str(os.getenv(f"BOT_DISABLE_FEATURES_{key}", "")).strip()
+        timezone_name = normalize_bot_timezone(os.getenv(f"BOT_TIMEZONE_{key}", DEFAULT_BOT_TIMEZONE))
 
         if not enabled:
             continue
@@ -77,11 +92,33 @@ def load_env_bot_configs() -> list[dict]:
                 "name": name,
                 "enabled": True,
                 "enabled_features": sorted(enabled_features),
+                "timezone": timezone_name,
                 "managed": False,
                 "source_type": "env",
             }
         )
     return configs
+
+
+def _load_timezone_overrides() -> dict:
+    try:
+        with open(BOT_TIMEZONES_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        _normalize_name(name): normalize_bot_timezone(timezone_name)
+        for name, timezone_name in data.items()
+        if _normalize_name(name)
+    }
+
+
+def _save_timezone_overrides(data: dict) -> None:
+    os.makedirs(os.path.dirname(BOT_TIMEZONES_FILE), exist_ok=True)
+    with open(BOT_TIMEZONES_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
 
 
 def _load_managed_data() -> dict:
@@ -148,6 +185,10 @@ def load_managed_bot_configs() -> list[dict]:
         if "auto_start" not in item:
             item["auto_start"] = bool(item.get("enabled", True))
             changed = True
+        timezone_name = normalize_bot_timezone(item.get("timezone", DEFAULT_BOT_TIMEZONE))
+        if item.get("timezone") != timezone_name:
+            item["timezone"] = timezone_name
+            changed = True
         results.append(
             {
                 "key": item.get("key") or _new_managed_key(name),
@@ -159,6 +200,7 @@ def load_managed_bot_configs() -> list[dict]:
                 "enabled": bool(item.get("enabled", True)),
                 "auto_start": bool(item.get("auto_start", item.get("enabled", True))),
                 "enabled_features": enabled_features,
+                "timezone": timezone_name,
                 "managed": True,
                 "source_type": "managed",
                 "clone_from": _normalize_name(item.get("clone_from", "")),
@@ -171,11 +213,16 @@ def load_managed_bot_configs() -> list[dict]:
 
 def load_all_bot_configs() -> list[dict]:
     configs = []
+    timezone_overrides = _load_timezone_overrides()
     seen_tokens = set()
     seen_names = set()
     for item in load_env_bot_configs() + load_managed_bot_configs():
         token = item["token"]
         name = item["name"]
+        item["timezone"] = timezone_overrides.get(
+            name,
+            normalize_bot_timezone(item.get("timezone", DEFAULT_BOT_TIMEZONE)),
+        )
         if token in seen_tokens:
             logging.warning("跳过重复 token 配置: %s", name)
             continue
@@ -237,6 +284,7 @@ def save_managed_bot(record: dict) -> dict:
                 warn_unknown=False,
             )
         ),
+        "timezone": normalize_bot_timezone(record.get("timezone", DEFAULT_BOT_TIMEZONE)),
         "clone_from": _normalize_name(record.get("clone_from", "")),
     }
 
@@ -284,6 +332,33 @@ def update_managed_bot_features(name: str, features: list[str]) -> Optional[dict
             warn_unknown=False,
         )
     )
+    return save_managed_bot(record)
+
+
+def update_bot_timezone(name: str, timezone_name: str) -> Optional[dict]:
+    """Persist a timezone override for any bot, including env-configured bots."""
+    target = _normalize_name(name)
+    if not target or not get_bot_config_by_name(target):
+        return None
+    timezone_name = normalize_bot_timezone(timezone_name)
+    overrides = _load_timezone_overrides()
+    overrides[target] = timezone_name
+    _save_timezone_overrides(overrides)
+
+    # Keep the managed record self-contained as well, so an exported managed
+    # configuration retains its selected timezone without the override file.
+    managed = get_managed_bot_by_name(target)
+    if managed:
+        managed["timezone"] = timezone_name
+        save_managed_bot(managed)
+    return get_bot_config_by_name(target)
+
+
+def update_managed_bot_timezone(name: str, timezone_name: str) -> Optional[dict]:
+    record = get_managed_bot_by_name(name)
+    if not record:
+        return None
+    record["timezone"] = normalize_bot_timezone(timezone_name)
     return save_managed_bot(record)
 
 

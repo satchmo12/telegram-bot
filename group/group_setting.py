@@ -820,7 +820,7 @@ def _build_ai_reply_settings_text(chat_id_str: str, cfg: dict) -> str:
     return (
         "🤖 AI 接话设置\n"
         f"群ID：<code>{chat_id_str}</code>\n\n"
-        f"总开关：{'✅ 已开启' if global_enabled else '🚫 已关闭'}\n"
+        f"总开关：{'✅ 已开启' if global_enabled else '🚫 已关闭'} 联系机器人管理员开启\n"
         f"本群开关：{'✅ 已开启' if enabled else '🚫 已关闭'}\n"
         f"回复概率：{probability}%\n"
         f"每小时最多回复：{max_per_hour} 次\n"
@@ -908,9 +908,14 @@ def _build_group_panel_text(
     invite_points = get_invite_points_config(cfg)
     lottery_cfg = get_points_lottery_config(cfg)
     prize_count = len(list_points_lottery_prizes(chat_id))
+    
+  
+    # count = await context.bot.get_chat_member_count(chat_id)
+    # ｜ 当前群人数：{count}
+
     lines = [
         "📊 群配置面板",
-        f"🆔 群ID：<code>{chat_id}</code> | 群名：{group_name}",
+        f"🆔 群ID：<code>{chat_id}</code> | 群名：{group_name} ",
         f"👤 用户名：{html.escape(username_text)}",
         f"🤖 机器人管理员：{'✅ 是' if bot_is_admin else '🚫 否'}",
     ]
