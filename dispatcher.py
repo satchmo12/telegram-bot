@@ -103,7 +103,7 @@ async def handle_text_dispatcher(update: Update, context: ContextTypes.DEFAULT_T
     if not update.message:
         return
     # or
-    await count_message(update, context)  # 消息统计（不统计表情）
+    
 
     if not update.message.text:
         return
@@ -146,6 +146,7 @@ async def handle_text_dispatcher(update: Update, context: ContextTypes.DEFAULT_T
         #         )
 
         # ✅ 正常文本消息处理（非命令）
+        await count_message(update, context)  # 消息统计（不统计表情）
         await record_user(update, context)  # 记录用户（如入库）
 
         await handle_qa_message(update, context)  # 问答模块

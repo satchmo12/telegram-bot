@@ -423,7 +423,7 @@ async def talk_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     counts = []
-    for user_id, user_data in data[chat_id].items():
+    for user_id, user_data in data.items():
         name = user_data.get("name") or "未知用户"
         count = 0
 
