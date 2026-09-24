@@ -7,13 +7,20 @@ scheduled draw time.
 import random
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    ApplicationHandlerStop,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
-from forward.message_forward import build_message_payload, send_message_payload
+from forward.message_forward import build_message_payload
 from group.grouplist import load_users
 from utils import (
     bot_datetime_from_timestamp,
@@ -80,6 +87,9 @@ def _new_lottery(chat_id: int, owner_id: int) -> dict:
         "sync_targets": [],
         "cover": None,
         "participants": {},
+        # Per-lottery messages counted only after this lottery is published.
+        # chat_id -> user_id -> count
+        "message_counts": {},
         "published_at": 0,
         "drawn_at": 0,
         "created_at": now,
@@ -111,6 +121,97 @@ def _target_items(value: str) -> list[str]:
     return result
 
 
+def _target_requirements(item: dict) -> dict:
+    """Read per-follow-target requirements and migrate the legacy password field."""
+    raw = item.get("requirements") if isinstance(item, dict) else None
+    raw = raw if isinstance(raw, dict) else {}
+    return {
+        "username": bool(raw.get("username", False)),
+        "min_messages": max(0, int(raw.get("min_messages", 0) or 0)),
+        "password": str(raw.get("password") or item.get("password") or "").strip()[:80],
+    }
+
+
+def _set_target_requirements(item: dict, requirements: dict) -> dict:
+    normalized = {
+        "username": bool(requirements.get("username", False)),
+        "min_messages": max(0, int(requirements.get("min_messages", 0) or 0)),
+        "password": str(requirements.get("password") or "").strip()[:80],
+    }
+    item["requirements"] = normalized
+    # Keep old saved records compatible, but all new settings use requirements.
+    item.pop("password", None)
+    return normalized
+
+
+def _target_conditions_text(item: dict) -> list[str]:
+    req = _target_requirements(item)
+    lines = []
+    if req["username"]:
+        lines.append("└ 🪪 必须设置用户名")
+    if _target_is_group(item):
+        if req["min_messages"] > 0:
+            lines.append(f"└ 🎟️ 本群发言大于 {req['min_messages']} 条")
+        if req["password"]:
+            lines.append(f"└ 🔑 发送口令﹝{req['password']}﹞")
+    return lines
+
+
+def _target_chat_type(item: dict) -> str:
+    value = str((item or {}).get("chat_type") or "").lower()
+    return value if value in {"channel", "group", "supergroup"} else ""
+
+
+def _target_is_group(item: dict) -> bool:
+    return _target_chat_type(item) in {"group", "supergroup"}
+
+
+async def _get_admin_target_chat(context: ContextTypes.DEFAULT_TYPE, target: str):
+    """Return the target chat only when this bot is an administrator there."""
+    try:
+        chat = await context.bot.get_chat(target)
+        me = await context.bot.get_me()
+        member = await context.bot.get_chat_member(chat.id, me.id)
+    except Exception:
+        return None
+    status = getattr(member, "status", "")
+    status = getattr(status, "value", status)
+    if str(status).lower() not in {"creator", "owner", "administrator"}:
+        return None
+    return chat
+
+
+async def _refresh_target_chat_type(context: ContextTypes.DEFAULT_TYPE, item: dict) -> bool:
+    """Populate target type for older lottery records created before this field."""
+    target = str((item or {}).get("target") or "")
+    if not target:
+        return False
+    try:
+        chat = await context.bot.get_chat(target)
+    except Exception:
+        return False
+    chat_type = getattr(chat, "type", "")
+    chat_type = getattr(chat_type, "value", chat_type)
+    chat_type = str(chat_type).lower()
+    if chat_type not in {"channel", "group", "supergroup"}:
+        return False
+    chat_id = getattr(chat, "id", None)
+    changed = item.get("chat_type") != chat_type
+    if chat_id is not None and str(item.get("chat_id") or "") != str(int(chat_id)):
+        item["chat_id"] = int(chat_id)
+        changed = True
+    if not changed:
+        return False
+    item["chat_type"] = chat_type
+    # Channels cannot enforce chat activity or a group password.
+    if chat_type == "channel":
+        req = _target_requirements(item)
+        req["min_messages"] = 0
+        req["password"] = ""
+        _set_target_requirements(item, req)
+    return True
+
+
 def _timestamp_text(ts: int, context: ContextTypes.DEFAULT_TYPE) -> str:
     if not ts:
         return "未设置"
@@ -138,9 +239,7 @@ def _format_lottery(record: dict, context: ContextTypes.DEFAULT_TYPE) -> str:
             continue
         target = _display_target(item.get("target"))
         lines.append(f"🎫 加入-{target.lstrip('@')}")
-        target_password = str(item.get("password") or "").strip()
-        if target_password:
-            lines.append(f"└  🔑 发送口令﹝{target_password}﹞")
+        lines.extend(_target_conditions_text(item))
         has_conditions = True
     if not has_conditions:
         lines.append("无额外条件")
@@ -222,6 +321,7 @@ def _prizes_keyboard(record: dict) -> InlineKeyboardMarkup:
 
 
 def _requirements_keyboard(record: dict) -> InlineKeyboardMarkup:
+    """Requirements for the primary lottery group."""
     lid = record["id"]
     req = record.get("requirements", {})
     return InlineKeyboardMarkup([
@@ -233,29 +333,128 @@ def _requirements_keyboard(record: dict) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🎟️ 发言条数", callback_data=f"{CALLBACK_PREFIX}:field:{lid}:min_messages"),
             InlineKeyboardButton("🔑 参与口令", callback_data=f"{CALLBACK_PREFIX}:field:{lid}:password"),
         ],
-        [InlineKeyboardButton("⬅️ 返回编辑", callback_data=f"{CALLBACK_PREFIX}:edit:{lid}")],
+        [InlineKeyboardButton("⬅️ 返回群组选择", callback_data=f"{CALLBACK_PREFIX}:requirements:{lid}")],
     ])
 
 
-def _targets_keyboard(record: dict, kind: str) -> InlineKeyboardMarkup:
+def _requirements_selector_keyboard(record: dict) -> InlineKeyboardMarkup:
     lid = record["id"]
-    values = record.get("follow_targets" if kind == "follow" else "sync_targets", [])
-    rows = []
-    if kind == "follow":
-        for index, item in enumerate(values):
-            if isinstance(item, dict):
-                rows.append([InlineKeyboardButton(
-                    f"🗑 {item.get('target')}", callback_data=f"{CALLBACK_PREFIX}:target_delete:{lid}:{kind}:{index}"
-                )])
-    else:
-        for index, value in enumerate(values):
+    rows = [[InlineKeyboardButton(
+        "🎰 抽奖发布群（参与条件）",
+        callback_data=f"{CALLBACK_PREFIX}:req_main:{lid}",
+    )]]
+    for index, item in enumerate(record.get("follow_targets", []) or []):
+        if isinstance(item, dict):
             rows.append([InlineKeyboardButton(
-                f"🗑 {value}", callback_data=f"{CALLBACK_PREFIX}:target_delete:{lid}:{kind}:{index}"
+                f"📢 {str(item.get('target') or '未设置')[:45]}",
+                callback_data=f"{CALLBACK_PREFIX}:target_requirements:{lid}:{index}",
             )])
-    label = "关注频道/群组" if kind == "follow" else "同步位置"
-    rows.append([InlineKeyboardButton("➕ 添加", callback_data=f"{CALLBACK_PREFIX}:target_add:{lid}:{kind}")])
     rows.append([InlineKeyboardButton("⬅️ 返回编辑", callback_data=f"{CALLBACK_PREFIX}:edit:{lid}")])
     return InlineKeyboardMarkup(rows)
+
+
+def _target_requirements_keyboard(record: dict, index: int) -> InlineKeyboardMarkup:
+    lid = record["id"]
+    item = (record.get("follow_targets") or [])[index]
+    req = _target_requirements(item)
+    rows = [[InlineKeyboardButton(
+        f"{'✅' if req['username'] else '🚫'} 必须有用户名",
+        callback_data=f"{CALLBACK_PREFIX}:target_req_toggle:{lid}:{index}:username",
+    )]]
+    if _target_is_group(item):
+        rows.append([
+            InlineKeyboardButton("🎟️ 本群发言条数", callback_data=f"{CALLBACK_PREFIX}:target_req_field:{lid}:{index}:min_messages"),
+            InlineKeyboardButton("🔑 本群参与口令", callback_data=f"{CALLBACK_PREFIX}:target_req_field:{lid}:{index}:password"),
+        ])
+    rows.append([InlineKeyboardButton("⬅️ 返回群组选择", callback_data=f"{CALLBACK_PREFIX}:requirements:{lid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _target_requirements_text(record: dict, index: int) -> str:
+    item = (record.get("follow_targets") or [])[index]
+    req = _target_requirements(item)
+    is_group = _target_is_group(item)
+    target_type = "群组" if is_group else "频道"
+    lines = [
+        f"📢 {item.get('target') or '未设置'} 的参与条件",
+        f"类型：{target_type}",
+        f"用户名：{'需要' if req['username'] else '不要求'}",
+    ]
+    if is_group:
+        lines.extend([
+            f"本群发言：{req['min_messages']} 条",
+            f"口令：{'已设置' if req['password'] else '未设置'}",
+        ])
+    else:
+        lines.append("频道不支持设置发言条数和参与口令。")
+    return "\n".join(lines)
+
+
+def _sync_targets_keyboard(record: dict) -> InlineKeyboardMarkup:
+    lid = record["id"]
+    rows = []
+    sync_values = list(record.get("sync_targets", []) or [])
+    for index, value in enumerate(sync_values):
+        rows.append([InlineKeyboardButton(
+            f"🗑 {value}", callback_data=f"{CALLBACK_PREFIX}:target_delete:{lid}:sync:{index}"
+        )])
+    for index, item in enumerate(record.get("follow_targets", []) or []):
+        if not isinstance(item, dict):
+            continue
+        target = str(item.get("target") or "")
+        if target and target not in sync_values:
+            rows.append([InlineKeyboardButton(
+                f"➕ 同步到 {target}", callback_data=f"{CALLBACK_PREFIX}:sync_pick:{lid}:{index}"
+            )])
+    rows.append([InlineKeyboardButton("⬅️ 返回编辑", callback_data=f"{CALLBACK_PREFIX}:edit:{lid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _targets_keyboard(record: dict, kind: str) -> InlineKeyboardMarkup:
+    if kind == "sync":
+        return _sync_targets_keyboard(record)
+    lid = record["id"]
+    rows = []
+    for index, item in enumerate(record.get("follow_targets", []) or []):
+        if not isinstance(item, dict):
+            continue
+        target = str(item.get("target") or "未设置")
+        rows.append([
+            InlineKeyboardButton(
+                f"⚙️ {target}", callback_data=f"{CALLBACK_PREFIX}:target_requirements:{lid}:{index}"
+            ),
+            InlineKeyboardButton(
+                "🗑 删除", callback_data=f"{CALLBACK_PREFIX}:target_delete:{lid}:follow:{index}"
+            ),
+        ])
+    if len(record.get("follow_targets", []) or []) < MAX_TARGETS:
+        rows.append([InlineKeyboardButton("➕ 添加关注频道/群组", callback_data=f"{CALLBACK_PREFIX}:target_add:{lid}:follow")])
+    rows.append([InlineKeyboardButton("⬅️ 返回编辑", callback_data=f"{CALLBACK_PREFIX}:edit:{lid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _start_editor_input_stage(query, context: ContextTypes.DEFAULT_TYPE, lottery_id: str, field: str) -> None:
+    """Remember the bot prompt so it can be removed after a successful input."""
+    prompt = query.message
+    context.user_data[DRAFT_KEY] = {
+        "id": lottery_id,
+        "field": field,
+        "prompt_chat_id": getattr(getattr(prompt, "chat", None), "id", None),
+        "prompt_message_id": getattr(prompt, "message_id", None),
+    }
+
+
+async def _delete_editor_input_prompt(context: ContextTypes.DEFAULT_TYPE, stage: dict) -> None:
+    """Remove the temporary “please enter …” message and its back button."""
+    chat_id = stage.get("prompt_chat_id")
+    message_id = stage.get("prompt_message_id")
+    if chat_id is None or message_id is None:
+        return
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception as exc:
+        # The setting itself has succeeded; deletion is best effort only.
+        print(f"删除抽奖输入提示失败 chat={chat_id} message={message_id}: {exc}")
 
 
 async def _can_manage(context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int) -> bool:
@@ -335,6 +534,26 @@ async def _create_lottery(query, context: ContextTypes.DEFAULT_TYPE, chat_id: in
     return await query.edit_message_text(_editor_text(record, context), reply_markup=_editor_keyboard(record))
 
 
+def _time_input_prompt(field: str, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Build time-entry guidance using this bot's configured local clock."""
+    now = bot_now(context)
+    timezone_name = get_bot_timezone(context)
+    now_text = now.strftime("%Y-%m-%d %H:%M")
+    if field == "publish_at":
+        example = (now + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")
+        return (
+            "请输入发布时间，或点击下方“⚡ 立即发布”。\n"
+            f"当前机器人时间（{timezone_name}）：{now_text}\n"
+            f"定时示例（5 分钟后）：{example}"
+        )
+    example = (now + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
+    return (
+        "请输入未来开奖时间，格式 YYYY-MM-DD HH:MM。\n"
+        f"当前机器人时间（{timezone_name}）：{now_text}\n"
+        f"可填写示例（1 小时后）：{example}"
+    )
+
+
 def _parse_time(value: str, context: ContextTypes.DEFAULT_TYPE) -> Optional[int]:
     text = str(value or "").strip()
     if text in {"立即", "现在"}:
@@ -348,16 +567,78 @@ def _parse_time(value: str, context: ContextTypes.DEFAULT_TYPE) -> Optional[int]
     return timestamp if timestamp > int(time.time()) else None
 
 
-async def _send_lottery_post(context: ContextTypes.DEFAULT_TYPE, record: dict) -> int:
+async def _send_lottery_content(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id,
+    record: dict,
+    *,
+    reply_markup=None,
+):
+    """Send the lottery as one text post or one cover-media post with a caption."""
     text = _format_lottery(record, context)
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("🎫 参加抽奖", callback_data=f"{CALLBACK_PREFIX}:join:{record['id']}")]])
+    cover = record.get("cover")
+    if not isinstance(cover, dict):
+        return await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+        )
+
+    # Telegram captions are limited to 1024 characters. Do not silently split
+    # the cover and lottery copy, because this workflow requires one message.
+    if len(text) > 1024:
+        raise ValueError("设置封面时，抽奖文案不能超过 1024 个字符。请缩短抽奖说明后再预览或发布。")
+
+    payload_type = str(cover.get("type") or "").lower()
+    file_id = cover.get("file_id")
+    if not file_id:
+        raise ValueError("抽奖封面文件无效，请重新上传图片或视频。")
+    common = {
+        "chat_id": chat_id,
+        "caption": text,
+        "parse_mode": "HTML",
+        "reply_markup": reply_markup,
+    }
+    if payload_type == "photo":
+        return await context.bot.send_photo(photo=file_id, **common)
+    if payload_type == "video":
+        return await context.bot.send_video(video=file_id, **common)
+    raise ValueError("抽奖封面仅支持图片或视频，请重新设置封面。")
+
+
+async def _lottery_deep_link(context: ContextTypes.DEFAULT_TYPE, lottery_id: str) -> str:
+    username = str(getattr(context.bot, "username", "") or "").strip().lstrip("@")
+    if not username:
+        try:
+            username = str((await context.bot.get_me()).username or "").strip().lstrip("@")
+        except Exception:
+            return ""
+    return f"https://t.me/{username}?start=eventlot_{lottery_id}" if username else ""
+
+
+async def _lottery_join_markup(context: ContextTypes.DEFAULT_TYPE, record: dict) -> InlineKeyboardMarkup:
+    link = await _lottery_deep_link(context, str(record["id"]))
+    if link:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("🎫 参与抽奖", url=link)]])
+    # A bot without a username cannot use a deep link. Keep old posts usable.
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🎫 参与抽奖", callback_data=f"{CALLBACK_PREFIX}:join:{record['id']}")
+    ]])
+
+
+async def _send_lottery_post(context: ContextTypes.DEFAULT_TYPE, record: dict) -> int:
+    markup = await _lottery_join_markup(context, record)
     targets = [str(record["chat_id"])] + [str(item) for item in record.get("sync_targets", [])]
     sent = 0
     for target in dict.fromkeys(targets):
         try:
-            if isinstance(record.get("cover"), dict):
-                await send_message_payload(context.bot, chat_id=target, payload=record["cover"])
-            await context.bot.send_message(chat_id=target, text=text, parse_mode="HTML", reply_markup=markup)
+            await _send_lottery_content(
+                context,
+                target,
+                record,
+                reply_markup=markup,
+            )
             sent += 1
         except Exception as exc:
             print(f"抽奖发布失败 lottery={record['id']} target={target}: {exc}")
@@ -373,6 +654,7 @@ async def _publish_if_due(context: ContextTypes.DEFAULT_TYPE, record: dict) -> b
         if sent:
             record["status"] = "open"
             record["published_at"] = now
+            record["message_counts"] = {}
             return True
     return False
 
@@ -380,7 +662,11 @@ async def _publish_if_due(context: ContextTypes.DEFAULT_TYPE, record: dict) -> b
 async def _draw_if_due(context: ContextTypes.DEFAULT_TYPE, record: dict) -> bool:
     if record.get("status") != "open" or not record.get("draw_at") or int(record["draw_at"]) > int(time.time()):
         return False
-    participants = list((record.get("participants") or {}).values())
+    participants = [
+        item
+        for item in (record.get("participants") or {}).values()
+        if isinstance(item, dict) and bool(item.get("eligible", True))
+    ]
     pool = list(participants)
     random.shuffle(pool)
     winners = []
@@ -421,37 +707,236 @@ async def event_lottery_tick(context: ContextTypes.DEFAULT_TYPE):
         _save(context, data)
 
 
-async def _check_follow_targets(context: ContextTypes.DEFAULT_TYPE, user_id: int, record: dict) -> bool:
-    for item in record.get("follow_targets", []):
+def _lottery_message_count(record: dict, chat_id: int, user_id: int) -> int:
+    """Read only messages recorded after this lottery was published."""
+    counts = record.get("message_counts") if isinstance(record.get("message_counts"), dict) else {}
+    by_chat = counts.get(str(chat_id)) if isinstance(counts, dict) else {}
+    value = by_chat.get(str(user_id), 0) if isinstance(by_chat, dict) else 0
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _lottery_counted_chat_ids(record: dict) -> set[int]:
+    result = {int(record["chat_id"])}
+    for item in record.get("follow_targets", []) or []:
         if not isinstance(item, dict):
             continue
-        target = item.get("target")
         try:
-            member = await context.bot.get_chat_member(target, user_id)
+            chat_id = int(item.get("chat_id"))
+        except (TypeError, ValueError):
+            continue
+        if _target_is_group(item):
+            result.add(chat_id)
+    return result
+
+
+async def event_lottery_message_counter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Count eligible group messages from the instant an open lottery is published."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat or not user or getattr(user, "is_bot", False):
+        return
+    if chat.type not in {"group", "supergroup"}:
+        return
+
+    message_date = getattr(msg, "date", None)
+    message_timestamp = int(message_date.timestamp()) if message_date else int(time.time())
+    data = _load(context)
+    changed = False
+    for record in data.get("lotteries", {}).values():
+        if not isinstance(record, dict) or record.get("status") != "open":
+            continue
+        published_at = int(record.get("published_at", 0) or 0)
+        if not published_at or message_timestamp < published_at:
+            continue
+        if int(chat.id) not in _lottery_counted_chat_ids(record):
+            continue
+        counts = record.setdefault("message_counts", {})
+        by_chat = counts.setdefault(str(chat.id), {})
+        user_key = str(user.id)
+        by_chat[user_key] = int(by_chat.get(user_key, 0) or 0) + 1
+        changed = True
+    if changed:
+        _save(context, data)
+
+
+def _registration(record: dict, user) -> dict:
+    participants = record.setdefault("participants", {})
+    user_id = str(user.id)
+    entry = participants.get(user_id)
+    if not isinstance(entry, dict):
+        entry = {
+            "user_id": user.id,
+            "name": user.full_name,
+            "username": user.username,
+            "registered_at": int(time.time()),
+            "eligible": False,
+            "passed_passwords": [],
+        }
+        participants[user_id] = entry
+    else:
+        entry["name"] = user.full_name
+        entry["username"] = user.username
+        entry.setdefault("registered_at", int(time.time()))
+        entry.setdefault("eligible", False)
+        if not isinstance(entry.get("passed_passwords"), list):
+            entry["passed_passwords"] = []
+    return entry
+
+
+def _required_passwords(record: dict) -> list[str]:
+    passwords = [str(record.get("requirements", {}).get("password") or "").strip()]
+    passwords.extend(
+        _target_requirements(item)["password"]
+        for item in record.get("follow_targets", []) or []
+        if isinstance(item, dict) and _target_is_group(item)
+    )
+    return list(dict.fromkeys(value for value in passwords if value))
+
+
+async def _build_participation_status(
+    context: ContextTypes.DEFAULT_TYPE,
+    user,
+    record: dict,
+    *,
+    submitted_password: str = "",
+) -> tuple[bool, str]:
+    """Register a user and render every completed/pending lottery requirement."""
+    # Older records did not persist target chat_type. Refresh it before
+    # evaluating group-only conditions such as talk count and password.
+    for item in record.get("follow_targets", []) or []:
+        if isinstance(item, dict):
+            await _refresh_target_chat_type(context, item)
+
+    registration = _registration(record, user)
+    required_passwords = _required_passwords(record)
+    passed = {
+        str(value).strip()
+        for value in registration.get("passed_passwords", [])
+        if str(value).strip()
+    }
+    candidate = str(submitted_password or "").strip()
+    if candidate and candidate in required_passwords:
+        passed.add(candidate)
+    registration["passed_passwords"] = sorted(passed)
+
+    eligible = True
+    condition_lines = []
+    main_req = record.get("requirements") if isinstance(record.get("requirements"), dict) else {}
+    has_main_requirements = bool(
+        main_req.get("username")
+        or int(main_req.get("min_messages", 0) or 0) > 0
+        or str(main_req.get("password") or "").strip()
+    )
+    if has_main_requirements:
+        condition_lines.append("🎫 抽奖发布群 ✅")
+        if main_req.get("username"):
+            ok = bool(getattr(user, "username", None))
+            condition_lines.append(f"└ 🪪 已设置用户名 {'✅' if ok else '❌'}")
+            eligible = eligible and ok
+        main_min = int(main_req.get("min_messages", 0) or 0)
+        if main_min > 0:
+            count = _lottery_message_count(record, int(record["chat_id"]), user.id)
+            ok = count > main_min
+            condition_lines.append(
+                f"└ 🎟️ 发布后发言数大于 {main_min} 条 {'✅' if ok else '❌'}（{count}/{main_min}）"
+            )
+            eligible = eligible and ok
+        main_password = str(main_req.get("password") or "").strip()
+        if main_password:
+            ok = main_password in passed
+            condition_lines.append(f"└ 🔑 发送口令﹝{main_password}﹞ {'✅' if ok else '❌'}")
+            eligible = eligible and ok
+
+    for item in record.get("follow_targets", []) or []:
+        if not isinstance(item, dict):
+            continue
+        target = str(item.get("target") or "未设置")
+        target_name = target.lstrip("@") or target
+        joined = False
+        chat = None
+        try:
+            chat = await context.bot.get_chat(target)
+            member = await context.bot.get_chat_member(chat.id, user.id)
+            status = getattr(member, "status", "")
+            status = getattr(status, "value", status)
+            joined = str(status).lower() not in {"left", "kicked"}
         except Exception:
-            return False
-        if getattr(member, "status", "") in {"left", "kicked"}:
-            return False
-    return True
+            joined = False
+        condition_lines.append(f"🎫 已加入-{target_name} {'✅' if joined else '❌'}")
+        eligible = eligible and joined
+
+        req = _target_requirements(item)
+        if req["username"]:
+            ok = bool(getattr(user, "username", None))
+            condition_lines.append(f"└ 🪪 已设置用户名 {'✅' if ok else '❌'}")
+            eligible = eligible and ok
+        if _target_is_group(item):
+            if req["min_messages"] > 0:
+                count = _lottery_message_count(record, int(chat.id), user.id) if joined and chat else 0
+                ok = count > req["min_messages"]
+                condition_lines.append(
+                    f"└ 🎟️ 发布后发言数大于 {req['min_messages']} 条 {'✅' if ok else '❌'}（{count}/{req['min_messages']}）"
+                )
+                eligible = eligible and ok
+            if req["password"]:
+                ok = req["password"] in passed
+                condition_lines.append(f"└ 🔑 发送口令﹝{req['password']}﹞ {'✅' if ok else '❌'}")
+                eligible = eligible and ok
+
+    registration["eligible"] = bool(eligible)
+    registration["checked_at"] = int(time.time())
+    participants = record.get("participants") or {}
+    registered_count = sum(1 for item in participants.values() if isinstance(item, dict))
+    eligible_count = sum(
+        1 for item in participants.values()
+        if isinstance(item, dict) and bool(item.get("eligible", False))
+    )
+    status_title = "达标" if eligible else "未达标"
+    status_note = "✅ 您已完成全部激活任务，可以参与抽奖！" if eligible else "❌ 您还需要完成激活任务才能抽奖！"
+    draw_time = _timestamp_text(int(record.get("draw_at", 0) or 0), context)
+    lines = [
+        f"<b>您已成功报名抽奖（{status_title}）</b>",
+        "",
+        status_note,
+        "",
+        f"🎰 <b>{record.get('name') or '抽奖'}</b>",
+        "",
+        *(condition_lines or ["无需额外参与条件。"]),
+    ]
+
+    # Once the user is eligible, include the actual lottery information rather
+    # than only the activation checklist.
+    if eligible:
+        lines.extend(["", "📜 <b>抽奖详情</b>", str(record.get("description") or "未填写")])
+        lines.extend(["", "🎁 <b>奖品名单</b>"])
+        prizes = record.get("prizes", []) or []
+        if prizes:
+            for prize in prizes:
+                if isinstance(prize, dict):
+                    lines.append(
+                        f"💰️ {prize.get('name', '未命名奖品')} × <b>{int(prize.get('count', 1) or 1)}</b>"
+                    )
+        else:
+            lines.append("暂未设置奖品")
+
+    lines.extend([
+        "",
+        f"💁 参与情况：{eligible_count}达标 / {registered_count}报名",
+        "",
+        f"📅 开奖时间：（{get_bot_timezone(context)}）",
+        draw_time,
+    ])
+    return bool(eligible), "\n".join(lines)
 
 
-def _user_message_count(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> int:
-    data = load_json(get_bot_path(context, f"data/talk_count/{chat_id}.json"))
-    info = data.get(str(user_id), {}) if isinstance(data, dict) else {}
-    daily = info.get("daily", {}) if isinstance(info, dict) else {}
-    return sum(int(value or 0) for value in daily.values()) if isinstance(daily, dict) else 0
-
-
-async def _finish_join(context: ContextTypes.DEFAULT_TYPE, user, record: dict) -> tuple[bool, str]:
-    req = record.get("requirements", {})
-    if req.get("username") and not getattr(user, "username", None):
-        return False, "需要先设置 Telegram 用户名。"
-    if _user_message_count(context, int(record["chat_id"]), user.id) <= int(req.get("min_messages", 0) or 0):
-        return False, "发言条数未达到要求。"
-    if not await _check_follow_targets(context, user.id, record):
-        return False, "请先关注全部要求的频道或群组。"
-    record.setdefault("participants", {})[str(user.id)] = {"user_id": user.id, "name": user.full_name, "username": user.username}
-    return True, "✅ 已成功参加抽奖。"
+def _participation_status_keyboard(record: dict) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔄 刷新参与条件", callback_data=f"{CALLBACK_PREFIX}:join_refresh:{record['id']}")
+    ]])
 
 
 async def event_lottery_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -488,6 +973,21 @@ async def event_lottery_callback(update: Update, context: ContextTypes.DEFAULT_T
     if not record:
         return await query.answer("抽奖不存在或已删除。", show_alert=True)
 
+    if action == "time_immediate":
+        if not await _can_manage(context, query.from_user.id, int(record["chat_id"])):
+            return await query.answer("无管理权限。", show_alert=True)
+        record["publish_at"] = 0
+        record["updated_at"] = int(time.time())
+        _save(context, data)
+        stage = context.user_data.get(DRAFT_KEY)
+        if isinstance(stage, dict) and stage.get("id") == lottery_id and stage.get("field") == "publish_at":
+            context.user_data.pop(DRAFT_KEY, None)
+        await query.answer("已设置为立即发布。")
+        return await query.edit_message_text(
+            _editor_text(record, context),
+            reply_markup=_editor_keyboard(record),
+        )
+
     if action == "clone":
         if not await _can_manage(context, query.from_user.id, int(record["chat_id"])):
             return await query.answer("无管理权限。", show_alert=True)
@@ -497,7 +997,11 @@ async def event_lottery_callback(update: Update, context: ContextTypes.DEFAULT_T
         clone["draw_at"] = 0
         clone["prizes"] = [dict(item) for item in record.get("prizes", []) if isinstance(item, dict)]
         clone["requirements"] = dict(record.get("requirements") or {})
-        clone["follow_targets"] = [dict(item) for item in record.get("follow_targets", []) if isinstance(item, dict)]
+        clone["follow_targets"] = [
+            {**item, "requirements": dict(_target_requirements(item))}
+            for item in record.get("follow_targets", [])
+            if isinstance(item, dict)
+        ]
         clone["sync_targets"] = list(record.get("sync_targets", []) or [])
         clone["cover"] = dict(record["cover"]) if isinstance(record.get("cover"), dict) else None
         # Publication schedule, participants and winners are deliberately reset.
@@ -537,22 +1041,29 @@ async def event_lottery_callback(update: Update, context: ContextTypes.DEFAULT_T
         if not await _can_manage(context, query.from_user.id, int(record["chat_id"])):
             return await query.answer("无管理权限。", show_alert=True)
         field = parts[3] if len(parts) > 3 else ""
-        context.user_data[DRAFT_KEY] = {"id": lottery_id, "field": field}
+        _start_editor_input_stage(query, context, lottery_id, field)
         prompts = {
             "name": "请输入抽奖名称。",
             "description": "请输入抽奖说明。",
-            "publish_at": "请输入发布时间：发送“立即”立即发布，或输入未来时间 YYYY-MM-DD HH:MM。",
-            "draw_at": "请输入未来开奖时间，格式 YYYY-MM-DD HH:MM。",
+            "publish_at": _time_input_prompt("publish_at", context),
+            "draw_at": _time_input_prompt("draw_at", context),
             "min_messages": "请输入最低发言条数；输入 0 表示不限制。",
-            "password": "请输入参与口令；发送“清空”可不要求口令。",
-            "cover": "请发送抽奖封面（图片/视频），或发送“清空”不设置封面。",
+            "password": "请输入参与口令；发送“清空”清除口令。",
+            "cover": "请发送抽奖封面（图片或视频），或发送“清空”不设置封面。",
         }
+        rows = []
+        if field == "publish_at":
+            rows.append([InlineKeyboardButton(
+                "⚡ 立即发布",
+                callback_data=f"{CALLBACK_PREFIX}:time_immediate:{lottery_id}",
+            )])
+        rows.append([InlineKeyboardButton(
+            "⬅️ 返回编辑", callback_data=f"{CALLBACK_PREFIX}:edit:{lottery_id}"
+        )])
         await query.answer()
         return await query.edit_message_text(
             prompts.get(field, "请输入设置内容。"),
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("⬅️ 返回编辑", callback_data=f"{CALLBACK_PREFIX}:edit:{lottery_id}")
-            ]]),
+            reply_markup=InlineKeyboardMarkup(rows),
         )
     if action == "prizes":
         if not await _can_manage(context, query.from_user.id, int(record["chat_id"])):
@@ -560,9 +1071,9 @@ async def event_lottery_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer()
         return await query.edit_message_text("🎁 奖品设置", reply_markup=_prizes_keyboard(record))
     if action == "prize_add":
-        context.user_data[DRAFT_KEY] = {"id": lottery_id, "field": "prize_add"}
+        _start_editor_input_stage(query, context, lottery_id, "prize_add")
         await query.answer()
-        return await query.edit_message_text("请输入奖品，格式：奖品名称 | 数量\n例如：手机 | 2", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ 返回奖品设置", callback_data=f"{CALLBACK_PREFIX}:prizes:{lottery_id}")]]))
+        return await query.edit_message_text("请输入奖品，格式：奖品名称 x 数量\n例如：手机 x 2", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ 返回奖品设置", callback_data=f"{CALLBACK_PREFIX}:prizes:{lottery_id}")]]))
     if action == "prize_delete" and len(parts) >= 4:
         index = int(parts[3])
         if 0 <= index < len(record.get("prizes", [])):
@@ -573,39 +1084,124 @@ async def event_lottery_callback(update: Update, context: ContextTypes.DEFAULT_T
         return await query.edit_message_text("🎁 奖品设置", reply_markup=_prizes_keyboard(record))
     if action == "requirements":
         await query.answer()
-        return await query.edit_message_text("📮 参与条件", reply_markup=_requirements_keyboard(record))
+        return await query.edit_message_text(
+            "📮 请选择要设置参与条件的群组：",
+            reply_markup=_requirements_selector_keyboard(record),
+        )
+    if action == "req_main":
+        await query.answer()
+        return await query.edit_message_text(
+            "🎰 抽奖发布群的参与条件",
+            reply_markup=_requirements_keyboard(record),
+        )
     if action == "req_toggle" and len(parts) >= 4:
         key = parts[3]
         if key == "username":
             record.setdefault("requirements", {})["username"] = not bool(record["requirements"].get("username"))
             _save(context, data)
         await query.answer("已更新")
-        return await query.edit_message_text("📮 参与条件", reply_markup=_requirements_keyboard(record))
+        return await query.edit_message_text("🎰 抽奖发布群的参与条件", reply_markup=_requirements_keyboard(record))
+    if action == "target_requirements" and len(parts) >= 4:
+        index = int(parts[3])
+        values = record.get("follow_targets", []) or []
+        if not 0 <= index < len(values) or not isinstance(values[index], dict):
+            return await query.answer("关注目标不存在。", show_alert=True)
+        if await _refresh_target_chat_type(context, values[index]):
+            _save(context, data)
+        await query.answer()
+        return await query.edit_message_text(
+            _target_requirements_text(record, index),
+            reply_markup=_target_requirements_keyboard(record, index),
+        )
+    if action == "target_req_toggle" and len(parts) >= 5:
+        index, key = int(parts[3]), parts[4]
+        values = record.get("follow_targets", []) or []
+        if not 0 <= index < len(values) or not isinstance(values[index], dict):
+            return await query.answer("关注目标不存在。", show_alert=True)
+        req = _target_requirements(values[index])
+        if key == "username":
+            req["username"] = not req["username"]
+            _set_target_requirements(values[index], req)
+            _save(context, data)
+        await query.answer("已更新")
+        return await query.edit_message_text(
+            _target_requirements_text(record, index),
+            reply_markup=_target_requirements_keyboard(record, index),
+        )
+    if action == "target_req_field" and len(parts) >= 5:
+        index, field = int(parts[3]), parts[4]
+        values = record.get("follow_targets", []) or []
+        if field not in {"min_messages", "password"} or not 0 <= index < len(values) or not isinstance(values[index], dict):
+            return await query.answer("关注目标不存在。", show_alert=True)
+        if not _target_is_group(values[index]):
+            return await query.answer("频道不能设置发言条数或参与口令，只有群组可以设置。", show_alert=True)
+        stage_field = f"target_req_{field}"
+        _start_editor_input_stage(query, context, lottery_id, stage_field)
+        context.user_data[DRAFT_KEY]["target_index"] = index
+        context.user_data[DRAFT_KEY]["return_to"] = "target_requirements"
+        prompt = "请输入该群最低发言条数；输入 0 表示不限制。" if field == "min_messages" else "请输入该群参与口令；发送“清空”清除口令。"
+        await query.answer()
+        return await query.edit_message_text(
+            prompt,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ 返回群组条件", callback_data=f"{CALLBACK_PREFIX}:target_requirements:{lottery_id}:{index}")
+            ]]),
+        )
     if action == "targets" and len(parts) >= 4:
         kind = parts[3]
         await query.answer()
-        return await query.edit_message_text(
-            "📢 关注频道/群组" if kind == "follow" else "📍 同步位置",
-            reply_markup=_targets_keyboard(record, kind),
-        )
+        title = "📢 关注频道/群组（点目标可设置该群参与条件）" if kind == "follow" else "📍 同步位置（从关注列表中选择）"
+        return await query.edit_message_text(title, reply_markup=_targets_keyboard(record, kind))
     if action == "target_add" and len(parts) >= 4:
         kind = parts[3]
-        context.user_data[DRAFT_KEY] = {"id": lottery_id, "field": f"target_{kind}"}
-        prompt = "请输入目标，格式：@频道或群组 | 可选参与口令" if kind == "follow" else "请输入同步频道或群组，例如：@navigation_channel"
+        if kind == "sync":
+            await query.answer()
+            return await query.edit_message_text("📍 同步位置（从关注列表中选择）", reply_markup=_targets_keyboard(record, "sync"))
+        _start_editor_input_stage(query, context, lottery_id, "target_follow")
         await query.answer()
-        return await query.edit_message_text(prompt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ 返回编辑", callback_data=f"{CALLBACK_PREFIX}:edit:{lottery_id}")]]))
+        return await query.edit_message_text(
+            "请输入要关注的公开 @频道或 @群组。\n机器人必须已是该频道或群组的管理员，才可添加。",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ 返回关注列表", callback_data=f"{CALLBACK_PREFIX}:targets:{lottery_id}:follow")
+            ]]),
+        )
+    if action == "sync_pick" and len(parts) >= 4:
+        index = int(parts[3])
+        follows = record.get("follow_targets", []) or []
+        if not 0 <= index < len(follows) or not isinstance(follows[index], dict):
+            return await query.answer("关注目标不存在。", show_alert=True)
+        target = str(follows[index].get("target") or "")
+        values = record.setdefault("sync_targets", [])
+        if target and target not in values:
+            if len(values) >= MAX_TARGETS:
+                return await query.answer(f"最多只能设置 {MAX_TARGETS} 个同步位置。", show_alert=True)
+            values.append(target)
+            _save(context, data)
+        await query.answer("已添加同步位置")
+        return await query.edit_message_text("📍 同步位置（从关注列表中选择）", reply_markup=_targets_keyboard(record, "sync"))
     if action == "target_delete" and len(parts) >= 5:
         kind, index = parts[3], int(parts[4])
         key = "follow_targets" if kind == "follow" else "sync_targets"
         values = record.get(key, [])
         if 0 <= index < len(values):
-            values.pop(index)
+            removed = values.pop(index)
+            if kind == "follow":
+                target = str((removed or {}).get("target") if isinstance(removed, dict) else removed)
+                record["sync_targets"] = [item for item in record.get("sync_targets", []) if item != target]
             _save(context, data)
         await query.answer("已移除")
-        return await query.edit_message_text("目标设置", reply_markup=_targets_keyboard(record, kind))
+        title = "📢 关注频道/群组（点目标可设置该群参与条件）" if kind == "follow" else "📍 同步位置（从关注列表中选择）"
+        return await query.edit_message_text(title, reply_markup=_targets_keyboard(record, kind))
     if action == "preview":
         await query.answer()
-        return await query.message.reply_text(_format_lottery(record, context), parse_mode="HTML")
+        try:
+            return await _send_lottery_content(
+                context,
+                query.message.chat_id,
+                record,
+            )
+        except Exception as exc:
+            return await query.message.reply_text(f"❌ 无法预览：{exc}")
     if action == "publish":
         if not record.get("name") or not record.get("prizes") or not record.get("draw_at"):
             return await query.answer("请至少设置名称、奖品和开奖时间。", show_alert=True)
@@ -622,22 +1218,31 @@ async def event_lottery_callback(update: Update, context: ContextTypes.DEFAULT_T
                 return await query.answer("发布失败，请确认机器人可在目标位置发言。", show_alert=True)
             record["status"] = "open"
             record["published_at"] = int(time.time())
+            record["message_counts"] = {}
             _save(context, data)
             await query.answer("已立即发布")
         return await query.edit_message_text(_editor_text(record, context), reply_markup=_editor_keyboard(record))
     if action == "join":
         if record.get("status") != "open":
             return await query.answer("抽奖尚未开放或已结束。", show_alert=True)
-        passwords = [str(record.get("requirements", {}).get("password") or "").strip()]
-        passwords += [str(item.get("password") or "").strip() for item in record.get("follow_targets", []) if isinstance(item, dict)]
-        passwords = [value for value in passwords if value]
-        if passwords:
-            context.user_data[JOIN_KEY] = {"id": lottery_id, "chat_id": int(record["chat_id"]), "required": passwords, "passed": []}
-            return await query.answer("请在抽奖群发送参与口令。", show_alert=True)
-        ok, note = await _finish_join(context, query.from_user, record)
-        if ok:
-            _save(context, data)
-        return await query.answer(note, show_alert=True)
+        link = await _lottery_deep_link(context, lottery_id)
+        if link:
+            # Telegram opens the deep link directly from the callback response;
+            # do not leave an extra prompt/button in the lottery group.
+            return await query.answer(url=link)
+        return await query.answer("机器人未设置用户名，暂时无法跳转私聊。", show_alert=True)
+    if action == "join_refresh":
+        if record.get("status") != "open":
+            return await query.answer("抽奖尚未开放或已结束。", show_alert=True)
+        await query.answer("已刷新")
+        _eligible, status_text = await _build_participation_status(context, query.from_user, record)
+        _save(context, data)
+        return await query.edit_message_text(
+            status_text,
+            parse_mode="HTML",
+            reply_markup=_participation_status_keyboard(record),
+        )
+
 
 
 async def _handle_editor_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -656,6 +1261,16 @@ async def _handle_editor_input(update: Update, context: ContextTypes.DEFAULT_TYP
     text = (update.message.text or "").strip()
     if text in {"取消", "返回"}:
         context.user_data.pop(DRAFT_KEY, None)
+        await _delete_editor_input_prompt(context, stage)
+        if stage.get("return_to") == "target_requirements":
+            index = int(stage.get("target_index", -1))
+            values = record.get("follow_targets", []) or []
+            if 0 <= index < len(values) and isinstance(values[index], dict):
+                await update.message.reply_text(
+                    _target_requirements_text(record, index),
+                    reply_markup=_target_requirements_keyboard(record, index),
+                )
+                return True
         await update.message.reply_text(_editor_text(record, context), reply_markup=_editor_keyboard(record))
         return True
 
@@ -689,12 +1304,16 @@ async def _handle_editor_input(update: Update, context: ContextTypes.DEFAULT_TYP
             if text in {"清空", "关闭"}:
                 record["cover"] = None
             else:
-                record["cover"] = build_message_payload(update.message)
+                cover = build_message_payload(update.message)
+                if cover.get("type") not in {"photo", "video"}:
+                    raise ValueError("抽奖封面仅支持图片或视频。")
+                record["cover"] = cover
         elif field == "prize_add":
-            if "|" not in text:
-                raise ValueError("格式：奖品名称 | 数量，例如：手机 | 2")
-            name, count_raw = [item.strip() for item in text.split("|", 1)]
-            if not name or not count_raw.isdigit() or int(count_raw) <= 0:
+            match = re.fullmatch(r"(.+?)\s*[xX×]\s*(\d+)\s*", text)
+            if not match:
+                raise ValueError("格式：奖品名称 x 数量，例如：手机 x 2")
+            name, count_raw = (match.group(1).strip(), match.group(2))
+            if not name or int(count_raw) <= 0:
                 raise ValueError("奖品格式或数量不正确。")
             if len(record.get("prizes", [])) >= MAX_PRIZES:
                 raise ValueError(f"最多只能设置 {MAX_PRIZES} 项奖品。")
@@ -702,24 +1321,41 @@ async def _handle_editor_input(update: Update, context: ContextTypes.DEFAULT_TYP
         elif field == "target_follow":
             if len(record.get("follow_targets", [])) >= MAX_TARGETS:
                 raise ValueError(f"最多只能设置 {MAX_TARGETS} 个关注目标。")
-            target_raw, sep, password = text.partition("|")
-            target = _normalize_target(target_raw)
-            if not target:
-                raise ValueError("请输入公开 @频道或 @群组用户名。")
-            values = record.setdefault("follow_targets", [])
-            if any(item.get("target") == target for item in values if isinstance(item, dict)):
-                raise ValueError("该关注目标已经存在。")
-            values.append({"target": target, "password": password.strip()[:80] if sep else ""})
-        elif field == "target_sync":
-            if len(record.get("sync_targets", [])) >= MAX_TARGETS:
-                raise ValueError(f"最多只能设置 {MAX_TARGETS} 个同步位置。")
             target = _normalize_target(text)
             if not target:
                 raise ValueError("请输入公开 @频道或 @群组用户名。")
-            values = record.setdefault("sync_targets", [])
-            if target in values:
-                raise ValueError("该同步位置已经存在。")
-            values.append(target)
+            target_chat = await _get_admin_target_chat(context, target)
+            if target_chat is None:
+                raise ValueError("机器人不是该频道或群组的管理员，无法添加为关注目标。")
+            chat_type = getattr(target_chat, "type", "")
+            chat_type = getattr(chat_type, "value", chat_type)
+            chat_type = str(chat_type).lower()
+            if chat_type not in {"channel", "group", "supergroup"}:
+                raise ValueError("仅支持频道、群组或超级群组作为关注目标。")
+            values = record.setdefault("follow_targets", [])
+            if any(item.get("target") == target for item in values if isinstance(item, dict)):
+                raise ValueError("该关注目标已经存在。")
+            values.append({
+                "target": target,
+                "chat_id": int(target_chat.id),
+                "chat_type": chat_type,
+                "requirements": {"username": False, "min_messages": 0, "password": ""},
+            })
+        elif field in {"target_req_min_messages", "target_req_password"}:
+            index = int(stage.get("target_index", -1))
+            values = record.get("follow_targets", []) or []
+            if not 0 <= index < len(values) or not isinstance(values[index], dict):
+                raise ValueError("关注目标不存在。")
+            if not _target_is_group(values[index]):
+                raise ValueError("频道不能设置发言条数或参与口令，只有群组可以设置。")
+            target_req = _target_requirements(values[index])
+            if field == "target_req_min_messages":
+                if not text.isdigit():
+                    raise ValueError("发言条数必须是非负整数。")
+                target_req["min_messages"] = min(100000, int(text))
+            else:
+                target_req["password"] = "" if text in {"清空", "关闭"} else text[:80]
+            _set_target_requirements(values[index], target_req)
         else:
             raise ValueError("未知抽奖设置项。")
     except Exception as exc:
@@ -729,39 +1365,132 @@ async def _handle_editor_input(update: Update, context: ContextTypes.DEFAULT_TYP
     record["updated_at"] = int(time.time())
     _save(context, data)
     context.user_data.pop(DRAFT_KEY, None)
+    await _delete_editor_input_prompt(context, stage)
+    if stage.get("return_to") == "target_requirements":
+        index = int(stage.get("target_index", -1))
+        values = record.get("follow_targets", []) or []
+        if 0 <= index < len(values) and isinstance(values[index], dict):
+            await update.message.reply_text(
+                _target_requirements_text(record, index),
+                reply_markup=_target_requirements_keyboard(record, index),
+            )
+            return True
     await update.message.reply_text(_editor_text(record, context), reply_markup=_editor_keyboard(record))
     return True
+
+
+async def event_lottery_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Open a lottery registration/status card from t.me/<bot>?start=eventlot_<id>."""
+    if not update.message or not update.effective_user or not update.effective_chat:
+        return
+    if update.effective_chat.type != "private" or not context.args:
+        return
+    parameter = str(context.args[0] or "")
+    if not parameter.startswith("eventlot_"):
+        return
+    lottery_id = parameter[len("eventlot_"):]
+    data = _load(context)
+    record = _record(data, lottery_id)
+    if not record or record.get("status") != "open":
+        await update.message.reply_text("❌ 该抽奖不存在、尚未开放或已经结束。")
+        raise ApplicationHandlerStop
+
+    context.user_data[JOIN_KEY] = {"id": lottery_id, "source_chat_id": int(record["chat_id"])}
+    _eligible, status_text = await _build_participation_status(context, update.effective_user, record)
+    _save(context, data)
+    await update.message.reply_text(
+        status_text,
+        parse_mode="HTML",
+        reply_markup=_participation_status_keyboard(record),
+    )
+    raise ApplicationHandlerStop
 
 
 async def event_lottery_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await _handle_editor_input(update, context):
         return
-    state = context.user_data.get(JOIN_KEY)
-    if not isinstance(state, dict) or not update.effective_user or not update.effective_chat or not update.message:
+    if not update.effective_user or not update.effective_chat or not update.message:
         return
-    if int(state.get("chat_id", 0) or 0) != int(update.effective_chat.id):
-        return
-    data = _load(context)
-    record = _record(data, state.get("id"))
-    if not record or record.get("status") != "open":
-        context.user_data.pop(JOIN_KEY, None)
-        return
+
+    chat = update.effective_chat
     code = (update.message.text or "").strip()
-    required = state.get("required", [])
-    passed = state.setdefault("passed", [])
-    if code in required and code not in passed:
-        passed.append(code)
-    if set(passed) != set(required):
-        return await update.message.reply_text("口令正确，还需完成其他参与口令。")
-    ok, note = await _finish_join(context, update.effective_user, record)
-    if ok:
-        _save(context, data)
-        context.user_data.pop(JOIN_KEY, None)
-    await update.message.reply_text(note)
+    data = _load(context)
+    state = context.user_data.get(JOIN_KEY)
+    record = _record(data, state.get("id")) if isinstance(state, dict) else None
+
+    # A matching password in the original lottery group can also resume the
+    # flow when the user has not opened the private card in this session yet.
+    if not isinstance(record, dict) and chat.type in {"group", "supergroup"}:
+        matches = [
+            item
+            for item in data.get("lotteries", {}).values()
+            if isinstance(item, dict)
+            and item.get("status") == "open"
+            and int(item.get("chat_id", 0) or 0) == int(chat.id)
+            and code in _required_passwords(item)
+        ]
+        if len(matches) == 1:
+            record = matches[0]
+            context.user_data[JOIN_KEY] = {
+                "id": record["id"],
+                "source_chat_id": int(record["chat_id"]),
+            }
+
+    if not isinstance(record, dict) or record.get("status") != "open":
+        if isinstance(state, dict):
+            context.user_data.pop(JOIN_KEY, None)
+        return
+
+    is_private = chat.type == "private"
+    is_lottery_group = int(chat.id) == int(record["chat_id"])
+    # Ordinary messages remain silent. A matching participation password may be
+    # sent either to the bot privately or in the original lottery group.
+    if not (is_private or is_lottery_group) or code not in _required_passwords(record):
+        return
+
+    _eligible, status_text = await _build_participation_status(
+        context,
+        update.effective_user,
+        record,
+        submitted_password=code,
+    )
+    _save(context, data)
+
+    if is_private:
+        return await update.message.reply_text(
+            status_text,
+            parse_mode="HTML",
+            reply_markup=_participation_status_keyboard(record),
+        )
+
+    # The matching code was sent in the lottery group. Keep the detailed card
+    # in the bot private chat and leave only a minimal confirmation in-group.
+    try:
+        await context.bot.send_message(
+            chat_id=update.effective_user.id,
+            text=status_text,
+            parse_mode="HTML",
+            reply_markup=_participation_status_keyboard(record),
+        )
+        return await update.message.reply_text("✅ 已收到参与口令，报名进度已更新，请到机器人私聊查看。")
+    except Exception:
+        return await update.message.reply_text(
+            "✅ 已收到参与口令。请先点击抽奖消息的“参与抽奖”进入机器人私聊查看报名进度。"
+        )
 
 
 def register_event_lottery_handlers(app):
+    # Run before the generic verification /start handler so eventlot deep links
+    # open the private participation card instead of the ordinary welcome text.
+    app.add_handler(
+        CommandHandler("start", event_lottery_start, filters=filters.ChatType.PRIVATE),
+        group=-100,
+    )
     app.add_handler(CallbackQueryHandler(event_lottery_callback, pattern=rf"^{CALLBACK_PREFIX}:"))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (~filters.COMMAND), event_lottery_text), group=18)
+    app.add_handler(
+        MessageHandler(filters.ChatType.GROUPS & filters.TEXT & (~filters.COMMAND), event_lottery_message_counter),
+        group=-19,
+    )
     app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT & (~filters.COMMAND), event_lottery_text), group=-18)
     app.job_queue.run_repeating(event_lottery_tick, interval=60, first=60, name="event_lottery_tick")
