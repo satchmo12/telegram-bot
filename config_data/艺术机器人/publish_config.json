@@ -1,0 +1,82 @@
+{
+    "channel_id": -1002934622997,
+    "backup_channel_id": -1002624218219,
+    "backup_channel_use_telethon": true,
+    "backup_channel_session": "+13218329173",
+    "backup_channel_listen_session": "",
+    "backup_channel_forward_session": "+13218329173",
+    "pending_history_post_migration": null,
+    "channel_change_history": [],
+    "review_enabled": true,
+    "daily_limit": 0,
+    "ads_enabled": false,
+    "ads": [],
+    "buttons": [],
+    "bottom_buttons_enabled": false,
+    "proof_required": true,
+    "reject_reason_required": true,
+    "comment_forward_enabled": true,
+    "forward_channel_id": -1004406338659,
+    "report_link_enabled": true,
+    "template_publish_enabled": true,
+    "publish_templates": [
+        {
+            "id": 1,
+            "name": "发布模版",
+            "text": "联系：{联系方式}",
+            "format": "plain",
+            "buttons": [],
+            "button_columns": 1
+        }
+    ],
+    "keyword_extract_labels": [
+        "艺名",
+        "联系",
+        "区域",
+        "标签",
+        "课费"
+    ],
+    "keyword_group_reply_enabled": true,
+    "keyword_group_reply_rules": [
+        {
+            "id": 1,
+            "input_label": "艺名",
+            "reply_label": "",
+            "display_text": "点击联系美丽的“{keyword}”老师",
+            "default_text": "艺术展推荐的老师可以约课吗！",
+            "button_text": "点击约课{keyword}",
+            "enabled": true
+        }
+    ],
+    "keyword_post_search_display_mode": "main",
+    "checkin_enabled": true,
+    "checkin_duration_hours": 12,
+    "checkin_user_label": "联系",
+    "checkin_display_label": "艺名",
+    "checkin_group_label": "区域",
+    "continuous_submission_enabled": false,
+    "custom_menu_buttons": {
+        "channel_clone": false,
+        "telethon_manage": false,
+        "bot_channel_config": false,
+        "group_config": false,
+        "global_ad_config": false
+    },
+    "submission_enabled": true,
+    "random_view_enabled": false,
+    "comment_buttons": [
+        {
+            "id": 1,
+            "text": "艺术展览会老师报告区",
+            "url": "https://t.me/+NtE1N4u4M2MzMjJh"
+        }
+    ],
+    "bottom_comment_buttons_enabled": true,
+    "checkin_command_text": "打卡",
+    "checkin_cancel_command_text": "取消打卡",
+    "checkin_online_command_text": "在线宝宝",
+    "checkin_online_text": "在线宝宝",
+    "user_mark_enabled": false,
+    "user_mark_report_chat_id": null,
+    "user_mark_labels": []
+}

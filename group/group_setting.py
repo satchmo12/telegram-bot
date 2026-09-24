@@ -48,6 +48,7 @@ from group.ai_group_reply import (
     get_global_ai_reply_config,
     save_global_ai_reply_config,
 )
+from group.event_lottery import open_lottery_creator
 from group.talk_lottery_settings import (
     STAGE_TRIGGER_RATE,
     handle_callback as _handle_talk_lottery_callback,
@@ -84,16 +85,22 @@ TOGGLE_FIELDS = [
     ("reply_enabled", "开启回复"),
     ("voice_reply_enabled", "语音回复"),
     ("verify", "身份验证"),
+    ("join_request_enabled", "处理入群申请"),
     ("welcome", "入群欢迎"),
     ("silent", "群静默"),
     ("ad_filter", "广告拦截"),
-    ("chengyu_game", "成语接龙"),
-    ("manor", "庄园系统"),
-    (FEATURE_FRIENDS, "群好友功能"),
     ("recommend", "群推荐"),
     ("name_change_notice", "用户名变更提示"),
     ("active_speak_enabled", "主动说话"),
 ]
+GAME_TOGGLE_FIELDS = [
+    ("chengyu_game", "成语接龙"),
+    ("manor", "庄园系统"),
+    (FEATURE_FRIENDS, "群好友功能"),
+]
+GAME_TOGGLE_KEYS = {item[0] for item in GAME_TOGGLE_FIELDS}
+
+
 LOTTERY_TOGGLE_FIELDS = [
     ("points_lottery_enabled", "积分抽奖"),
     ("talk_points_enabled", "发言积分"),
@@ -109,6 +116,7 @@ TALK_LOTTERY_TOGGLE_FIELDS = [
 LOTTERY_TOGGLE_KEYS = {item[0] for item in LOTTERY_TOGGLE_FIELDS}
 BOT_ADMIN_REQUIRED_FIELDS = {
     "verify",
+    "join_request_enabled",
     "ad_filter",
     "spam_limit",
     "force_subscribe",
@@ -357,6 +365,44 @@ def _build_lottery_settings_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardM
     )
     return InlineKeyboardMarkup(rows)
 
+
+
+def _build_game_settings_text(chat_id: str, cfg: dict) -> str:
+    lines = ["🎮 游戏功能设置", f"群ID：<code>{chat_id}</code>", ""]
+    for key, label in GAME_TOGGLE_FIELDS:
+        lines.append(f"{'✅' if bool(cfg.get(key, False)) else '🚫'} {label}")
+    return "\n".join(lines)
+
+
+def _build_game_settings_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(
+            f"{'✅' if bool(cfg.get(key, False)) else '🚫'} {label}",
+            callback_data=f"{CALLBACK_PREFIX}:game_toggle:{chat_id}:{key}",
+        )]
+        for key, label in GAME_TOGGLE_FIELDS
+    ]
+    rows.append([InlineKeyboardButton("⬅️ 返回群设置", callback_data=f"{CALLBACK_PREFIX}:game_back:{chat_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _open_game_settings_panel(
+    query, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str, user_id: int
+):
+    chat_id = _parse_chat_id(chat_id_str)
+    if chat_id is None:
+        return await query.answer("群ID无效。", show_alert=True)
+    if not await _can_manage_group(context, user_id, chat_id):
+        return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+    data = get_group_whitelist(context)
+    cfg = data.get(chat_id_str, {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    return await query.edit_message_text(
+        _build_game_settings_text(chat_id_str, cfg),
+        reply_markup=_build_game_settings_keyboard(chat_id_str, cfg),
+        parse_mode="HTML",
+    )
 
 
 async def _open_lottery_settings_panel(
@@ -1350,12 +1396,23 @@ def _build_group_panel_keyboard(
     # if action_group_row:
     #     rows.append(action_group_row)
         
+    # rows.append([
+    #     InlineKeyboardButton(
+    #         "🎮 游戏功能",
+    #         callback_data=f"{CALLBACK_PREFIX}:game_menu:{chat_id}",
+    #     )
+    # ])
+
     interval = int(cfg.get("active_speak_interval_min", ACTIVE_SPEAK_DEFAULT_INTERVAL))
     rows.append(
         [
             InlineKeyboardButton(
                 text=f"⏱ 主动说话频率：{interval}m",
                 callback_data=f"{CALLBACK_PREFIX}:active_speak_interval:{chat_id}",
+            ),
+            InlineKeyboardButton(
+                "🎮 游戏功能",
+                callback_data=f"{CALLBACK_PREFIX}:game_menu:{chat_id}",
             ),
             InlineKeyboardButton(
                 "🤖 AI 接话设置",
@@ -1396,7 +1453,14 @@ def _build_group_panel_keyboard(
                     "🎰 发言中奖设置",
                     callback_data=f"{CALLBACK_PREFIX}:talk_lottery_menu:{chat_id}",
                 ),
-                
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🎉 独立活动抽奖",
+                    callback_data=f"{CALLBACK_PREFIX}:event_lottery:{chat_id}",
+                )
             ]
         )
 
@@ -2312,6 +2376,47 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                 ),
             )
         return await _open_group_panel(query, context, chat_id_str, user_id)
+
+    if action == "event_lottery" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return await query.answer("群ID无效。", show_alert=True)
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法创建抽奖。", show_alert=True)
+        if not await _is_bot_group_admin(context, chat_id):
+            return await query.answer("机器人不是该群管理员，无法发布独立抽奖。", show_alert=True)
+        return await open_lottery_creator(query, context, chat_id_str, user_id)
+
+    if action == "game_menu" and len(parts) >= 3:
+        await query.answer()
+        return await _open_game_settings_panel(query, context, parts[2], user_id)
+
+    if action == "game_toggle" and len(parts) >= 4:
+        chat_id_str, feature_key = parts[2], parts[3]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return await query.answer("群ID无效。", show_alert=True)
+        if feature_key not in GAME_TOGGLE_KEYS:
+            return await query.answer("游戏功能不存在。", show_alert=True)
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        cfg = data.get(chat_id_str, {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        cfg[feature_key] = not bool(cfg.get(feature_key, False))
+        data[chat_id_str] = cfg
+        save_json(GROUP_LIST_FILE, data)
+        await query.answer("✅ 已更新")
+        return await query.edit_message_text(
+            _build_game_settings_text(chat_id_str, cfg),
+            reply_markup=_build_game_settings_keyboard(chat_id_str, cfg),
+            parse_mode="HTML",
+        )
+
+    if action == "game_back" and len(parts) >= 3:
+        await query.answer()
+        return await _open_group_panel(query, context, parts[2], user_id)
 
     if action == "lottery_menu" and len(parts) >= 3:
         chat_id_str = parts[2]

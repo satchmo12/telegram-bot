@@ -67,6 +67,11 @@ USER_MARK_SELECTION_KEY = "publish_user_mark_selection"
 USER_MARK_COMMAND = "帅哥"
 TEMPLATE_KEY_PATTERN = re.compile(r"\{([\w\-一-鿿]+)\}")
 
+# Telegram will send each item of a selected photo/video album as an individual
+# update. Buffer them briefly so a 投稿 album is reviewed and copied as one post.
+MEDIA_GROUP_BUFFER_KEY = "publish_pending_media_groups"
+MEDIA_GROUP_WAIT_SECONDS = 1.0
+
 # =========================
 # 配置读写
 # =========================
@@ -304,18 +309,57 @@ async def _mirror_main_post_via_telethon(
     main_channel_id: int,
     main_message_id: int,
     backup_channel_id: int,
+    *,
+    main_message_ids: Optional[list[int]] = None,
 ):
-    """Copy content between protocol accounts without Telegram forward source."""
+    """Copy a post or full media album through protocol accounts without a forward source."""
     listen_client = await _get_backup_telethon_client(context, config, role="listen")
     forward_client = await _get_backup_telethon_client(context, config, role="forward")
     try:
-        from channel.telethon_forwarder import _send_message_safe
+        from channel.telethon_forwarder import _send_album_with_caption, _send_message_safe
     except Exception as exc:
         raise RuntimeError(f"无法加载协议号发送工具：{exc}") from exc
 
-    source_message = await listen_client.get_messages(main_channel_id, ids=main_message_id)
-    if source_message is None:
+    source_ids = main_message_ids or [main_message_id]
+    source_ids = [
+        message_id
+        for message_id in (_as_int(value) for value in source_ids)
+        if message_id is not None
+    ]
+    if not source_ids:
+        raise RuntimeError("主频道同步缺少消息 ID")
+
+    if len(source_ids) == 1:
+        source_messages = [
+            await listen_client.get_messages(main_channel_id, ids=source_ids[0])
+        ]
+    else:
+        source_messages = list(
+            await listen_client.get_messages(main_channel_id, ids=source_ids)
+        )
+    source_messages = [message for message in source_messages if message is not None]
+    if not source_messages:
         raise RuntimeError("监听协议号未找到主频道原消息")
+
+    # A Telegram album stores its caption on one item (usually the first). Use
+    # that message as the caption source and send every media item together.
+    if len(source_messages) > 1:
+        caption_message = next(
+            (message for message in source_messages if getattr(message, "message", None)),
+            source_messages[0],
+        )
+        files = [getattr(message, "media", None) for message in source_messages]
+        files = [media for media in files if media is not None]
+        if files:
+            return await _send_album_with_caption(
+                forward_client,
+                backup_channel_id,
+                files,
+                caption=getattr(caption_message, "message", None) or "",
+                entities=getattr(caption_message, "entities", None),
+            )
+
+    source_message = source_messages[0]
     text = getattr(source_message, "message", None) or ""
     entities = getattr(source_message, "entities", None)
     media = getattr(source_message, "media", None)
@@ -363,6 +407,8 @@ async def _mirror_main_post_to_backup(
     config: dict,
     main_channel_id: int,
     main_message_id: int,
+    *,
+    main_message_ids: Optional[list[int]] = None,
 ):
     """Copy a finalized main post to its optional backup channel.
 
@@ -373,6 +419,15 @@ async def _mirror_main_post_to_backup(
     if backup_channel_id is None:
         return None
     try:
+        source_message_ids = main_message_ids or [main_message_id]
+        source_message_ids = [
+            message_id
+            for message_id in (_as_int(value) for value in source_message_ids)
+            if message_id is not None
+        ]
+        if not source_message_ids:
+            raise RuntimeError("主频道同步缺少消息 ID")
+
         if _backup_channel_use_telethon(config):
             copied = await _mirror_main_post_via_telethon(
                 context,
@@ -380,13 +435,22 @@ async def _mirror_main_post_to_backup(
                 main_channel_id,
                 main_message_id,
                 backup_channel_id,
+                main_message_ids=source_message_ids,
             )
-        else:
+        elif len(source_message_ids) == 1:
             copied = await context.bot.copy_message(
                 chat_id=backup_channel_id,
                 from_chat_id=main_channel_id,
-                message_id=main_message_id,
+                message_id=source_message_ids[0],
             )
+        else:
+            copied = await context.bot.copy_messages(
+                chat_id=backup_channel_id,
+                from_chat_id=main_channel_id,
+                message_ids=source_message_ids,
+            )
+        if isinstance(copied, (list, tuple)):
+            copied = copied[0] if copied else None
         backup_message_id = _as_int(
             getattr(copied, "message_id", None) or getattr(copied, "id", None)
         )
@@ -3127,13 +3191,25 @@ async def _route_message_link(context: ContextTypes.DEFAULT_TYPE, route: dict):
 
 
 def _keyword_post_results_keyboard(routes: list[dict]) -> InlineKeyboardMarkup:
+    """Build the selectable result list without dropping route metadata.
+
+    Both the initial search and the “返回” action use this function. Keeping the
+    artist name here prevents 标签 results from losing their 艺名 after returning
+    from a copied post.
+    """
     rows = []
     for index, route in enumerate(routes):
         label = str(route.get("label", "关键词"))[:12]
         value = str(route.get("raw", route.get("key", "")))[:30]
+        artist_name = str(route.get("艺名", "")).strip()
+        artist_suffix = (
+            f" · 艺名：{artist_name[:20]}"
+            if label == "标签" and artist_name
+            else ""
+        )
         channel_label = str(route.get("display_channel") or "主频道")
         rows.append([InlineKeyboardButton(
-            f"查看 {channel_label} · {label}：{value}",
+            f"查看 {channel_label} · {label}：{value}{artist_suffix}",
             callback_data=f"publish:keyword_post_pick:{index}",
         )])
     rows.append([InlineKeyboardButton("❌ 取消查询", callback_data="publish:keyword_post_search_cancel")])
@@ -3226,24 +3302,10 @@ async def _handle_keyword_post_search_input(update: Update, context: ContextType
         return True
 
     context.user_data[KEYWORD_POST_RESULTS_KEY] = routes
-    rows = []
-    for index, route in enumerate(routes):
-        label = str(route.get("label", "关键词"))[:12]
-        value = str(route.get("raw", route.get("key", "")))[:30]
-        extra = ""
-        if label == "标签":
-            artist_name = str(route.get("艺名", "")).strip()
-            if artist_name:
-                extra = f" · {artist_name[:20]}"
-            
-        channel_label = str(route.get("display_channel") or "主频道")
-        rows.append([
-            InlineKeyboardButton(
-                f"查看 {channel_label} · {label}：{value} {extra}",
-                callback_data=f"publish:keyword_post_pick:{index}",
-            )
-        ])
-    await msg.reply_text("找到多个对应帖子，请选择要查看的帖子：", reply_markup=InlineKeyboardMarkup(rows))
+    await msg.reply_text(
+        "找到多个对应帖子，请选择要查看的帖子：",
+        reply_markup=_keyword_post_results_keyboard(routes),
+    )
     return True
 
 
@@ -3698,6 +3760,45 @@ def _reject_reason_cancel_keyboard(submission_id: str):
     ])
 
 
+def _submission_message_ids(submission: dict) -> list[int]:
+    """Return every source message ID for one submission, in album order."""
+    raw_ids = submission.get("source_message_ids")
+    if isinstance(raw_ids, (list, tuple)):
+        result = []
+        for value in raw_ids:
+            message_id = _as_int(value)
+            if message_id is not None and message_id not in result:
+                result.append(message_id)
+        if result:
+            return result
+
+    message_id = _as_int(submission.get("user_message_id"))
+    return [message_id] if message_id is not None else []
+
+
+async def _forward_submission_messages(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    submission: dict,
+) -> None:
+    """Forward one message or a complete Telegram media album for review."""
+    message_ids = _submission_message_ids(submission)
+    if not message_ids:
+        raise RuntimeError("投稿缺少原始消息 ID")
+    if len(message_ids) == 1:
+        await context.bot.forward_message(
+            chat_id=chat_id,
+            from_chat_id=submission["user_chat_id"],
+            message_id=message_ids[0],
+        )
+        return
+    await context.bot.forward_messages(
+        chat_id=chat_id,
+        from_chat_id=submission["user_chat_id"],
+        message_ids=message_ids,
+    )
+
+
 async def _send_submission_for_review(
     context: ContextTypes.DEFAULT_TYPE,
     submission_id: str,
@@ -3708,29 +3809,32 @@ async def _send_submission_for_review(
     if owner_id is None:
         raise RuntimeError("未配置机器人所有者")
 
-    # if submission.get("anonymous"):
-    #     await context.bot.copy_message(
-    #         chat_id=owner_id,
-    #         from_chat_id=submission["user_chat_id"],
-    #         message_id=submission["user_message_id"],
-    #     )
-    # else:
-    await context.bot.forward_message(
-        chat_id=owner_id,
-        from_chat_id=submission["user_chat_id"],
-        message_id=submission["user_message_id"],
-    )
+    # An album must be forwarded as all of its source messages; forwarding only
+    # the first item made multi-image 投稿 appear as a single image to reviewers.
+    await _forward_submission_messages(context, int(owner_id), submission)
     # Proof is optional.  Normal submissions have no proof_* fields, so do
     # not index them unconditionally (which previously raised KeyError).
     proof_chat_id = submission.get("proof_chat_id")
-    proof_message_id = submission.get("proof_message_id")
-    if proof_chat_id is not None and proof_message_id is not None:
-        await context.bot.forward_message(
-            chat_id=owner_id,
-            from_chat_id=proof_chat_id,
-            message_id=proof_message_id,
-        )
-    elif proof_chat_id is not None or proof_message_id is not None:
+    proof_message_ids = submission.get("proof_message_ids") or [submission.get("proof_message_id")]
+    proof_message_ids = [
+        message_id
+        for message_id in (_as_int(value) for value in proof_message_ids)
+        if message_id is not None
+    ]
+    if proof_chat_id is not None and proof_message_ids:
+        if len(proof_message_ids) == 1:
+            await context.bot.forward_message(
+                chat_id=owner_id,
+                from_chat_id=proof_chat_id,
+                message_id=proof_message_ids[0],
+            )
+        else:
+            await context.bot.forward_messages(
+                chat_id=owner_id,
+                from_chat_id=proof_chat_id,
+                message_ids=proof_message_ids,
+            )
+    elif proof_chat_id is not None or submission.get("proof_message_id") is not None:
         print(
             "审核凭证数据不完整，跳过转发凭证 "
             f"submission={submission_id}"
@@ -4006,12 +4110,38 @@ async def _copy_submission_to_channel(
             button_key=button_key,
         )
 
-    published = await context.bot.copy_message(
-        chat_id=target_channel_id,
-        from_chat_id=submission["user_chat_id"],
-        message_id=submission["user_message_id"],
-        reply_markup=reply_markup,
-    )
+    message_ids = _submission_message_ids(submission)
+    if not message_ids:
+        raise RuntimeError("投稿缺少原始消息 ID")
+
+    if len(message_ids) == 1:
+        published = await context.bot.copy_message(
+            chat_id=target_channel_id,
+            from_chat_id=submission["user_chat_id"],
+            message_id=message_ids[0],
+            reply_markup=reply_markup,
+        )
+    else:
+        # copy_messages preserves Telegram's media-album grouping. The Bot API
+        # does not allow reply_markup on this endpoint, so album posts retain
+        # all media and deliberately omit the optional bottom button row.
+        copied_ids = await context.bot.copy_messages(
+            chat_id=target_channel_id,
+            from_chat_id=submission["user_chat_id"],
+            message_ids=message_ids,
+        )
+        if not copied_ids:
+            raise RuntimeError("投稿相册复制失败")
+        published = SimpleNamespace(
+            message_id=copied_ids[0].message_id,
+            message_ids=[item.message_id for item in copied_ids],
+        )
+
+    if len(message_ids) == 1:
+        published = SimpleNamespace(
+            message_id=published.message_id,
+            message_ids=[published.message_id],
+        )
 
     if register_keywords and submission.get("keyword_entries"):
         _register_post_keywords(
@@ -4082,6 +4212,28 @@ async def _refresh_discussion_mapping_for_post(
     return mapping
 
 
+async def _copy_submission_to_discussion(
+    context: ContextTypes.DEFAULT_TYPE,
+    submission: dict,
+    discussion_chat_id: int,
+    discussion_message_id: int,
+    reply_markup=None,
+) -> None:
+    """Copy all album items as replies below one discussion post."""
+    message_ids = _submission_message_ids(submission)
+    if not message_ids:
+        raise RuntimeError("投稿缺少原始消息 ID")
+    for index, message_id in enumerate(message_ids):
+        await context.bot.copy_message(
+            chat_id=discussion_chat_id,
+            from_chat_id=submission["user_chat_id"],
+            message_id=message_id,
+            reply_to_message_id=discussion_message_id,
+            # An inline keyboard can only be attached once for an album reply.
+            reply_markup=reply_markup if index == 0 else None,
+        )
+
+
 async def _publish_comment_and_forward(
     context: ContextTypes.DEFAULT_TYPE,
     submission: dict,
@@ -4125,11 +4277,11 @@ async def _publish_comment_and_forward(
         button_key="comment_buttons",
     )
     try:
-        await context.bot.copy_message(
-            chat_id=discussion_chat_id,
-            from_chat_id=submission["user_chat_id"],
-            message_id=submission["user_message_id"],
-            reply_to_message_id=discussion_message_id,
+        await _copy_submission_to_discussion(
+            context,
+            submission,
+            discussion_chat_id,
+            discussion_message_id,
             reply_markup=comment_reply_markup,
         )
     except BadRequest as exc:
@@ -4155,11 +4307,11 @@ async def _publish_comment_and_forward(
         if discussion_chat_id is None or discussion_message_id is None:
             raise RuntimeError("重新获取的评论讨论组映射无效")
         try:
-            await context.bot.copy_message(
-                chat_id=discussion_chat_id,
-                from_chat_id=submission["user_chat_id"],
-                message_id=submission["user_message_id"],
-                reply_to_message_id=discussion_message_id,
+            await _copy_submission_to_discussion(
+                context,
+                submission,
+                discussion_chat_id,
+                discussion_message_id,
                 reply_markup=comment_reply_markup,
             )
         except BadRequest as retry_exc:
@@ -4252,6 +4404,7 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
                     config,
                     int(target_channel_id),
                     published.message_id,
+                    main_message_ids=getattr(published, "message_ids", None),
                 )
         except Exception as exc:
             submission["status"] = "pending"
@@ -4277,6 +4430,7 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
             "user_chat_id": submission["user_chat_id"],
             "username": submission.get("username"),
             "user_message_id": submission["user_message_id"],
+            "source_message_ids": _submission_message_ids(submission),
             "channel_message_id": published.message_id,
             "channel_id": target_channel_id,
             "publish_time": int(time.time()),
@@ -6616,13 +6770,93 @@ def _finish_submission_if_needed(context: ContextTypes.DEFAULT_TYPE, config: dic
     context.user_data.pop(COMMENT_TARGET_KEY, None)
 
 
+async def _flush_media_group_submission(context: ContextTypes.DEFAULT_TYPE):
+    job_data = context.job.data if context.job else {}
+    key = str((job_data or {}).get("key") or "")
+    revision = int((job_data or {}).get("revision") or 0)
+    buffers = context.application.bot_data.get(MEDIA_GROUP_BUFFER_KEY, {})
+    entry = buffers.get(key) if isinstance(buffers, dict) else None
+    if not isinstance(entry, dict) or int(entry.get("revision") or 0) != revision:
+        return
+
+    buffers.pop(key, None)
+    message = entry.get("message")
+    message_ids = entry.get("message_ids") or []
+    if not message or not message_ids:
+        return
+    try:
+        await _handle_wall_publish_message(
+            SimpleNamespace(message=message),
+            context,
+            source_message_ids=message_ids,
+        )
+    except Exception as exc:
+        print(f"投稿相册处理失败: {exc}")
+        await context.bot.send_message(
+            chat_id=entry["chat_id"],
+            text=f"❌ 投稿相册发送失败：{exc}",
+        )
+
+
+async def _queue_media_group_submission(update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.message
+    if not msg or not msg.from_user or not getattr(msg, "media_group_id", None):
+        return
+
+    key = f"{msg.chat_id}:{msg.from_user.id}:{msg.media_group_id}"
+    buffers = context.application.bot_data.setdefault(MEDIA_GROUP_BUFFER_KEY, {})
+    entry = buffers.setdefault(
+        key,
+        {
+            "chat_id": msg.chat_id,
+            "user_id": msg.from_user.id,
+            "message": msg,
+            "message_ids": [],
+            "revision": 0,
+        },
+    )
+    if msg.message_id not in entry["message_ids"]:
+        entry["message_ids"].append(msg.message_id)
+    # Keep the first album item as the representative message: it normally
+    # carries the caption and is therefore the correct source for keywords.
+    entry["message_ids"].sort()
+    entry["revision"] = int(entry.get("revision") or 0) + 1
+
+    context.job_queue.run_once(
+        _flush_media_group_submission,
+        when=MEDIA_GROUP_WAIT_SECONDS,
+        data={"key": key, "revision": entry["revision"]},
+        name=f"publish-media-group:{key}",
+        chat_id=msg.chat_id,
+        user_id=msg.from_user.id,
+    )
+
+
 async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("waiting_post"):
+        return
+    msg = update.message
+    if msg and getattr(msg, "media_group_id", None):
+        await _queue_media_group_submission(update, context)
+        return
+    await _handle_wall_publish_message(update, context)
+
+
+async def _handle_wall_publish_message(
+    update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    source_message_ids: Optional[list[int]] = None,
+):
     if not context.user_data.get("waiting_post"):
         return
 
     msg = update.message
     if not msg or not msg.from_user:
         return
+
+    source_message_ids = source_message_ids or [msg.message_id]
+    source_message_ids = sorted({int(message_id) for message_id in source_message_ids})
 
     config = load_publish_config()
     main_channel_id = _as_int(config.get("channel_id"))
@@ -6640,7 +6874,8 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
             return await msg.reply_text("❗ 未找到待上传凭证的投稿，请重新发起投稿。")
 
         submission["proof_chat_id"] = msg.chat_id
-        submission["proof_message_id"] = msg.message_id
+        submission["proof_message_id"] = source_message_ids[0]
+        submission["proof_message_ids"] = source_message_ids
         submission["proof_uploaded_at"] = int(time.time())
         submission["status"] = "pending"
         pending[proof_submission_id] = submission
@@ -6650,6 +6885,7 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as exc:
             submission.pop("proof_chat_id", None)
             submission.pop("proof_message_id", None)
+            submission.pop("proof_message_ids", None)
             submission.pop("proof_uploaded_at", None)
             submission["status"] = "awaiting_proof"
             pending[proof_submission_id] = submission
@@ -6705,7 +6941,8 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
                 
                 # _comment_nickname(msg)
             "report_content": _comment_content(msg),
-            "user_message_id": msg.message_id,
+            "user_message_id": source_message_ids[0],
+            "source_message_ids": source_message_ids,
             "submitted_at": int(time.time()),
             "submission_kind": submission_kind,
             "target_channel_id": target_channel_id,
@@ -6744,7 +6981,8 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
     # Owner's normal post stays in main channel and receives a comment button.
     submission = {
         "user_chat_id": msg.chat_id,
-        "user_message_id": msg.message_id,
+        "user_message_id": source_message_ids[0],
+        "source_message_ids": source_message_ids,
         "report_author": _comment_author(msg),
         "report_content": _comment_content(msg),
         "keyword_entries": (
@@ -6816,6 +7054,7 @@ async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
                 config,
                 int(target_channel_id),
                 published.message_id,
+                main_message_ids=getattr(published, "message_ids", None),
             )
         _append_published_submission(msg, published.message_id, target_channel_id)
         _finish_submission_if_needed(context, config)

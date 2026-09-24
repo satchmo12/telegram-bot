@@ -6,6 +6,7 @@ from game.checkin import register_checkin_handlers
 from group.admin import register_admin_handlers
 from group.auto_scan import register_auto_scan_handlers
 from group.group_care import register_group_care_handlers
+from group.event_lottery import register_event_lottery_handlers
 from group.group_logger import register_group_logger_handlers
 from group.group_media_tools import register_group_media_tools_handlers
 from group.group_setting import register_group_setting_handlers
@@ -38,6 +39,7 @@ def register_group_handlers(app):
     register_invite_handlers(app)
     register_verification_handlers(app)
     register_checkin_handlers(app)
+    register_event_lottery_handlers(app)
 
     # 群互动能力
     register_group_care_handlers(app)

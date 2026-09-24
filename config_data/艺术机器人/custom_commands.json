@@ -1,0 +1,14 @@
+{
+    "commands": [
+        {
+            "id": 1,
+            "command": "moban",
+            "description": "报告模板",
+            "visible": true,
+            "mode": "text",
+            "content": "上海艺术展览会报告模板：\nhttps://t.me/+nFnE0wANtSRkMjEx\n【体验评分】：\n【人照几成】：\n【验证留名】：\n【验证时间】：\n【妹子艺名】：\n【联系方式】：\n【上课水费】：\n【位置环境】：\n【罩杯手感】：\n【身材描述】：\n【服务类型】：\n【服务态度】：\n【屌感紧度】：\n【个人总结】：\n\n【温馨提醒】：报告仅供参考 请理性选择\n注：提交报告 @yishuja_bot\n注：提交报告时需要约课证明",
+            "button_text": "点击跳转",
+            "url": ""
+        }
+    ]
+}

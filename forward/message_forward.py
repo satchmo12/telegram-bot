@@ -14,6 +14,7 @@ import asyncio
 
 from command_router import get_matched_command, register_command
 from admin_permissions import get_delegated_admin_ids, has_admin_permission
+from feature_flags import is_feature_enabled
 from tool.utils.update_helper import get_message
 from utils import (
     BOT_OWNER_ID,
@@ -627,6 +628,10 @@ async def reply_from_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def owner_auto_forward_in_dialog(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
+    # 运行中关闭开关时也立即停止面板自动发送，无需依赖处理器重新注册。
+    if not is_feature_enabled(context.application, "private_forward"):
+        return
+
     # 投稿内容和审核拒绝原因只能由投稿模块处理，不能自动双向发送。
     if (
         (context.user_data or {}).get("waiting_post")

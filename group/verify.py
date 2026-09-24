@@ -343,8 +343,23 @@ async def set_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     request = update.chat_join_request
+    if not request:
+        return
     user = request.from_user
     chat = request.chat
+    group_cfg = get_group_whitelist(context).get(str(chat.id), {})
+    if not isinstance(group_cfg, dict) or not bool(group_cfg.get("join_request_enabled", False)):
+        return
+
+    # A join request can only be actioned while the bot is an administrator.
+    try:
+        bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
+        if bot_member.status not in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}:
+            return
+    except Exception as exc:
+        print(f"入群申请处理跳过：无法确认机器人管理员权限 chat={chat.id}: {exc}")
+        return
+
     # 按钮 callback_data 带 chat_id + user_id
     keyboard = InlineKeyboardMarkup(
         [
@@ -377,8 +392,12 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = int(chat_id_str)
         user_id = int(user_id_str)
       
+        group_cfg = get_group_whitelist(context).get(str(chat_id), {})
+        if not isinstance(group_cfg, dict) or not bool(group_cfg.get("join_request_enabled", False)):
+            return await query.edit_message_text("❌ 入群申请处理功能已关闭。")
         bot_member = await context.bot.get_chat_member(chat_id, context.bot.id)
-    
+        if bot_member.status not in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}:
+            return await query.edit_message_text("❌ 机器人不是群管理员，无法批准申请。")
 
         await context.bot.approve_chat_join_request(chat_id=chat_id, user_id=user_id)
 

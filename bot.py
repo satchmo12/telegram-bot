@@ -316,6 +316,10 @@ async def block_disabled_group_messages(
 
 async def owner_reply_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bind_runtime_bot_context(context)
+    # 「private_forward」只控制私聊双向转发；关闭后不能再通过回复把消息发给用户。
+    if not is_feature_enabled(context.application, "private_forward"):
+        return
+
     # 投稿内容、审核拒绝原因都不能被私聊双向转发当作回复用户的消息处理。
     if (
         (context.user_data or {}).get(WAITING_POST)
@@ -612,9 +616,13 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
 
     # =========================================================
     # 6. 机器人转发
+    #
+    # 「private_forward」只负责是否把普通私聊转发给主人。投稿、关键词
+    # 搜索、客服回复等其他私聊流程仍会继续执行，不能被这个开关影响。
     # =========================================================
 
-    await forward_to_owner(update, context)
+    if is_feature_enabled(context.application, "private_forward"):
+        await forward_to_owner(update, context)
 
     # =========================================================
     # 7. 客服机器人自动回复
@@ -660,7 +668,7 @@ def _welcome_template_text(bot_name: str) -> str:
         return html.escape(configured).replace("{bot_name}", safe_name)
 
     if str(bot_name or "").strip() == MASTER_BOT_NAME:
-        return f"👏 欢迎使用 {safe_name}\n 能帮你便捷安全地管理频道和群组，是TG上领先的管理的机器人之一\n➡️请赋予我频道/群组管理员权限！"
+        return f"🎁 欢迎使用 {safe_name}\n 能帮你便捷安全地管理频道和群组，是TG上领先的管理的机器人之一\n➡️请赋予我频道/群组管理员权限！"
 
     if MASTER_BOT_USERNAME:
         master_label = (
@@ -668,7 +676,7 @@ def _welcome_template_text(bot_name: str) -> str:
         )
     else:
         master_label = html.escape(MASTER_BOT_NAME)
-    return f"👏欢迎使用 {safe_name} 克隆自 {master_label}\n 能帮你便捷安全地管理频道和群组，是TG上领先的管理的机器人之一\n➡️请赋予我频道/群组管理员权限！"
+    return f"🎁 欢迎使用 {safe_name} 克隆自 {master_label}\n 能帮你便捷安全地管理频道和群组，是TG上领先的管理的机器人之一\n➡️请赋予我频道/群组管理员权限！"
 
 
 def _clear_submission_draft(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -719,10 +727,22 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
     text = _build_start_welcome_text(bot_name)
-    # text = "👏"
+    # text = "🎁"
+    entities = [
+        MessageEntity(
+            type="custom_emoji",
+            offset=0,
+            length=2,
+            custom_emoji_id="5203996991054432397",
+        )
+    ]
+    
+
     await update.message.reply_text(
         text,
         # f"当前启用功能：{feature_text}\n\n",
+         
+        # entities=entities,
         reply_markup=keyboard,
         parse_mode="HTML",
         disable_web_page_preview=True,
@@ -1159,7 +1179,10 @@ def create_app(bot_cfg: dict):
     # owner-configured /commands can be added without editing this file.
     register_custom_command_handlers(app)
 
-    # ===== 私聊转发逻辑 =====
+    # ===== 私聊消息与双向转发 =====
+    # 所有机器人都注册通用私聊路由：投稿、关键词搜索、客服等流程不能因为
+    # 「private_forward」被关闭而失效。该功能开关仅决定是否执行双向转发。
+    # 管理员回复和私聊面板的“发给用户”能力则仅在开关开启时注册。
     if is_feature_enabled(app, "private_forward"):
         write_startup_debug(f"[create_app] register private_forward handlers bot={bot_name}")
         app.add_handler(
@@ -1169,13 +1192,14 @@ def create_app(bot_cfg: dict):
             ),
         )
 
-        app.add_handler(
-            MessageHandler(
-                filters.ChatType.PRIVATE & ~filters.COMMAND,
-                private_forward_router,
-            ),
-        )
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & ~filters.COMMAND,
+            private_forward_router,
+        ),
+    )
 
+    if is_feature_enabled(app, "private_forward"):
         app.add_handler(
             MessageHandler(
                 filters.ChatType.PRIVATE & ~filters.REPLY & ~filters.COMMAND,

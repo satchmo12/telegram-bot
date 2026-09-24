@@ -332,9 +332,18 @@ async def force_subscribe_callback(update: Update, context: ContextTypes.DEFAULT
         remove_mute(str(chat_id), target_user_id)
         try:
             if query.message:
-                await query.message.edit_reply_markup(reply_markup=None)
-        except Exception as e:
-            print("移除按钮失败：", e)
+                # The warning is no longer useful after the user has followed
+                # every required target and been unmuted, so remove it too.
+                await query.message.delete()
+        except Exception as exc:
+            # Deletion can fail in old messages or where Telegram denies it;
+            # at least remove the now-stale action button in that case.
+            print("删除强制关注提示失败：", exc)
+            try:
+                if query.message:
+                    await query.message.edit_reply_markup(reply_markup=None)
+            except Exception as markup_exc:
+                print("移除按钮失败：", markup_exc)
         await query.answer("✅ 已解除禁言", show_alert=True)
     else:
         await query.answer("⚠️ 检测到仍未关注全部频道或群组，请完成关注后再试。", show_alert=True)
