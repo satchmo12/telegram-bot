@@ -252,6 +252,7 @@ async def my_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update,
         context,
         text = f"🏅 当前{points_alias or '积分'}：{points} 分",
+        auto_delete_seconds = 30
     )
 
 def format_rich_item(i, item):

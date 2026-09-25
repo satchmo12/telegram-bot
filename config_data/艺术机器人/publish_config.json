@@ -1,25 +1,25 @@
 {
-    "channel_id": -1002934622997,
-    "backup_channel_id": -1002624218219,
+    "channel_id": -1002750050910,
+    "backup_channel_id": -1001951594315,
     "backup_channel_use_telethon": true,
     "backup_channel_session": "+13218329173",
-    "backup_channel_listen_session": "",
+    "backup_channel_listen_session": "+13218329173",
     "backup_channel_forward_session": "+13218329173",
     "pending_history_post_migration": {
-        "old_channel_id": -1002750050910,
-        "new_channel_id": -1002934622997,
-        "changed_at": 1790313050
+        "old_channel_id": -1002934622997,
+        "new_channel_id": -1002750050910,
+        "changed_at": 1790329098
     },
     "channel_change_history": [
         {
-            "old_channel_id": -1002934622997,
-            "new_channel_id": -1002750050910,
-            "changed_at": 1790260669
-        },
-        {
             "old_channel_id": -1002750050910,
             "new_channel_id": -1002934622997,
-            "changed_at": 1790313050
+            "changed_at": 1790325871
+        },
+        {
+            "old_channel_id": -1002934622997,
+            "new_channel_id": -1002750050910,
+            "changed_at": 1790329098
         }
     ],
     "review_enabled": true,
@@ -31,7 +31,7 @@
     "proof_required": true,
     "reject_reason_required": true,
     "comment_forward_enabled": true,
-    "forward_channel_id": -1004406338659,
+    "forward_channel_id": -1002443206113,
     "report_link_enabled": true,
     "template_publish_enabled": true,
     "publish_templates": [

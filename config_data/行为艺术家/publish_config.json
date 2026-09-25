@@ -1,5 +1,5 @@
 {
-    "channel_id": -1002750050910,
+    "channel_id": -1002934622997,
     "review_enabled": true,
     "daily_limit": 0,
     "ads_enabled": false,
@@ -11,7 +11,7 @@
     "proof_required": true,
     "reject_reason_required": true,
     "comment_forward_enabled": true,
-    "forward_channel_id": -1002443206113,
+    "forward_channel_id": -1004406338659,
     "keyword_extract_labels": [
         "艺名",
         "联系",
@@ -114,15 +114,20 @@
         }
     ],
     "pending_history_post_migration": {
-        "old_channel_id": -1002934622997,
-        "new_channel_id": -1002750050910,
-        "changed_at": 1790126201
+        "old_channel_id": -1002750050910,
+        "new_channel_id": -1002934622997,
+        "changed_at": 1790322336
     },
     "channel_change_history": [
         {
             "old_channel_id": -1002934622997,
             "new_channel_id": -1002750050910,
             "changed_at": 1790126201
+        },
+        {
+            "old_channel_id": -1002750050910,
+            "new_channel_id": -1002934622997,
+            "changed_at": 1790322336
         }
     ],
     "keyword_group_reply_enabled": true,
@@ -137,7 +142,7 @@
             "enabled": true
         }
     ],
-    "backup_channel_id": -1001951594315,
+    "backup_channel_id": -1002624218219,
     "keyword_post_search_display_mode": "main",
     "backup_channel_use_telethon": true,
     "backup_channel_session": "+13218329173",

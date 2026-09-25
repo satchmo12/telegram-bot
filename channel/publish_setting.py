@@ -967,10 +967,17 @@ def _register_checkin_post(
     entries: list[dict],
 ) -> None:
     """Register eligible usernames and display fields for a newly published main post."""
-    if not bool(config.get("checkin_enabled", False)):
+    channel_id = _as_int(channel_id)
+    message_id = _as_int(message_id)
+    if (
+        not bool(config.get("checkin_enabled", False))
+        or channel_id is None
+        or message_id is None
+        or message_id <= 0
+        or channel_id != _as_int(config.get("channel_id"))
+    ):
         return
-    if _as_int(config.get("channel_id")) != _as_int(channel_id):
-        return
+
     user_label = str(config.get("checkin_user_label") or "联系").strip()
     users = []
     fields: dict[str, list[str]] = {}
@@ -1256,7 +1263,16 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
         return True
 
     grouped: dict[str, list[dict]] = {}
+
     for post in online_posts:
+        try:
+            message_id = int(post.get("message_id", 0) or 0)
+        except (TypeError, ValueError):
+            message_id = 0
+
+        if message_id <= 0:
+            continue
+
         group = _checkin_group_value(post, config)
         grouped.setdefault(group, []).append(post)
 
@@ -1570,6 +1586,7 @@ def _report_subject_entries(entries: Optional[list[dict]]) -> list[dict]:
 def _create_comment_report(
     channel_id: int, message_id: int, report_id: str, subject_entries: Optional[list[dict]] = None
 ) -> None:
+    message_id = _require_published_message_id(message_id, "创建评论报告")
     data = _load_comment_reports()
     existing = data["reports"].get(report_id)
     comments = existing.get("comments", []) if isinstance(existing, dict) else []
@@ -1581,7 +1598,7 @@ def _create_comment_report(
     report = dict(existing) if isinstance(existing, dict) else {}
     report.update({
         "channel_id": int(channel_id),
-        "message_id": int(message_id),
+        "message_id": message_id,
         "created_at": int(report.get("created_at", int(time.time())) or int(time.time())),
         "updated_at": int(time.time()),
         "subjects": _report_subject_entries(subject_entries),
@@ -2742,6 +2759,34 @@ def _as_int(value):
         return None
 
 
+def _published_message_id_or_scheduled(result, operation: str) -> Optional[int]:
+    """Return a positive ID, or ``None`` when Telegram queued the send.
+
+    The Bot API uses ``message_id=0`` for a message accepted but automatically
+    scheduled for later delivery. It is not a publish failure, but it cannot be
+    persisted or used for follow-up actions until Telegram emits the real
+    ``channel_post`` update.
+    """
+    value = getattr(result, "message_id", result)
+    message_id = _as_int(value)
+    if message_id == 0:
+        print(f"{operation} 已进入 Telegram 发布队列，等待真实消息 ID。")
+        return None
+    if message_id is None or message_id < 0:
+        raise RuntimeError(
+            f"{operation} returned an invalid Telegram message ID: {value!r}"
+        )
+    return message_id
+
+
+def _require_published_message_id(result, operation: str) -> int:
+    """Return a positive message ID before persisting post-related data."""
+    message_id = _published_message_id_or_scheduled(result, operation)
+    if message_id is None:
+        raise RuntimeError(f"{operation} 尚在 Telegram 发布队列，暂无真实消息 ID")
+    return message_id
+
+
 def _publish_failure_detail(exc: Exception) -> str:
     """Return an actionable review error without hiding the real failure."""
     if isinstance(exc, Forbidden):
@@ -2896,6 +2941,12 @@ def _save_keyword_map(data: dict) -> None:
 
 
 def _register_post_keywords(entries: list[dict], channel_id, message_id) -> None:
+    message_id = _as_int(message_id)
+    # Telegram message IDs are strictly positive. Do not index malformed
+    # callback/update data, otherwise it becomes an unreachable :0 record.
+    if message_id is None or message_id <= 0:
+        return
+
     if not entries:
         _update_comment_report_subjects(channel_id, message_id, [])
         return
@@ -3718,6 +3769,9 @@ def _append_published_submission(
     published_channel_id=None,
 ) -> None:
     """Store a published submission for the existing random-view feature."""
+    published_message_id = _require_published_message_id(
+        published_message_id, "记录已发布投稿"
+    )
     user = getattr(msg, "from_user", None)
     data = _load_cannel_message()
     data.append({
@@ -4115,11 +4169,21 @@ async def _copy_submission_to_channel(
         raise RuntimeError("投稿缺少原始消息 ID")
 
     if len(message_ids) == 1:
-        published = await context.bot.copy_message(
+        copied = await context.bot.copy_message(
             chat_id=target_channel_id,
             from_chat_id=submission["user_chat_id"],
             message_id=message_ids[0],
             reply_markup=reply_markup,
+        )
+        published_message_id = _published_message_id_or_scheduled(
+            copied, "复制投稿到频道"
+        )
+        if published_message_id is None:
+            return SimpleNamespace(message_id=None, message_ids=[], scheduled=True)
+        published = SimpleNamespace(
+            message_id=published_message_id,
+            message_ids=[],
+            scheduled=False,
         )
     else:
         # copy_messages preserves Telegram's media-album grouping. The Bot API
@@ -4132,16 +4196,20 @@ async def _copy_submission_to_channel(
         )
         if not copied_ids:
             raise RuntimeError("投稿相册复制失败")
+        published_message_ids = [
+            _published_message_id_or_scheduled(item, "复制投稿相册到频道")
+            for item in copied_ids
+        ]
+        if any(message_id is None for message_id in published_message_ids):
+            return SimpleNamespace(message_id=None, message_ids=[], scheduled=True)
         published = SimpleNamespace(
-            message_id=copied_ids[0].message_id,
-            message_ids=[item.message_id for item in copied_ids],
+            message_id=published_message_ids[0],
+            message_ids=published_message_ids,
+            scheduled=False,
         )
 
     if len(message_ids) == 1:
-        published = SimpleNamespace(
-            message_id=published.message_id,
-            message_ids=[published.message_id],
-        )
+        published.message_ids = [published.message_id]
 
     if register_keywords and submission.get("keyword_entries"):
         _register_post_keywords(
@@ -4329,6 +4397,8 @@ async def _publish_comment_and_forward(
         config,
         button_key="comment_buttons",
     )
+    if getattr(forwarded, "scheduled", False):
+        return forwarded
     _append_report_comment(submission, forwarded)
     await _publish_comment_to_backup_discussion(
         context,
@@ -4399,13 +4469,14 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
                     target_channel_id,
                     config,
                 )
-                await _mirror_main_post_to_backup(
-                    context,
-                    config,
-                    int(target_channel_id),
-                    published.message_id,
-                    main_message_ids=getattr(published, "message_ids", None),
-                )
+                if not getattr(published, "scheduled", False):
+                    await _mirror_main_post_to_backup(
+                        context,
+                        config,
+                        int(target_channel_id),
+                        published.message_id,
+                        main_message_ids=getattr(published, "message_ids", None),
+                    )
         except Exception as exc:
             submission["status"] = "pending"
             pending[submission_id] = submission
@@ -4418,11 +4489,33 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
                 print("发送发布失败详情失败:", notify_exc)
             return await query.answer("发布失败，详情已发送。", show_alert=True)
 
+        scheduled = bool(getattr(published, "scheduled", False))
         submission["status"] = "approved"
         submission["reviewed_at"] = int(time.time())
-        submission["channel_message_id"] = published.message_id
+        if scheduled:
+            submission.pop("channel_message_id", None)
+            submission["scheduled_at"] = int(time.time())
+        else:
+            submission["channel_message_id"] = published.message_id
         pending[submission_id] = submission
         _save_pending_submissions(pending)
+
+        if scheduled:
+            try:
+                await context.bot.send_message(
+                    chat_id=submission["user_chat_id"],
+                    text="✅ 您的投稿已审核通过，Telegram 正在排队发布。",
+                )
+            except Exception as exc:
+                print("投稿排队通知失败:", exc)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception as exc:
+                print("更新审核消息失败:", exc)
+            await query.answer("投稿已通过，正在排队发布。")
+            return await query.message.reply_text(
+                "✅ 投稿已通过，Telegram 正在排队发布；实际发出后会自动收录关键词和打卡。"
+            )
 
         data = _load_cannel_message()
         data.append({
@@ -5571,8 +5664,21 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=markup,
                 disable_web_page_preview=True,
             )
+            published_message_id = _published_message_id_or_scheduled(
+                published, "发布模板到频道"
+            )
         except Exception as exc:
             return await query.answer(f"发布失败：{str(exc)[:100]}", show_alert=True)
+        if published_message_id is None:
+            context.user_data.pop(TEMPLATE_FLOW_KEY, None)
+            await query.answer("Telegram 正在排队发布模板。")
+            return await query.edit_message_text(
+                "✅ Telegram 已接收模板，正在排队发布；实际发出后会自动收录关键词和打卡。",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⬅️ 返回首页", callback_data="start:back")]
+                ]),
+            )
+        published = SimpleNamespace(message_id=published_message_id, scheduled=False)
         if bool(config.get("comment_forward_enabled", False)):
             _register_post_keywords(entries, channel_id_int, published.message_id)
         _register_checkin_post(config, channel_id_int, published.message_id, entries)
@@ -7024,6 +7130,11 @@ async def _handle_wall_publish_message(
                     and is_owner_submission
                     and submission_kind == "main"
                 ),
+            )
+        if getattr(published, "scheduled", False):
+            _finish_submission_if_needed(context, config)
+            return await msg.reply_text(
+                "✅ Telegram 已接收投稿，正在排队发布；实际发出后会自动收录关键词和打卡。"
             )
         if report_id and report_url:
             _create_comment_report(

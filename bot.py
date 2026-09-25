@@ -995,10 +995,7 @@ def _build_start_panel_rows(
         )
     if is_bot_admin_viewer or bool(publish_config.get("random_view_enabled", True)):
         resource_row.append(
-            InlineKeyboardButton("随机查看", 
-                                  callback_data="publish:channel_message")
-            
-            #  icon_custom_emoji_id = "5203996991054432397",
+            InlineKeyboardButton("随机查看", callback_data="publish:channel_message", api_kwargs={"style": "primary", "icon_custom_emoji_id": "5203996991054432397"})
         )
     if resource_row:
         rows.append(resource_row)

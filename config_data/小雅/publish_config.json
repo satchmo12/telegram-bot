@@ -76,7 +76,7 @@
     },
     "discussion_mapping_session": "main",
     "report_link_enabled": true,
-    "template_publish_enabled": true,
+    "template_publish_enabled": false,
     "publish_templates": [
         {
             "id": 5,
@@ -116,12 +116,12 @@
             "enabled": true
         }
     ],
-    "backup_channel_id": null,
+    "backup_channel_id": -1003968770671,
     "keyword_post_search_display_mode": "main",
-    "backup_channel_use_telethon": false,
-    "backup_channel_session": "",
+    "backup_channel_use_telethon": true,
+    "backup_channel_session": "main",
     "backup_channel_listen_session": "",
-    "backup_channel_forward_session": "",
+    "backup_channel_forward_session": "main",
     "checkin_enabled": true,
     "checkin_duration_hours": 12,
     "checkin_user_label": "联系",

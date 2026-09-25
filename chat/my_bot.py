@@ -1122,7 +1122,7 @@ async def group_recommend_text_command(
         )
 
 
-@register_command("导航","群推荐","中文包")
+# @register_command("导航","群推荐","中文包")
 async def navigation_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "功能导航\n"

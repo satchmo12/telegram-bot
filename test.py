@@ -1,7 +1,7 @@
 import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent, ReplyParameters, Update
 from telegram.constants import MessageEntityType
-from telegram.ext import Application, InlineQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, InlineQueryHandler, MessageHandler, filters, ContextTypes
 from telegram.ext import TypeHandler
 
 # 启用详细日志
@@ -19,7 +19,7 @@ from telegram.ext import (
 from telethon import TelegramClient, functions, types
 
 
-BOT_TOKEN="8698760312:AAGmk_O7lXxRIsId9Az2mEqhti1U1byf_TE"
+BOT_TOKEN="8875017714:AAE6-9P9NmaPpD8zZLIISm7CV2eZUxYoqCU"
 API_ID=38759669
 API_HASH="da5506797f6c82027d20712a9ef180fa"
 
@@ -184,6 +184,32 @@ async def start_guest_client():
 # ============================================================
 async def post_init(application):
     await start_guest_client()
+   
+   
+async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """兜底 /start：保证未启用 verification 的机器人也能响应。"""
+    if not update.message:
+        return
+
+    keyboard = [
+        [
+            InlineKeyboardButton("主菜单 (蓝)", callback_data="main", api_kwargs={"style": "primary", "icon_custom_emoji_id": "5203996991054432397"}),
+            InlineKeyboardButton("确认支付 (绿)", callback_data="buy", api_kwargs={"style": "success"})
+        ],
+        [
+            InlineKeyboardButton("删除账户 (红)", callback_data="delete", api_kwargs={"style": "danger"})
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 发送带有颜色按钮的消息
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id, 
+        text="请选择操作：", 
+        reply_markup=reply_markup
+    )
+    
+    
     
 async def post_shutdown(application):
     print("🔌 正在关闭 Guest Bot MTProto...", flush=True)
@@ -202,6 +228,8 @@ def main():
     
     # 只要包含文本就放行，我们在函数内部去拆解 api_kwargs
     app.add_handler( TypeHandler(Update, guest_bot_handler))
+    
+    app.add_handler(CommandHandler("start", start_fallback), group=50)
     # register_ai_group_reply_handlers(app)
     app.run_polling()
         

@@ -207,11 +207,12 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         # return await safe_reply(update, context, "⚠️ 我没有限制成员权限，无法禁言。")
     if not update.message.reply_to_message:
+        return
         return await safe_reply(update, context,"请回复需要禁言的人。")
 
     chat = update.effective_chat
     if chat.type != "supergroup":
-        await safe_reply(update, context,"❗此功能只能在超级群中使用。")
+        # await safe_reply(update, context,"❗此功能只能在超级群中使用。")
         return
 
     try:
@@ -235,6 +236,7 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_mute(str(chat.id), target_user.id, target_user.full_name, source="admin")
         await safe_reply(update, context,tip)
     except Exception as e:
+        return 
         await safe_reply(update, context,f"❌ 失败：{e}")
 
 
@@ -765,6 +767,7 @@ async def mute_list_unmute_callback(update: Update, context: ContextTypes.DEFAUL
         if query.message:
             await query.message.edit_reply_markup(reply_markup=None)
     except Exception as e:
+        return
         await query.answer(f"❌ 解禁失败：{e}", show_alert=True)
         
 def register_admin_handlers(app):

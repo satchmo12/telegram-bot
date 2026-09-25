@@ -710,7 +710,7 @@ async def safe_reply(
     text: str,
     html: bool = False,
     reply_markup=None,
-    auto_delete_seconds: int = 60,
+    auto_delete_seconds: int = 30,
     bot_reply: bool = False,
     disable_web_page_preview: bool = True,
 ):
