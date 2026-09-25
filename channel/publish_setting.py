@@ -70,7 +70,7 @@ TEMPLATE_KEY_PATTERN = re.compile(r"\{([\w\-一-鿿]+)\}")
 # Telegram will send each item of a selected photo/video album as an individual
 # update. Buffer them briefly so a 投稿 album is reviewed and copied as one post.
 MEDIA_GROUP_BUFFER_KEY = "publish_pending_media_groups"
-MEDIA_GROUP_WAIT_SECONDS = 1.0
+MEDIA_GROUP_WAIT_SECONDS = 10.0
 
 # =========================
 # 配置读写
@@ -7950,7 +7950,7 @@ def register_publish_setting_handlers(app):
             & ~filters.UpdateType.BUSINESS_MESSAGE,
             _group_keyword_reply_interceptor,
         ),
-        group=-19,
+        group=-22,
     )
     # Keyword search must run before bot.py's group=0 private-forward handlers.
     # If it does not consume the message, processing falls through normally.

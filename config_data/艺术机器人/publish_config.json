@@ -5,8 +5,23 @@
     "backup_channel_session": "+13218329173",
     "backup_channel_listen_session": "",
     "backup_channel_forward_session": "+13218329173",
-    "pending_history_post_migration": null,
-    "channel_change_history": [],
+    "pending_history_post_migration": {
+        "old_channel_id": -1002750050910,
+        "new_channel_id": -1002934622997,
+        "changed_at": 1790313050
+    },
+    "channel_change_history": [
+        {
+            "old_channel_id": -1002934622997,
+            "new_channel_id": -1002750050910,
+            "changed_at": 1790260669
+        },
+        {
+            "old_channel_id": -1002750050910,
+            "new_channel_id": -1002934622997,
+            "changed_at": 1790313050
+        }
+    ],
     "review_enabled": true,
     "daily_limit": 0,
     "ads_enabled": false,
@@ -52,7 +67,7 @@
     "checkin_enabled": true,
     "checkin_duration_hours": 12,
     "checkin_user_label": "联系",
-    "checkin_display_label": "艺名",
+    "checkin_display_label": "艺名+课费",
     "checkin_group_label": "区域",
     "continuous_submission_enabled": false,
     "custom_menu_buttons": {

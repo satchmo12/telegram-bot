@@ -20,11 +20,13 @@ async def daycheckin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     points_cfg = get_checkin_points_config(group_cfg)
 
     if not points_cfg["enabled"]:
-        return await safe_reply(
-            update,
-            context,
-            "❌ 本群签到未开启"
-        )
+        return
+    
+    # await safe_reply(
+    #         update,
+    #         context,
+    #         "❌ 本群签到未开启"
+    #     )
 
     today = datetime.utcnow().strftime("%Y-%m-%d")
 

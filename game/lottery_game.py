@@ -108,7 +108,8 @@ async def points_lottery_panel(update: Update, context: ContextTypes.DEFAULT_TYP
     cfg = get_group_whitelist(context).get(chat_id, {})
     lottery_cfg = get_points_lottery_config(cfg)
     if not lottery_cfg.get("enabled", False):
-        return await safe_reply(update, context, "本群积分抽奖未开启。")
+        return
+        # return await safe_reply(update, context, "本群积分抽奖未开启。")
 
     await update.message.reply_text(
         _format_panel(chat_id, cfg),

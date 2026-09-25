@@ -498,19 +498,19 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
     # 2. 非转发消息，才检查会员/自定义表情 ID
     # =========================================================
 
-    for entity in msg.entities or []:
-        if entity.type == "custom_emoji":
-            emoji_id = entity.custom_emoji_id
+    # for entity in msg.entities or []:
+    #     if entity.type == "custom_emoji":
+    #         emoji_id = entity.custom_emoji_id
 
-            print(
-                f"[private_forward_router] 检测到会员表情，ID={emoji_id}"
-            )
+    #         print(
+    #             f"[private_forward_router] 检测到会员表情，ID={emoji_id}"
+    #         )
 
-            await msg.reply_text(
-                f"会员表情 ID：\n<code>{emoji_id}</code>",
-                parse_mode="HTML",
-            )
-            return
+    #         await msg.reply_text(
+    #             f"会员表情 ID：\n<code>{emoji_id}</code>",
+    #             parse_mode="HTML",
+    #         )
+    #         return
 
     # =========================================================
     # 3. 检查命令
@@ -668,7 +668,7 @@ def _welcome_template_text(bot_name: str) -> str:
         return html.escape(configured).replace("{bot_name}", safe_name)
 
     if str(bot_name or "").strip() == MASTER_BOT_NAME:
-        return f"🎁 欢迎使用 {safe_name}\n 能帮你便捷安全地管理频道和群组，是TG上领先的管理的机器人之一\n➡️请赋予我频道/群组管理员权限！"
+        return f"👏 欢迎使用 {safe_name}\n 能帮你便捷安全地管理频道和群组，是TG上领先的管理的机器人之一\n➡️请赋予我频道/群组管理员权限！"
 
     if MASTER_BOT_USERNAME:
         master_label = (
@@ -676,7 +676,7 @@ def _welcome_template_text(bot_name: str) -> str:
         )
     else:
         master_label = html.escape(MASTER_BOT_NAME)
-    return f"🎁 欢迎使用 {safe_name} 克隆自 {master_label}\n 能帮你便捷安全地管理频道和群组，是TG上领先的管理的机器人之一\n➡️请赋予我频道/群组管理员权限！"
+    return f"👏 欢迎使用 {safe_name} 克隆自 {master_label}\n 能帮你便捷安全地管理频道和群组，是TG上领先的管理的机器人之一\n➡️请赋予我频道/群组管理员权限！"
 
 
 def _clear_submission_draft(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -728,23 +728,26 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = _build_start_welcome_text(bot_name)
     # text = "🎁"
-    entities = [
-        MessageEntity(
-            type="custom_emoji",
-            offset=0,
-            length=2,
-            custom_emoji_id="5203996991054432397",
-        )
-    ]
+    
+    entities = None
+    configured = str(_load_start_welcome_config().get("text") or "").strip()
+    if not configured: 
+        entities = [
+            MessageEntity(
+                type="custom_emoji",
+                offset=0,
+                length=2,
+                custom_emoji_id="5203996991054432397",
+            )
+        ]
     
 
     await update.message.reply_text(
         text,
         # f"当前启用功能：{feature_text}\n\n",
-         
-        # entities=entities,
+        entities=entities,
         reply_markup=keyboard,
-        parse_mode="HTML",
+        # parse_mode="HTML",
         disable_web_page_preview=True,
     )
 
@@ -992,7 +995,10 @@ def _build_start_panel_rows(
         )
     if is_bot_admin_viewer or bool(publish_config.get("random_view_enabled", True)):
         resource_row.append(
-            InlineKeyboardButton("随机查看", callback_data="publish:channel_message")
+            InlineKeyboardButton("随机查看", 
+                                  callback_data="publish:channel_message")
+            
+            #  icon_custom_emoji_id = "5203996991054432397",
         )
     if resource_row:
         rows.append(resource_row)
