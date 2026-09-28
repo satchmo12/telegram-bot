@@ -169,16 +169,18 @@ def can_reply(chat_id: int, settings: dict) -> bool:
     last_time = last_reply_time[chat_id]
 
     if last_time <= 0:
-        print(f"[AI][CHECK] 群 {chat_id} 从未回复过，可以继续")
+        # print(f"[AI][CHECK] 群 {chat_id} 从未回复过，可以继续")
+        pass
     else:
         elapsed = now - last_time
         remaining = min_interval - elapsed
 
         if elapsed < min_interval:
-            print(
-                f"[AI][SKIP] 群 {chat_id} 还在冷却，"
-                f"剩余 {remaining:.1f}s"
-            )
+            
+            # print(
+            #     f"[AI][SKIP] 群 {chat_id} 还在冷却，"
+            #     f"剩余 {remaining:.1f}s"
+            # )
             return False
 
     # --------------------------------------------------------

@@ -4033,23 +4033,6 @@ async def _handle_group_keyword_reply(update: Update, context: ContextTypes.DEFA
         return False
     response_text = "\n\n".join(display_messages) or "已找到联系方式："
     
-    
-    # link_rows.append([InlineKeyboardButton( # f"📩 查看 {name_text}"[:64], # callback_data=f"publish:checkin_view:{post.get('channel_id')}:{post.get('message_id')}",
-    
-    # await msg.reply_text(
-    #     response_text,
-    #     reply_markup=InlineKeyboardMarkup(rows),
-    #     disable_web_page_preview=True,
-    # )
-    
-    #     update: Update,
-    # context: ContextTypes.DEFAULT_TYPE,
-    # text: str,
-    # html: bool = False,
-    # reply_markup=None,
-    # auto_delete_seconds: int = 60,
-    # bot_reply: bool = False,
-    
     await safe_reply(update, context, response_text, reply_markup=InlineKeyboardMarkup(rows), auto_delete_seconds = 30, bot_reply = True)
     return True
 
@@ -4331,6 +4314,15 @@ async def _capture_comment_source_message(
             "✅ 已更新编辑后频道帖关键词 "
             f"channel={main_channel_id} message={msg.message_id} keywords={count}"
         )
+        
+           #  新增生成链接
+        _update_comment_report_position(
+            config,
+            main_channel_id,
+            msg.message_id,
+            entries,
+        )
+        
         _register_checkin_post(config, main_channel_id, msg.message_id, entries)
         await _sync_main_post_edit_to_backup(context, msg, config)
         return
@@ -4348,6 +4340,15 @@ async def _capture_comment_source_message(
         _register_checkin_post(config, main_channel_id, msg.message_id, entries)
         # A large copy may return message_id=0.  The real channel_post update
         # is the authoritative completion signal for its report link/mirror.
+        
+        #  新增生成链接
+        _update_comment_report_position(
+            config,
+            main_channel_id,
+            msg.message_id,
+            entries,
+        )
+                    
         await _capture_queued_main_publication(context, msg, main_channel_id)
         print(
             "✅ 已收录新发布频道帖关键词 "
@@ -4377,6 +4378,7 @@ async def _capture_comment_source_message(
     # automatic forward (edited_message), not as edited_channel_post. The
     # forwarded content mirrors the edited channel post, so refresh its keyword
     # records using the source channel/message IDs in that update.
+
     if getattr(update, "edited_message", None) is not None:
         entries = _extract_routing_keywords(msg, config)
         count = _replace_post_keywords_from_channel_edit(
@@ -4386,9 +4388,19 @@ async def _capture_comment_source_message(
             "✅ 已通过讨论组编辑更新频道帖关键词 "
             f"channel={channel_id} message={channel_message_id} keywords={count}"
         )
-        # Some Telegram updates arrive only as an edited discussion forward;
-        # refresh the check-in record there as well as for edited_channel_post.
-        _register_checkin_post(config, int(channel_id), int(channel_message_id), entries)
+
+        # 更新对应频道帖的评论报告定位
+        _update_comment_report_position(
+            config,
+            int(channel_id),
+            int(channel_message_id),
+            entries,
+        )
+
+        _register_checkin_post(
+            config, int(channel_id), int(channel_message_id), entries
+        )
+
         await _sync_main_post_edit_to_backup(
             context,
             msg,
@@ -4398,12 +4410,24 @@ async def _capture_comment_source_message(
         )
 
     if getattr(update, "edited_message", None) is None:
-        # Fallback path for bots that receive the new post only as the linked
-        # discussion group's automatic forward. Index every configured field
-        # here as well, not just the check-in fields.
+        # 首次收到讨论组自动转发，收录关键词
         entries = _extract_routing_keywords(msg, config)
-        _register_post_keywords(entries, int(channel_id), int(channel_message_id))
-        _register_checkin_post(config, int(channel_id), int(channel_message_id), entries)
+
+        _register_post_keywords(
+            entries, int(channel_id), int(channel_message_id)
+        )
+        _register_checkin_post(
+            config, int(channel_id), int(channel_message_id), entries
+        )
+
+        # 更新用户名对应的报告定位
+        _update_comment_report_position(
+            config,
+            int(channel_id),
+            int(channel_message_id),
+            entries,
+        )
+
         print(
             "✅ 已通过讨论组转发收录频道帖关键词 "
             f"channel={channel_id} message={channel_message_id} keywords={len(entries)}"
@@ -4420,6 +4444,47 @@ async def _capture_comment_source_message(
     print(f"✅ 已通过 Bot API 写入 discussion 映射 {channel_id}/{channel_message_id} -> {msg.chat_id}/{msg.message_id}")
 
 
+
+def _update_comment_report_position(
+    config: dict,
+    channel_id: int,
+    message_id: int,
+    entries: list[dict],
+) -> None:
+    """根据帖子中的用户名更新评论报告的最新定位。"""
+
+    if not (
+        bool(config.get("report_link_enabled", False))
+        and bool(config.get("comment_forward_enabled", False))
+    ):
+        return
+
+    report_id = _report_id_from_subject_entries(entries)
+
+    if not report_id:
+        return
+
+    try:
+        _create_comment_report(
+            channel_id,
+            message_id,
+            report_id,
+            subject_entries=entries,
+        )
+
+        print(
+            "✅ 已更新评论报告定位 "
+            f"report_id={report_id} "
+            f"channel={channel_id} "
+            f"message={message_id}"
+        )
+
+    except Exception as exc:
+        print(
+            f"❌ 更新评论报告定位失败 "
+            f"report_id={report_id}: {exc}"
+        )
+        
 async def _start_comment_submission(query, context: ContextTypes.DEFAULT_TYPE, config: dict):
     parts = query.data.split(":")
     if len(parts) != 4:

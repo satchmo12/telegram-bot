@@ -87,7 +87,7 @@ TOGGLE_FIELDS = [
     ("verify", "身份验证"),
     ("join_request_enabled", "处理入群申请"),
     ("welcome", "入群欢迎"),
-    ("silent", "群静默"),
+    ("silent", "机器人不at用户"),
     ("ad_filter", "广告拦截"),
     ("recommend", "群推荐"),
     ("name_change_notice", "用户名变更提示"),
