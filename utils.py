@@ -583,6 +583,8 @@ GROUP_CONFIG_DEFAULTS = {
     "invite_points_daily_limit": 500,
     "force_subscribe": False,
     "name_change_notice": False,
+    "points_enabled": True,
+
 }
 # key -> (loaded dict identity, group count). Group count lets newly-created groups be initialized.
 _GROUP_CONFIG_NORMALIZATION_STATE = {}

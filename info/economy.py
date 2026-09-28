@@ -223,13 +223,16 @@ async def my_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 获取群配置
     group_config = get_group_whitelist(context).get(chat_id, {})
+    
+    # 积分开关没开，不相应
+    if not bool(group_config.get('points_enabled', False)):
+        return 
 
     # 获取积分别名
     points_alias = str(
         group_config.get("points_alias") or ""
     ).strip()
     
-    print("points_alias===",points_alias)
 
     # 如果设置了别名，只响应别名
     if points_alias:
@@ -390,6 +393,10 @@ async def top_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 获取群配置
     group_config = get_group_whitelist(context).get(chat_id, {})
+    
+    # 邀请积分没开，不相应
+    if not bool(group_config.get('points_enabled', False)):
+        return 
 
     # 获取积分别名
     points_alias = str(

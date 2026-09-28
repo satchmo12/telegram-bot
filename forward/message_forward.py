@@ -6,7 +6,7 @@ from typing import Optional
 import time
 from datetime import datetime
 from html import escape
-from telegram import Chat, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Chat, InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity, Update
 from telegram.ext import ApplicationHandlerStop, ContextTypes, MessageHandler, filters
 import os
 import asyncio
@@ -360,6 +360,11 @@ async def safe_forward_media(bot, chat_id, msg):
 
     raise ValueError("不支持的消息类型")
 
+def _serialize_entities(entities):
+    if not entities:
+        return []
+
+    return [entity.to_dict() for entity in entities]
 
 def build_message_payload(msg) -> dict:
     if not msg:
@@ -368,7 +373,13 @@ def build_message_payload(msg) -> dict:
     caption = (getattr(msg, "caption", None) or "")[:1024]
     text = getattr(msg, "text", None)
     if text:
-        return {"type": "text", "text": text}
+        return {
+            "type": "text", 
+            "text": text, 
+            "entities": _serialize_entities(
+                 getattr(msg, "entities", None)
+            ),
+        }
     if getattr(msg, "photo", None):
         return {
             "type": "photo",
@@ -431,7 +442,18 @@ async def send_message_payload(bot, chat_id, payload: dict):
 
     payload_type = str(payload.get("type", "")).strip().lower()
     if payload_type == "text":
-        return await bot.send_message(chat_id, payload.get("text", ""))
+        entities = [
+            MessageEntity.de_json(item, bot)
+            for item in payload.get("entities", [])
+            if isinstance(item, dict)
+        ]
+
+        return await bot.send_message(
+            chat_id=chat_id,
+            text=payload.get("text", ""),
+            entities=entities or None,
+        )
+        
     if payload_type == "photo":
         return await bot.send_photo(
             chat_id, payload.get("file_id"), caption=payload.get("caption", "")

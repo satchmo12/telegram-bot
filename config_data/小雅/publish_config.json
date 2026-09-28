@@ -49,6 +49,11 @@
             "id": 9,
             "text": "12",
             "url": "https://baidui.com"
+        },
+        {
+            "id": 10,
+            "text": "加入交流群",
+            "url": "https://t.me/iwoai"
         }
     ],
     "submission_enabled": true,
@@ -76,7 +81,7 @@
     },
     "discussion_mapping_session": "main",
     "report_link_enabled": true,
-    "template_publish_enabled": false,
+    "template_publish_enabled": true,
     "publish_templates": [
         {
             "id": 5,

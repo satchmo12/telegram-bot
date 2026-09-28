@@ -986,13 +986,7 @@ async def _send_global_ad_now(
         if chat_id in excluded:
             continue
         try:
-            sent_message = await send_message_payload(
-                context.bot,
-                chat_id=int(chat_id),
-                record=ad,
-                payload= payload,
-                reply_markup=reply_markup,
-            )
+            sent_message = await send_message_payload(context.bot, chat_id=int(chat_id), record=_group_cfg, reply_markup = reply_markup)
             await _pin_ad_message_if_enabled(context, int(chat_id), sent_message, ad)
             sent += 1
         except Exception as exc:
@@ -2659,20 +2653,14 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             if not isinstance(payload, dict):
                 payload = {"type": "text", "text": str(ad.get("text", "")).strip()}
             try:
-                sent_message = await send_message_payload(
-                    context.bot,
-                    chat_id=int(chat_id),
-                    record=ad,
-                    payload= payload,
-                    reply_markup=reply_markup,
-                )
+                sent_message = await send_message_payload(context.bot, chat_id=int(chat_id), record=ad, reply_markup = reply_markup)
                 await _pin_ad_message_if_enabled(context, chat_id, sent_message, ad)
             except Exception as exc:
                 return await query.answer(f"发送失败：{exc}", show_alert=True)
             return await query.answer("🚀 已立即发送。", show_alert=True)
         if action == "ad_multi_ad_cover":
             context.user_data["group_setting_stage"] = {
-                "kind": "group_ad",
+                "kind": "global_ad",
                 "field": "cover",
                 "chat_id": chat_id_str,
                 "ad_id": ad_id,
@@ -2692,9 +2680,9 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                 ]),
             )
         
-        if action == "ad_multi_ad_buttons":
+        if action == "global_ad_buttons":
             context.user_data["group_setting_stage"] = {
-                "kind": "group_ad",
+                "kind": "global_ad",
                 "field": "buttons",
                 "chat_id": chat_id_str,
                 "ad_id": ad_id,
@@ -3473,12 +3461,15 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
                 )
 
             context.user_data.pop("group_setting_stage", None)
-            data[chat_id_str] = cfg
-            save_json(GROUP_LIST_FILE, data)
+            _save_global_ad_push_config(cfg)
+
+            groups = get_group_whitelist(context)
 
             await update.message.reply_text(
-                _build_group_ad_detail_text(chat_id_str, ad),
-                reply_markup=_build_group_ad_detail_keyboard(chat_id_str, ad),
+                _build_global_ad_detail_text(ad, groups),
+                reply_markup=_build_global_ad_detail_keyboard(ad),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
             )
             raise ApplicationHandlerStop
         elif field == "buttons":
@@ -3524,12 +3515,15 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
                 ad["buttons"] = buttons
 
             context.user_data.pop("group_setting_stage", None)
-            data[chat_id_str] = cfg
-            save_json(GROUP_LIST_FILE, data)
+            _save_global_ad_push_config(cfg)
+
+            groups = get_group_whitelist(context)
 
             await update.message.reply_text(
-                _build_group_ad_detail_text(chat_id_str, ad),
-                reply_markup=_build_group_ad_detail_keyboard(chat_id_str, ad),
+                _build_global_ad_detail_text(ad, groups),
+                reply_markup=_build_global_ad_detail_keyboard(ad),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
             )
             raise ApplicationHandlerStop
 
@@ -3797,11 +3791,9 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
             try:
                 target_chat = await _validate_bot_broadcast_target(context, chat_id)
                 payload = build_message_payload(message)
-                await send_message_payload(
-                    context.bot,
-                    chat_id=int(chat_id),
-                    record=payload,
-                )
+                _group_cfg = None
+                reply_markup = _global_ad_reply_markup(ad)
+                await send_message_payload(context.bot, chat_id=int(chat_id), record=_group_cfg, reply_markup = reply_markup)
                 context.user_data.pop("group_setting_stage", None)
                 context.user_data.pop("group_setting_chat_id", None)
                 await update.message.reply_text(
@@ -4143,17 +4135,16 @@ async def send_message_payload(
     bot,
     chat_id,
     record: dict,
-    payload,
     reply_markup=None
 ):
     
     
     """Send the lottery as one text post or one cover-media post with a caption."""
-    text= payload.get("text", "")
+    text= record.get("text", "")
     
     entities = [
         MessageEntity.de_json(item, bot)
-        for item in payload.get("entities", [])
+        for item in record.get("entities", [])
         if isinstance(item, dict)
     ]
         
@@ -4178,7 +4169,7 @@ async def send_message_payload(
     common = {
         "chat_id": chat_id,
         "caption": text,
-        "caption_entities": entities or None,
+        "entities": entities or None,
         "reply_markup": reply_markup,
     }
     if payload_type == "photo":

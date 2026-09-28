@@ -46,6 +46,7 @@ COMMENT_TARGET_KEY = "publish_comment_target"
 COMMENT_MAP_FILE = "data/publish_comment_map.json"
 KEYWORD_MAP_FILE = "data/publish_keyword_map.json"
 COMMENT_REPORTS_FILE = "data/comment_reports.json"
+QUEUED_PUBLICATIONS_FILE = "data/publish_queued_publications.json"
 POST_MIGRATION_STATE_FILE = "data/publish_post_migrations.json"
 BACKUP_POST_MAP_FILE = "data/publish_backup_post_map.json"
 CHECKIN_POSTS_FILE = "data/publish_checkin_posts.json"
@@ -70,7 +71,7 @@ TEMPLATE_KEY_PATTERN = re.compile(r"\{([\w\-一-鿿]+)\}")
 # Telegram will send each item of a selected photo/video album as an individual
 # update. Buffer them briefly so a 投稿 album is reviewed and copied as one post.
 MEDIA_GROUP_BUFFER_KEY = "publish_pending_media_groups"
-MEDIA_GROUP_WAIT_SECONDS = 10.0
+MEDIA_GROUP_WAIT_SECONDS = 20.0
 
 # =========================
 # 配置读写
@@ -1856,6 +1857,242 @@ async def _report_deep_link(context: ContextTypes.DEFAULT_TYPE, report_id: str):
     return f"https://t.me/{username}?start=report_{report_id}" if username else None
 
 
+def _load_queued_publications() -> dict:
+    """Load follow-up work for posts Telegram accepted with ``message_id=0``."""
+    data = load_json(QUEUED_PUBLICATIONS_FILE)
+    return data if isinstance(data, dict) else {}
+
+
+def _save_queued_publications(data: dict) -> None:
+    """Persist queued-publication state and discard old completed records."""
+    now = int(time.time())
+    cleaned = {}
+    for key, value in (data or {}).items():
+        if not isinstance(value, dict):
+            continue
+        finished_at = int(value.get("finished_at") or 0)
+        queued_at = int(value.get("queued_at") or 0)
+        # Finished records only guard against duplicate channel_post updates;
+        # keeping them for one day is enough and prevents unbounded JSON growth.
+        if finished_at and finished_at < now - 86400:
+            continue
+        if not finished_at and queued_at and queued_at < now - 7 * 86400:
+            continue
+        cleaned[str(key)] = value
+    save_json(QUEUED_PUBLICATIONS_FILE, cleaned)
+
+
+def _queue_main_publication_follow_up(
+    *,
+    target_channel_id: int,
+    expected_text: str,
+    expected_message_count: int,
+    report_id: str = "",
+    report_url: str = "",
+    keyword_entries: Optional[list[dict]] = None,
+    mirror_to_backup: bool = False,
+    report_link_embedded: bool = False,
+    source_chat_id: Optional[int] = None,
+    source_message_id: Optional[int] = None,
+    source_message_ids: Optional[list[int]] = None,
+) -> str:
+    """Remember work that needs a real channel message ID.
+
+    Telegram can acknowledge a copy with ``message_id=0`` while it is still
+    uploading/queuing a large album.  Reports, backup mirrors, and local post
+    records must wait for the later ``channel_post`` update, not a timer.
+    """
+    publication_id = uuid.uuid4().hex
+    data = _load_queued_publications()
+    data[publication_id] = {
+        "status": "awaiting_channel_post",
+        "target_channel_id": int(target_channel_id),
+        "expected_text": str(expected_text or "").strip(),
+        "expected_message_count": max(1, int(expected_message_count or 1)),
+        "report_id": str(report_id or ""),
+        "report_url": str(report_url or ""),
+        "keyword_entries": keyword_entries if isinstance(keyword_entries, list) else [],
+        "mirror_to_backup": bool(mirror_to_backup),
+        "report_link_embedded": bool(report_link_embedded),
+        "source_chat_id": _as_int(source_chat_id),
+        "source_message_id": _as_int(source_message_id),
+        "source_message_ids": [
+            message_id
+            for message_id in (_as_int(value) for value in (source_message_ids or []))
+            if message_id is not None
+        ],
+        "queued_at": int(time.time()),
+        "delivery_message_ids": [],
+    }
+    _save_queued_publications(data)
+    print(
+        "已登记 Telegram 排队发布后续操作 "
+        f"publication={publication_id} channel={target_channel_id}"
+    )
+    return publication_id
+
+
+def _message_publish_text(msg) -> str:
+    return str(getattr(msg, "text", None) or getattr(msg, "caption", None) or "").strip()
+
+
+def _match_queued_main_publication(msg, channel_id: int) -> tuple[Optional[str], Optional[dict]]:
+    """Match a delivered channel post to a previously queued main post.
+
+    A media album has one shared ``media_group_id``.  Once its first item is
+    matched, the group ID binds all later items without relying on a timeout.
+    """
+    data = _load_queued_publications()
+    media_group_id = str(getattr(msg, "media_group_id", None) or "")
+    delivered_text = _message_publish_text(msg)
+    candidates = []
+    for publication_id, item in data.items():
+        if not isinstance(item, dict) or item.get("status") != "awaiting_channel_post":
+            continue
+        if _as_int(item.get("target_channel_id")) != int(channel_id):
+            continue
+        if media_group_id and str(item.get("delivery_media_group_id") or "") == media_group_id:
+            return str(publication_id), item
+        if item.get("delivery_message_ids"):
+            continue
+        expected_text = str(item.get("expected_text") or "").strip()
+        # Prefer an exact caption/text match.  Media-only albums have no
+        # caption to compare, so Telegram's FIFO delivery order is the safe
+        # fallback for records awaiting their first item.
+        if expected_text and expected_text != delivered_text:
+            continue
+        candidates.append((int(item.get("queued_at") or 0), str(publication_id), item))
+    if not candidates:
+        return None, None
+    _queued_at, publication_id, item = min(candidates, key=lambda value: value[0])
+    return publication_id, item
+
+
+async def _finalize_queued_main_publication(
+    context: ContextTypes.DEFAULT_TYPE,
+    publication_id: str,
+    publication: dict,
+    source_message,
+    channel_id: int,
+) -> None:
+    """Run ID-dependent follow-up operations after Telegram really posts."""
+    message_ids = [
+        message_id
+        for message_id in (_as_int(value) for value in publication.get("delivery_message_ids", []))
+        if message_id is not None
+    ]
+    if not message_ids:
+        return
+    first_message_id = message_ids[0]
+    config = load_publish_config()
+    entries = _extract_routing_keywords(source_message, config)
+    report_id = str(publication.get("report_id") or "")
+    report_url = str(publication.get("report_url") or "")
+
+    try:
+        if report_id:
+            if not report_url:
+                report_url = await _report_deep_link(context, report_id) or ""
+            _create_comment_report(
+                channel_id,
+                first_message_id,
+                report_id,
+                subject_entries=entries or publication.get("keyword_entries", []),
+            )
+            if report_url and not bool(publication.get("report_link_embedded", False)):
+                embedded = await _append_report_link_to_original_post(
+                    context,
+                    source_message,
+                    channel_id,
+                    first_message_id,
+                    report_url,
+                )
+                if not embedded:
+                    await _send_report_link_companion(context, channel_id, report_url)
+
+        if bool(publication.get("mirror_to_backup", False)):
+            await _mirror_main_post_to_backup(
+                context,
+                config,
+                channel_id,
+                first_message_id,
+                main_message_ids=message_ids,
+            )
+
+        source_chat_id = _as_int(publication.get("source_chat_id"))
+        source_message_id = _as_int(publication.get("source_message_id"))
+        if source_chat_id is not None and source_message_id is not None:
+            data = _load_cannel_message()
+            if not any(
+                _as_int(item.get("channel_id")) == channel_id
+                and _as_int(item.get("channel_message_id")) == first_message_id
+                for item in data
+                if isinstance(item, dict)
+            ):
+                data.append({
+                    "user_id": None,
+                    "user_chat_id": source_chat_id,
+                    "username": None,
+                    "user_message_id": source_message_id,
+                    "source_message_ids": publication.get("source_message_ids") or [source_message_id],
+                    "channel_message_id": first_message_id,
+                    "channel_id": channel_id,
+                    "publish_time": int(time.time()),
+                })
+                save_json(USER_MESSAGE_FILE, data)
+    except Exception as exc:
+        # The post is already live.  Keep the record so an administrator can
+        # inspect/retry it instead of silently losing the missing report link.
+        publication["status"] = "follow_up_failed"
+        publication["follow_up_error"] = str(exc)[:500]
+        publication["failed_at"] = int(time.time())
+        print(f"排队发布后续处理失败 publication={publication_id}: {exc}")
+    else:
+        publication["status"] = "completed"
+        publication["finished_at"] = int(time.time())
+        publication["report_url"] = report_url
+        print(
+            "✅ 已完成 Telegram 排队发布后续操作 "
+            f"publication={publication_id} channel={channel_id} message={first_message_id}"
+        )
+    data = _load_queued_publications()
+    data[publication_id] = publication
+    _save_queued_publications(data)
+
+
+async def _capture_queued_main_publication(
+    context: ContextTypes.DEFAULT_TYPE,
+    msg,
+    channel_id: int,
+) -> None:
+    """Track actual delivery of a queued post and finalize it event-by-event."""
+    publication_id, publication = _match_queued_main_publication(msg, channel_id)
+    if not publication_id or not isinstance(publication, dict):
+        return
+
+    message_id = _as_int(getattr(msg, "message_id", None))
+    if message_id is None:
+        return
+    message_ids = publication.setdefault("delivery_message_ids", [])
+    if message_id not in message_ids:
+        message_ids.append(message_id)
+    media_group_id = str(getattr(msg, "media_group_id", None) or "")
+    if media_group_id:
+        publication["delivery_media_group_id"] = media_group_id
+    publication["last_delivery_at"] = int(time.time())
+
+    expected_count = max(1, int(publication.get("expected_message_count") or 1))
+    delivered_count = len(message_ids)
+    should_finalize = expected_count == 1 or delivered_count >= expected_count
+    data = _load_queued_publications()
+    data[publication_id] = publication
+    _save_queued_publications(data)
+    if should_finalize:
+        await _finalize_queued_main_publication(
+            context, publication_id, publication, msg, channel_id
+        )
+
+
 async def _append_report_link_to_original_post(
     context: ContextTypes.DEFAULT_TYPE,
     source_message,
@@ -1868,7 +2105,7 @@ async def _append_report_link_to_original_post(
     Only plain text/plain captions are edited. Rich entities are deliberately
     left untouched because editing them as plain text would destroy formatting.
     """
-    link_line = f"📋 评论报告：{report_url}"
+    link_line = f"📋 老师个人报告：{report_url}"
     text = getattr(source_message, "text", None)
     caption = getattr(source_message, "caption", None)
     try:
@@ -1902,7 +2139,7 @@ async def _send_report_link_companion(
     """Fallback: send only a plain link text immediately after the source post."""
     await context.bot.send_message(
         chat_id=channel_id,
-        text=f"📋 评论报告：{report_url}",
+        text=f"📋 老师个人报告：{report_url}",
         disable_web_page_preview=True,
     )
 
@@ -2940,6 +3177,107 @@ def _save_keyword_map(data: dict) -> None:
     save_json(KEYWORD_MAP_FILE, data)
 
 
+def _remove_post_collection(channel_id, message_id) -> dict:
+    """Remove every locally stored collection record for one primary channel post.
+
+    Keyword lookup and group keyword replies both read ``publish_keyword_map``;
+    removing all of this post's records therefore also prevents future keyword
+    replies for the post.  The channel message itself and any existing discussion
+    comments are deliberately left untouched.
+    """
+    channel_id = _as_int(channel_id)
+    message_id = _as_int(message_id)
+    result = {
+        "keyword_records": 0,
+        "checkin_post": False,
+        "comment_mapping": False,
+        "backup_mapping": False,
+        "report_subjects": 0,
+    }
+    if channel_id is None or message_id is None or message_id <= 0:
+        return result
+
+    # Remove every extracted keyword field for the post, including records under
+    # keys other than the one used for the current search.
+    keyword_data = _load_keyword_map()
+    keyword_changed = False
+    for key, records in list(keyword_data.items()):
+        if not isinstance(records, list):
+            continue
+        kept = []
+        for record in records:
+            is_target = (
+                isinstance(record, dict)
+                and _as_int(record.get("channel_id")) == channel_id
+                and _as_int(record.get("channel_message_id")) == message_id
+            )
+            if is_target:
+                result["keyword_records"] += 1
+                keyword_changed = True
+            else:
+                kept.append(record)
+        if kept:
+            keyword_data[key] = kept
+        elif records:
+            keyword_data.pop(key, None)
+    if keyword_changed:
+        _save_keyword_map(keyword_data)
+
+    # A check-in record can include active check-ins, so remove the whole post
+    # record rather than merely clearing its eligible usernames.
+    checkin_data = _load_checkin_posts()
+    checkin_key = _checkin_post_key(channel_id, message_id)
+    if checkin_data.get("posts", {}).pop(checkin_key, None) is not None:
+        result["checkin_post"] = True
+        _save_checkin_posts(checkin_data)
+
+    # Stop old keyword/comment flows from continuing to target this uncollected
+    # post. Also clear the matching backup discussion mapping, when one exists.
+    post_key = _comment_map_key(channel_id, message_id)
+    backup_data = _load_backup_post_map()
+    backup_mapping = backup_data.get("mappings", {}).pop(post_key, None)
+    if backup_mapping is not None:
+        result["backup_mapping"] = True
+        _save_backup_post_map(backup_data)
+
+    comment_data = _load_comment_map()
+    comment_changed = comment_data.pop(post_key, None) is not None
+    if isinstance(backup_mapping, dict):
+        backup_channel_id = _as_int(backup_mapping.get("backup_channel_id"))
+        backup_message_id = _as_int(backup_mapping.get("backup_message_id"))
+        if backup_channel_id is not None and backup_message_id is not None:
+            backup_key = _comment_map_key(backup_channel_id, backup_message_id)
+            comment_changed = comment_data.pop(backup_key, None) is not None or comment_changed
+    if comment_changed:
+        result["comment_mapping"] = True
+        _save_comment_map(comment_data)
+
+    # Keep any historical comment report, but remove the collection fields shown
+    # on it so it cannot continue exposing deleted keyword information.
+    result["report_subjects"] = _update_comment_report_subjects(
+        channel_id,
+        message_id,
+        [],
+    )
+    return result
+
+
+def _keyword_post_delete_callback_data(route: dict) -> Optional[str]:
+    """Return a compact callback that always targets the primary indexed post."""
+    channel_id = _as_int(route.get("source_channel_id"))
+    message_id = _as_int(route.get("source_message_id"))
+    if channel_id is None:
+        channel_id = _as_int(route.get("channel_id"))
+    if message_id is None:
+        message_id = _as_int(route.get("channel_message_id"))
+    if channel_id is None or message_id is None or message_id <= 0:
+        return None
+    callback_data = f"publish:keyword_post_delete:{channel_id}:{message_id}"
+    # Telegram callback_data is limited to 64 bytes. These numeric IDs normally
+    # fit comfortably, but do not render an unusable button for malformed data.
+    return callback_data if len(callback_data.encode("utf-8")) <= 64 else None
+
+
 def _register_post_keywords(entries: list[dict], channel_id, message_id) -> None:
     message_id = _as_int(message_id)
     # Telegram message IDs are strictly positive. Do not index malformed
@@ -3267,46 +3605,61 @@ def _keyword_post_results_keyboard(routes: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-async def _send_keyword_post_result(message, context: ContextTypes.DEFAULT_TYPE, route: dict) -> None:
+def _keyword_post_result_keyboard(
+    route: dict,
+    link: Optional[str],
+    *,
+    show_delete_button: bool = False,
+) -> InlineKeyboardMarkup:
+    """Controls shown beneath a viewed collection post."""
+    first_row = []
+    if link:
+        first_row.append(InlineKeyboardButton("🔗 查看对应帖子", url=link))
+    if show_delete_button:
+        callback_data = _keyword_post_delete_callback_data(route)
+        if callback_data:
+            first_row.append(InlineKeyboardButton("🗑 删除收录", callback_data=callback_data))
+    rows = [first_row] if first_row else []
+    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="publish:keyword_post_return")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _send_keyword_post_result(
+    message,
+    context: ContextTypes.DEFAULT_TYPE,
+    route: dict,
+    *,
+    show_delete_button: bool = False,
+) -> None:
     """Send the indexed channel post to a private lookup requester.
 
     Copying shows the full original post inside the bot chat. If Telegram does
     not allow copying (for example, protected content), a channel link is used
-    as the fallback.
+    as the fallback. Administrators also receive a control to remove this
+    message ID's local collection records.
     """
     label = str(route.get("label", "关键词"))
     value = str(route.get("raw", route.get("key", "")))
     link = await _route_message_link(context, route)
+    copied = False
     try:
         await context.bot.copy_message(
             chat_id=message.chat_id,
             from_chat_id=route["channel_id"],
             message_id=route["channel_message_id"],
         )
-        if link:
-            await message.reply_text(
-                f"🔎 已找到 {label}：{value}",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("🔗 在频道中打开", url=link),
-                        InlineKeyboardButton("⬅️ 返回", callback_data="publish:keyword_post_return"),
-                    ]
-                ]),
-                disable_web_page_preview=True,
-            )
-        return
+        copied = True
     except Exception as exc:
         print(f"关键词帖子复制失败: {exc}")
 
-    if link:
+    if copied or link or show_delete_button:
         await message.reply_text(
             f"🔎 已找到 {label}：{value}",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("🔗 查看对应帖子", url=link),
-                    InlineKeyboardButton("⬅️ 返回", callback_data="publish:keyword_post_return"),
-                ]
-            ]),
+            reply_markup=_keyword_post_result_keyboard(
+                route,
+                link,
+                show_delete_button=show_delete_button,
+            ),
             disable_web_page_preview=True,
         )
     else:
@@ -3349,7 +3702,18 @@ async def _handle_keyword_post_search_input(update: Update, context: ContextType
 
     if len(routes) == 1:
         context.user_data.pop(KEYWORD_POST_SEARCH_INPUT_KEY, None)
-        await _send_keyword_post_result(msg, context, routes[0])
+        user = update.effective_user
+        show_delete_button = bool(user) and has_admin_permission(
+            context,
+            user.id,
+            "submission_config",
+        )
+        await _send_keyword_post_result(
+            msg,
+            context,
+            routes[0],
+            show_delete_button=show_delete_button,
+        )
         return True
 
     context.user_data[KEYWORD_POST_RESULTS_KEY] = routes
@@ -3598,7 +3962,13 @@ async def _handle_group_keyword_reply(update: Update, context: ContextTypes.DEFA
     if not msg.text or (user and user.is_bot):
         return False
     query = msg.text.strip()
-    if not query or len(query) > 64 or "\n" in query or any(char.isspace() for char in query):
+    if (
+        not query
+        or len(query) > 64
+        or "\n" in query
+        or any(char.isspace() for char in query)
+        or query.isdigit()
+    ):
         return False
 
     config = load_publish_config()
@@ -3976,6 +4346,9 @@ async def _capture_comment_source_message(
         entries = _extract_routing_keywords(msg, config)
         _register_post_keywords(entries, main_channel_id, msg.message_id)
         _register_checkin_post(config, main_channel_id, msg.message_id, entries)
+        # A large copy may return message_id=0.  The real channel_post update
+        # is the authoritative completion signal for its report link/mirror.
+        await _capture_queued_main_publication(context, msg, main_channel_id)
         print(
             "✅ 已收录新发布频道帖关键词 "
             f"channel={main_channel_id} message={msg.message_id} keywords={len(entries)}"
@@ -5309,6 +5682,64 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             print(f"在线帖子查看失败 channel={channel_id}/{message_id}: {exc}")
             return await query.answer("暂时无法读取该帖子，请确认机器人可访问主频道。", show_alert=True)
 
+    if action == "keyword_post_delete":
+        if not has_admin_permission(context, query.from_user.id, "submission_config"):
+            return await query.answer("你没有删除收录信息的权限。", show_alert=True)
+        if len(parts) != 4:
+            return await query.answer("删除参数无效。", show_alert=True)
+        channel_message_id = _as_int(parts[3])
+        indexed_channel_id = _as_int(parts[2])
+        if indexed_channel_id is None or channel_message_id is None or channel_message_id <= 0:
+            return await query.answer("删除参数无效。", show_alert=True)
+
+        removed = _remove_post_collection(indexed_channel_id, channel_message_id)
+        # If this result came from a multi-result search, remove both its main
+        # and backup display routes before returning to that list.
+        routes = (context.user_data or {}).get(KEYWORD_POST_RESULTS_KEY, [])
+        if isinstance(routes, list):
+            remaining_routes = []
+            for route in routes:
+                if not isinstance(route, dict):
+                    continue
+                route_channel_id = _as_int(route.get("source_channel_id"))
+                route_message_id = _as_int(route.get("source_message_id"))
+                if route_channel_id is None:
+                    route_channel_id = _as_int(route.get("channel_id"))
+                if route_message_id is None:
+                    route_message_id = _as_int(route.get("channel_message_id"))
+                if (route_channel_id, route_message_id) != (
+                    indexed_channel_id,
+                    channel_message_id,
+                ):
+                    remaining_routes.append(route)
+            context.user_data[KEYWORD_POST_RESULTS_KEY] = remaining_routes
+
+        details = []
+        if removed["keyword_records"]:
+            details.append(f"关键词 {removed['keyword_records']} 条")
+        if removed["checkin_post"]:
+            details.append("签到记录")
+        if removed["comment_mapping"]:
+            details.append("评论映射")
+        if removed["backup_mapping"]:
+            details.append("备用帖映射")
+        if removed["report_subjects"]:
+            details.append("报告收录字段")
+        detail_text = "、".join(details) or "没有找到仍需清理的本地记录"
+        await query.answer("✅ 收录信息已删除。")
+        try:
+            return await query.edit_message_text(
+                f"✅ 已删除消息 ID {channel_message_id} 的收录信息。\n"
+                f"已清理：{detail_text}。\n\n"
+                "频道原帖和已发布的评论不会被删除；关键词查询、群关键词回复和签到将不再使用此帖。",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⬅️ 返回搜索结果", callback_data="publish:keyword_post_return")
+                ]]),
+            )
+        except Exception as exc:
+            print(f"删除帖子收录信息后的提示更新失败: {exc}")
+            return
+
     if action == "keyword_post_search":
         context.user_data[KEYWORD_POST_SEARCH_INPUT_KEY] = True
         context.user_data.pop(KEYWORD_POST_RESULTS_KEY, None)
@@ -5359,8 +5790,18 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (ValueError, IndexError, TypeError):
             return await query.answer("关键词结果已失效，请重新搜索。", show_alert=True)
         context.user_data[KEYWORD_POST_SEARCH_INPUT_KEY] = True
+        show_delete_button = has_admin_permission(
+            context,
+            query.from_user.id,
+            "submission_config",
+        )
         await query.answer()
-        await _send_keyword_post_result(query.message, context, route)
+        await _send_keyword_post_result(
+            query.message,
+            context,
+            route,
+            show_delete_button=show_delete_button,
+        )
         try:
             return await query.edit_message_text("✅ 已发送对应帖子。")
         except Exception:
@@ -5670,10 +6111,20 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as exc:
             return await query.answer(f"发布失败：{str(exc)[:100]}", show_alert=True)
         if published_message_id is None:
+            _queue_main_publication_follow_up(
+                target_channel_id=channel_id_int,
+                expected_text=text_to_publish,
+                expected_message_count=1,
+                report_id=report_id,
+                report_url=report_url,
+                keyword_entries=entries,
+                mirror_to_backup=True,
+                report_link_embedded=bool(report_url),
+            )
             context.user_data.pop(TEMPLATE_FLOW_KEY, None)
             await query.answer("Telegram 正在排队发布模板。")
             return await query.edit_message_text(
-                "✅ Telegram 已接收模板，正在排队发布；实际发出后会自动收录关键词和打卡。",
+                "✅ Telegram 已接收模板，正在排队发布；实际发出后会自动收录关键词、打卡和报告链接。",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("⬅️ 返回首页", callback_data="start:back")]
                 ]),
@@ -7132,9 +7583,22 @@ async def _handle_wall_publish_message(
                 ),
             )
         if getattr(published, "scheduled", False):
+            if submission_kind == "main" and _as_int(target_channel_id) is not None:
+                _queue_main_publication_follow_up(
+                    target_channel_id=int(target_channel_id),
+                    expected_text=_message_publish_text(msg),
+                    expected_message_count=len(_submission_message_ids(submission)),
+                    report_id=report_id,
+                    report_url=report_url,
+                    keyword_entries=submission.get("keyword_entries", []),
+                    mirror_to_backup=True,
+                    source_chat_id=msg.chat_id,
+                    source_message_id=msg.message_id,
+                    source_message_ids=_submission_message_ids(submission),
+                )
             _finish_submission_if_needed(context, config)
             return await msg.reply_text(
-                "✅ Telegram 已接收投稿，正在排队发布；实际发出后会自动收录关键词和打卡。"
+                "✅ Telegram 已接收投稿，正在排队发布；实际发出后会自动收录关键词、打卡和报告链接。"
             )
         if report_id and report_url:
             _create_comment_report(

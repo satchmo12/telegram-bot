@@ -125,7 +125,7 @@ def update_invite_stats_by_user(
     return added_invitees
 
 
-@register_command("邀请链接")
+# @register_command("邀请链接")
 # async def create_personal_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #     if not update.message or not update.effective_chat or not update.effective_user:
 #         return
@@ -193,6 +193,21 @@ async def create_personal_invite_link(update: Update, context: ContextTypes.DEFA
     chat = update.effective_chat
     if chat.type not in ("group", "supergroup"):
         return await safe_reply(update, context, "⚠️ 该命令只能在群里使用。")
+    
+
+    chat_id = str(update.effective_chat.id) if update.effective_chat else ""
+        
+    group_config = get_group_whitelist(context).get(chat_id, {})
+    
+
+    
+    # 积分开关没开，不相应
+    if not bool(group_config.get('points_enabled', False)):
+        return 
+    
+    # 邀请积分没开，不相应
+    if not bool(group_config.get('invite_points_enabled', False)):
+        return 
 
     user = update.effective_user
     chat_key = str(chat.id)

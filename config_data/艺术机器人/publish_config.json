@@ -65,7 +65,7 @@
     ],
     "keyword_post_search_display_mode": "main",
     "checkin_enabled": true,
-    "checkin_duration_hours": 12,
+    "checkin_duration_hours": 13,
     "checkin_user_label": "联系",
     "checkin_display_label": "艺名+课费",
     "checkin_group_label": "区域",
