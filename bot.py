@@ -94,12 +94,13 @@ import uuid
 async def show_menu(update, context):
     # Visible custom command templates are also exposed as reply-keyboard
     # shortcuts. Adding/removing a visible template updates this menu too.
-    keyboard = [["📅每日签到"]]
+    keyboard = [["✍️我要投稿"]]
+    
     for label in visible_reply_labels():
         if len(keyboard[-1]) >= 2:
             keyboard.append([])
         keyboard[-1].append(label)
-    keyboard.append(["🏆排行榜", "💰我的积分"])
+    keyboard.append(["🔎查找收录老师与标签"])
 
     reply_markup = ReplyKeyboardMarkup(
         keyboard,
@@ -356,6 +357,7 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
         or user_data.get("publish_template_draft")
         or user_data.get("publish_template_flow")
         or user_data.get("publish_keyword_label_input")
+        or user_data.get("publish_pending_proof_id")
     ):
         print(
             "[private_forward_router] 忽略：当前正在投稿、关键词搜索或填写拒绝原因"
@@ -693,6 +695,9 @@ def _clear_submission_draft(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """兜底 /start：保证未启用 verification 的机器人也能响应。"""
+    
+    await show_menu(update, context)
+      
     if not update.message:
         return
 
@@ -753,6 +758,9 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    
+  
+    
     query = update.callback_query
     if not query or not query.data:
         return

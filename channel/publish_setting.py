@@ -10,7 +10,7 @@ import re
 import time
 import uuid
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity, Update
-from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, ContextTypes, MessageHandler, TypeHandler, filters
+from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, TypeHandler, filters
 from telegram.error import BadRequest, Forbidden
 
 from datetime import datetime, timedelta, timezone
@@ -21,6 +21,8 @@ from telethon.tl.types import (
     MessageMediaDocument,
     MessageMediaWebPage,
 )
+
+from command_router import register_command
 
 BJ_TZ = timezone(timedelta(hours=8))
 from channel.channel_config import USER_MESSAGE_FILE
@@ -36,6 +38,7 @@ from utils import (
     save_json,
 )
 from admin_permissions import get_delegated_admin_ids, has_admin_permission
+from info.economy import change_points
 
 PUBLISH_CONFIG_FILE = "config_data/publish_config.json"
 ANON_CHAT_FILE = "data/anon_chat.json"
@@ -80,6 +83,12 @@ TEMPLATE_KEY_PATTERN = re.compile(r"\{([\w\-一-鿿]+)\}")
 MEDIA_GROUP_BUFFER_KEY = "publish_pending_media_groups"
 MEDIA_GROUP_WAIT_SECONDS = 20.0
 
+# A manually published main-channel album is delivered in the same way: one
+# ``channel_post`` update per item.  Delay its backup copy until all items have
+# arrived, then use copy_messages/send_album so Telegram preserves the album.
+MAIN_CHANNEL_MEDIA_GROUP_BACKUP_BUFFER_KEY = "publish_main_channel_media_group_backups"
+MAIN_CHANNEL_MEDIA_GROUP_BACKUP_WAIT_SECONDS = 3.0
+
 # =========================
 # 配置读写
 # =========================
@@ -106,6 +115,13 @@ def load_publish_config():
         "pending_history_post_migration": None,
         "channel_change_history": [],
         "review_enabled": False,
+        # Reward approved comments in the configured group economy.
+        # Points are stored in the configured group economy, not the channel.
+        "submission_reward_enabled": False,
+        "submission_reward_anonymous_points": 0,
+        "submission_reward_real_points": 0,
+        "submission_reward_group_id": None,
+        "submission_reward_group_title": "",
         "daily_limit": 0,
         "ads_enabled": False,
         "ads": [],
@@ -526,6 +542,76 @@ async def _mirror_main_post_to_backup(
             f"main={main_channel_id}/{main_message_id} backup={backup_channel_id}: {exc}"
         )
         return None
+
+
+async def _flush_main_channel_media_group_backup(context: ContextTypes.DEFAULT_TYPE):
+    """Mirror a complete manually published main-channel media album."""
+    job_data = context.job.data if context.job else {}
+    key = str((job_data or {}).get("key") or "")
+    revision = int((job_data or {}).get("revision") or 0)
+    buffers = context.application.bot_data.get(
+        MAIN_CHANNEL_MEDIA_GROUP_BACKUP_BUFFER_KEY, {}
+    )
+    entry = buffers.get(key) if isinstance(buffers, dict) else None
+    if not isinstance(entry, dict) or int(entry.get("revision") or 0) != revision:
+        return
+
+    buffers.pop(key, None)
+    main_channel_id = _as_int(entry.get("main_channel_id"))
+    message_ids = sorted(
+        {
+            message_id
+            for message_id in (_as_int(value) for value in entry.get("message_ids", []))
+            if message_id is not None
+        }
+    )
+    if main_channel_id is None or not message_ids:
+        return
+
+    # Reload the configuration so a just-changed backup target is respected.
+    config = load_publish_config()
+    await _mirror_main_post_to_backup(
+        context,
+        config,
+        main_channel_id,
+        message_ids[0],
+        main_message_ids=message_ids,
+    )
+
+
+async def _queue_main_channel_media_group_backup(
+    context: ContextTypes.DEFAULT_TYPE,
+    msg,
+) -> None:
+    """Collect direct main-channel album updates before mirroring them."""
+    main_channel_id = _as_int(getattr(getattr(msg, "chat", None), "id", None))
+    message_id = _as_int(getattr(msg, "message_id", None))
+    media_group_id = str(getattr(msg, "media_group_id", None) or "")
+    if main_channel_id is None or message_id is None or not media_group_id:
+        return
+
+    key = f"{main_channel_id}:{media_group_id}"
+    buffers = context.application.bot_data.setdefault(
+        MAIN_CHANNEL_MEDIA_GROUP_BACKUP_BUFFER_KEY, {}
+    )
+    entry = buffers.setdefault(
+        key,
+        {
+            "main_channel_id": main_channel_id,
+            "message_ids": [],
+            "revision": 0,
+        },
+    )
+    if message_id not in entry["message_ids"]:
+        entry["message_ids"].append(message_id)
+    entry["revision"] = int(entry.get("revision") or 0) + 1
+
+    context.job_queue.run_once(
+        _flush_main_channel_media_group_backup,
+        when=MAIN_CHANNEL_MEDIA_GROUP_BACKUP_WAIT_SECONDS,
+        data={"key": key, "revision": entry["revision"]},
+        name=f"publish-main-channel-media-group-backup:{key}",
+    )
 
 
 async def _sync_main_post_edit_to_backup(
@@ -4431,14 +4517,22 @@ async def _capture_comment_source_message(
                 main_channel_id,
             )
         else:
-            # 频道内直接发布的消息，不经过机器人发布流程，
-            # 直接复制到备用频道。
-            await _mirror_main_post_to_backup(
-                context,
-                config,
-                main_channel_id,
-                msg.message_id,
-            )
+            # Telegram sends every manually posted album item as an individual
+            # channel_post update.  Wait for the complete group before copying;
+            # otherwise the backup receives several unrelated single photos.
+            if (
+                getattr(msg, "media_group_id", None)
+                and _backup_channel_id(config, main_channel_id) is not None
+            ):
+                await _queue_main_channel_media_group_backup(context, msg)
+            else:
+                # A non-album post can be mirrored immediately.
+                await _mirror_main_post_to_backup(
+                    context,
+                    config,
+                    main_channel_id,
+                    msg.message_id,
+                )
 
         print(
             "✅ 已收录新发布频道帖关键词 "
@@ -5025,6 +5119,18 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
             submission["scheduled_at"] = int(time.time())
         else:
             submission["channel_message_id"] = published.message_id
+
+        reward = _grant_approved_submission_reward(config, submission)
+        submission["submission_reward"] = reward
+        reward_notice = ""
+        if reward.get("status") == "granted":
+            reward_notice = f"\n\n🎁 审核奖励已到账：{reward['amount']} 积分。"
+        elif reward.get("status") == "failed":
+            print(
+                "投稿已审核通过，但积分奖励未发放 "
+                f"submission={submission_id}: {reward.get('error', 'unknown error')}"
+            )
+
         pending[submission_id] = submission
         _save_pending_submissions(pending)
 
@@ -5032,7 +5138,7 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
             try:
                 await context.bot.send_message(
                     chat_id=submission["user_chat_id"],
-                    text="✅ 您的投稿已审核通过，Telegram 正在排队发布。",
+                    text="✅ 您的投稿已审核通过，Telegram 正在排队发布。" + reward_notice,
                 )
             except Exception as exc:
                 print("投稿排队通知失败:", exc)
@@ -5061,7 +5167,7 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
         try:
             await context.bot.send_message(
                 chat_id=submission["user_chat_id"],
-                text="✅ 您的投稿已审核通过，并已发布到频道。",
+                text="✅ 您的投稿已审核通过，并已发布到频道。" + reward_notice,
             )
         except Exception as exc:
             print("投稿通过通知失败:", exc)
@@ -5532,6 +5638,135 @@ def _template_format_keyboard() -> InlineKeyboardMarkup:
 
 
 # =========================
+# 投稿奖励
+# =========================
+SUBMISSION_REWARD_POINTS_MAX = 999999
+
+
+def _submission_reward_points(value) -> int:
+    """Normalize a configured reward amount to the economy's supported range."""
+    amount = _as_int(value)
+    if amount is None:
+        return 0
+    return max(0, min(amount, SUBMISSION_REWARD_POINTS_MAX))
+
+
+def _submission_reward_group_text(config: dict) -> str:
+    group_id = _as_int((config or {}).get("submission_reward_group_id"))
+    if group_id is None:
+        return "未设置"
+    title = str((config or {}).get("submission_reward_group_title") or "").strip()
+    return f"{title} ({group_id})" if title else str(group_id)
+
+
+def _submission_reward_settings_text(config: dict) -> str:
+    enabled = bool((config or {}).get("submission_reward_enabled", False))
+    anonymous_points = _submission_reward_points(
+        (config or {}).get("submission_reward_anonymous_points")
+    )
+    real_points = _submission_reward_points(
+        (config or {}).get("submission_reward_real_points")
+    )
+    return "\n".join([
+        "🎁 评论奖励设置",
+        "",
+        f"奖励开关：{'✅ 已开启' if enabled else '❌ 已关闭'}",
+        f"🙈 匿名评论奖励：{anonymous_points} 积分",
+        f"👤 实名评论奖励：{real_points} 积分",
+        f"积分添加群：{_submission_reward_group_text(config)}",
+        "",
+        "评论在管理员审核通过并成功发布后会自动发放积分。",
+        "普通投稿不参与此奖励；奖励为 0 时该类型不发放积分。",
+    ])
+
+
+def _submission_reward_settings_keyboard(config: dict) -> InlineKeyboardMarkup:
+    enabled = bool((config or {}).get("submission_reward_enabled", False))
+    anonymous_points = _submission_reward_points(
+        (config or {}).get("submission_reward_anonymous_points")
+    )
+    real_points = _submission_reward_points(
+        (config or {}).get("submission_reward_real_points")
+    )
+    group_label = _submission_reward_group_text(config)
+    rows = [
+        [InlineKeyboardButton(
+            f"{'✅' if enabled else '🚫'} 奖励开关",
+            callback_data="publish:toggle_submission_reward",
+        )],
+        [
+            InlineKeyboardButton(
+                f"🙈 匿名奖励：{anonymous_points}",
+                callback_data="publish:set_submission_reward_anonymous",
+            ),
+            InlineKeyboardButton(
+                f"👤 实名奖励：{real_points}",
+                callback_data="publish:set_submission_reward_real",
+            ),
+        ],
+        [InlineKeyboardButton(
+            f"👥 积分添加群：{group_label[:42]}",
+            callback_data="publish:set_submission_reward_group",
+        )],
+    ]
+    if _as_int((config or {}).get("submission_reward_group_id")) is not None:
+        rows.append([InlineKeyboardButton(
+            "🗑 清除积分添加群",
+            callback_data="publish:clear_submission_reward_group",
+        )])
+    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="publish:back")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _grant_approved_submission_reward(config: dict, submission: dict) -> dict:
+    """Grant the configured points once an approved comment is published.
+
+    The caller persists the returned record with the submission, which leaves a
+    durable audit trail and avoids duplicate rewards for already handled items.
+    """
+    existing = submission.get("submission_reward")
+    if isinstance(existing, dict) and existing.get("status") == "granted":
+        return existing
+
+    if not bool((config or {}).get("submission_reward_enabled", False)):
+        return {"status": "disabled"}
+    if str(submission.get("submission_kind", "main")) != "comment":
+        return {"status": "not_applicable", "reason": "not_comment"}
+
+    group_id = _as_int((config or {}).get("submission_reward_group_id"))
+    user_id = _as_int(submission.get("user_id"))
+    if group_id is None or user_id is None:
+        return {"status": "not_configured"}
+
+    points_key = (
+        "submission_reward_anonymous_points"
+        if bool(submission.get("anonymous", False))
+        else "submission_reward_real_points"
+    )
+    amount = _submission_reward_points((config or {}).get(points_key))
+    if amount <= 0:
+        return {"status": "zero_amount", "amount": amount}
+
+    try:
+        balance = change_points(group_id, user_id, amount)
+    except Exception as exc:
+        print(
+            "评论奖励积分发放失败 "
+            f"submission={submission.get('id', '')} group={group_id} user={user_id}: {exc}"
+        )
+        return {"status": "failed", "error": str(exc)[:300]}
+
+    return {
+        "status": "granted",
+        "group_id": group_id,
+        "group_title": str((config or {}).get("submission_reward_group_title") or ""),
+        "amount": amount,
+        "balance": balance,
+        "granted_at": int(time.time()),
+    }
+
+
+# =========================
 # 键盘
 # =========================
 def publish_setting_keyboard(config: dict):
@@ -5549,6 +5784,7 @@ def publish_setting_keyboard(config: dict):
             InlineKeyboardButton("📢 发布频道", callback_data="publish:channel"),
             InlineKeyboardButton("📝 审核设置", callback_data="publish:review"),
         ],
+        [InlineKeyboardButton("🎁 评论奖励", callback_data="publish:submission_reward")],
         # [InlineKeyboardButton("📊 每日发布上限", callback_data="publish:limit")],
         # [InlineKeyboardButton("📣 广告管理", callback_data="publish:ads")],
         # [InlineKeyboardButton("🔘 底部按钮设置", callback_data="publish:buttons")],
@@ -6011,6 +6247,57 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.answer("你没有投稿配置权限。", show_alert=True)
 
     await query.answer()
+
+    if action == "submission_reward":
+        return await query.edit_message_text(
+            _submission_reward_settings_text(config),
+            reply_markup=_submission_reward_settings_keyboard(config),
+        )
+
+    if action == "toggle_submission_reward":
+        config["submission_reward_enabled"] = not bool(
+            config.get("submission_reward_enabled", False)
+        )
+        save_publish_config(config)
+        return await query.edit_message_text(
+            _submission_reward_settings_text(config),
+            reply_markup=_submission_reward_settings_keyboard(config),
+        )
+
+    if action in {"set_submission_reward_anonymous", "set_submission_reward_real"}:
+        field = (
+            "submission_reward_anonymous_points"
+            if action == "set_submission_reward_anonymous"
+            else "submission_reward_real_points"
+        )
+        label = "匿名" if field == "submission_reward_anonymous_points" else "实名"
+        context.user_data["submission_reward_points_field"] = field
+        return await query.edit_message_text(
+            f"请输入{label}评论审核通过后的奖励积分。\n"
+            f"请输入 0 到 {SUBMISSION_REWARD_POINTS_MAX} 的整数；0 表示不奖励。",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ 返回奖励设置", callback_data="publish:submission_reward")]
+            ]),
+        )
+
+    if action == "set_submission_reward_group":
+        context.user_data["waiting_submission_reward_group_id"] = True
+        return await query.edit_message_text(
+            "请输入用于添加积分的群 ID，例如：-1001234567890。\n\n"
+            "机器人必须能访问该群；保存时会自动读取并展示群标题。",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ 返回奖励设置", callback_data="publish:submission_reward")]
+            ]),
+        )
+
+    if action == "clear_submission_reward_group":
+        config["submission_reward_group_id"] = None
+        config["submission_reward_group_title"] = ""
+        save_publish_config(config)
+        return await query.edit_message_text(
+            _submission_reward_settings_text(config),
+            reply_markup=_submission_reward_settings_keyboard(config),
+        )
 
     if action == "toggle_template_publish":
         config["template_publish_enabled"] = not bool(config.get("template_publish_enabled", False))
@@ -8341,7 +8628,79 @@ async def _handle_checkin_settings_input(update: Update, context: ContextTypes.D
     return False
 
 
+async def _handle_submission_reward_settings_input(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """Handle reward amounts and target group input from 评论奖励设置."""
+    if not update.message or not update.message.text:
+        return False
+
+    points_field = context.user_data.get("submission_reward_points_field")
+    if points_field in {
+        "submission_reward_anonymous_points",
+        "submission_reward_real_points",
+    }:
+        try:
+            amount = int(update.message.text.strip())
+        except (TypeError, ValueError):
+            return await update.message.reply_text(
+                f"❗ 请输入 0 到 {SUBMISSION_REWARD_POINTS_MAX} 的整数。"
+            )
+        if not 0 <= amount <= SUBMISSION_REWARD_POINTS_MAX:
+            return await update.message.reply_text(
+                f"❗ 积分必须在 0 到 {SUBMISSION_REWARD_POINTS_MAX} 之间。"
+            )
+        context.user_data.pop("submission_reward_points_field", None)
+        config = load_publish_config()
+        config[points_field] = amount
+        save_publish_config(config)
+        return await update.message.reply_text(
+            "✅ 评论奖励积分已保存。\n\n" + _submission_reward_settings_text(config),
+            reply_markup=_submission_reward_settings_keyboard(config),
+        )
+
+    if context.user_data.get("waiting_submission_reward_group_id"):
+        try:
+            group_id = int(update.message.text.strip())
+        except (TypeError, ValueError):
+            return await update.message.reply_text(
+                "❗ 群 ID 格式错误，例如：-1001234567890"
+            )
+
+        try:
+            group = await context.bot.get_chat(group_id)
+        except (BadRequest, Forbidden) as exc:
+            return await update.message.reply_text(
+                f"❗ 无法访问该群：{str(exc)[:120]}。请确认群 ID 正确且机器人已在群内。"
+            )
+        except Exception as exc:
+            return await update.message.reply_text(
+                f"❗ 读取群信息失败：{str(exc)[:120]}"
+            )
+
+        if str(getattr(group, "type", "")) not in {"group", "supergroup"}:
+            return await update.message.reply_text("❗ 积分添加目标必须是群组或超级群。")
+
+        title = str(getattr(group, "title", "") or "").strip()
+        context.user_data.pop("waiting_submission_reward_group_id", None)
+        config = load_publish_config()
+        config["submission_reward_group_id"] = group_id
+        config["submission_reward_group_title"] = title
+        save_publish_config(config)
+        return await update.message.reply_text(
+            "✅ 已保存积分添加群："
+            f"{title or '未命名群'} ({group_id})\n\n"
+            + _submission_reward_settings_text(config),
+            reply_markup=_submission_reward_settings_keyboard(config),
+        )
+
+    return False
+
+
 async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await _handle_submission_reward_settings_input(update, context):
+        raise ApplicationHandlerStop
     if await _handle_user_mark_settings_input(update, context):
         raise ApplicationHandlerStop
     if await _handle_checkin_settings_input(update, context):
@@ -8631,7 +8990,130 @@ def _load_cannel_message() -> list:
     data = load_json(USER_MESSAGE_FILE)
     return data if isinstance(data, list) else []
 
+@register_command("报告链接")
+async def handle_report_link_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if not update.message:
+        return
 
+    # 获取命令参数
+    if not context.args:
+        await update.message.reply_text(
+            "请输入报告 ID。\n\n"
+            "使用方法：\n"
+            "/报告链接 xilin718"
+        )
+        return
+
+    report_id = context.args[0].strip().lstrip("@").lower()
+
+    if not report_id:
+        await update.message.reply_text("报告 ID 不能为空。")
+        return
+
+    # 调用现有方法生成链接
+    link = await _report_deep_link(context, report_id)
+
+    if not link:
+        await update.message.reply_text(
+            "❌ 无法生成报告链接，请检查机器人用户名配置。"
+        )
+        return
+
+    await update.message.reply_text(
+        f"📋 报告链接：\n\n"
+        f"{link}",
+        disable_web_page_preview=True,
+    ) 
+    
+async def _handle_publish_action(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    action: str,
+):
+    config = load_publish_config()
+    channel_id = config.get("channel_id")
+
+    query = update.callback_query
+
+    # 当前操作用户
+    user = query.from_user if query else update.effective_user
+    user_id = user.id if user else 0
+
+    # =========================================================
+    # 我要投稿
+    # =========================================================
+    if action == "publish":
+        owner_id = _owner_id(context)
+
+        if (
+            bool(config.get("comment_forward_enabled", False))
+            and user_id != owner_id
+            and not is_super_admin(user_id)
+            and not isinstance(
+                context.user_data.get(COMMENT_TARGET_KEY),
+                dict,
+            )
+        ):
+            if not _keyword_labels(config):
+                msg = "❗ 当前未配置关键词提取标签，请联系管理员在投稿设置中配置。"
+
+                if query:
+                    return await query.edit_message_text(msg)
+                else:
+                    return await update.message.reply_text(msg)
+
+            context.user_data[KEYWORD_INPUT_KEY] = True
+            context.user_data["waiting_post"] = False
+
+            msg = (
+                "🔎 请输入需要投稿的收录老师关键词，例如："
+                "悠悠 或 @××××（名字或联系方式）\n"
+                "找到对应帖子后，再发送投稿内容。"
+            )
+
+            if query:
+                return await query.edit_message_text(msg)
+            else:
+                return await update.message.reply_text(msg)
+
+        return await publish_message(update, context)
+
+    # =========================================================
+    # 查找收录标签
+    # =========================================================
+    elif action == "keyword_post_search":
+        context.user_data[KEYWORD_POST_SEARCH_INPUT_KEY] = True
+        context.user_data.pop(KEYWORD_POST_RESULTS_KEY, None)
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "❌ 取消查询",
+                    callback_data="publish:keyword_post_search_cancel",
+                )
+            ]
+        ])
+
+        msg = (
+            "🔎 请输入需要查询的收录老师 联系方式 标签 区域 类型 关键词，"
+            "例如：悠悠 或 @×××× 以及 普陀 嫩妹之类的关键词\n"
+            "发送“取消”或点击下方按钮可退出查询。"
+        )
+
+        if query:
+            await query.answer()
+            return await query.message.reply_text(
+                msg,
+                reply_markup=keyboard,
+            )
+        else:
+            return await update.message.reply_text(
+                msg,
+                reply_markup=keyboard,
+            )
 # =========================
 # 注册
 # =========================
@@ -8701,4 +9183,8 @@ def register_publish_setting_handlers(app):
             _handle_text_input,
         ),
         group=10,
+    )
+    
+    app.add_handler(
+        CommandHandler("handle_report_link_command", handle_report_link_command)
     )

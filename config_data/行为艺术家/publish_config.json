@@ -171,5 +171,10 @@
             "url": "https://t.me/+NtE1N4u4M2MzMjJh"
         }
     ],
-    "bottom_comment_buttons_enabled": true
+    "bottom_comment_buttons_enabled": true,
+    "submission_reward_enabled": false,
+    "submission_reward_anonymous_points": 0,
+    "submission_reward_real_points": 0,
+    "submission_reward_group_id": null,
+    "submission_reward_group_title": ""
 }

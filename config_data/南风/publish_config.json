@@ -48,5 +48,10 @@
     "user_mark_report_chat_id": null,
     "user_mark_labels": [],
     "bottom_comment_buttons_enabled": false,
-    "comment_buttons": []
+    "comment_buttons": [],
+    "submission_reward_enabled": false,
+    "submission_reward_anonymous_points": 0,
+    "submission_reward_real_points": 0,
+    "submission_reward_group_id": null,
+    "submission_reward_group_title": ""
 }

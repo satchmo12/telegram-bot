@@ -150,5 +150,10 @@
             "text": "测试",
             "url": "https://baidui.com"
         }
-    ]
+    ],
+    "submission_reward_enabled": true,
+    "submission_reward_anonymous_points": 50,
+    "submission_reward_real_points": 100,
+    "submission_reward_group_id": -1003861180330,
+    "submission_reward_group_title": "卖白面"
 }

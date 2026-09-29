@@ -3,6 +3,7 @@ import time
 import traceback
 
 from channel.channel_forwarder import handle_message
+from channel.publish_setting import _handle_publish_action
 from command_router import dispatch_command
 from forward.message_forward import handle_text_private_message
 from game.calculator import calculator_handler
@@ -178,6 +179,13 @@ async def handle_text(update, context):
 
     elif text == "💰我的积分":
         await my_points(update, context)
+        return True
+    
+    elif text == "✍️我要投稿":
+        await _handle_publish_action(update, context, "publish")
+        return True
+    elif text == "🔎查找收录老师与标签":
+        await _handle_publish_action(update, context, "keyword_post_search")
         return True
 
     chat_id = str(update.effective_chat.id) if update.effective_chat else ""
