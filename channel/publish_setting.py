@@ -14,6 +14,13 @@ from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, ContextTy
 from telegram.error import BadRequest, Forbidden
 
 from datetime import datetime, timedelta, timezone
+import io
+
+from telethon.tl.types import (
+    MessageMediaPhoto,
+    MessageMediaDocument,
+    MessageMediaWebPage,
+)
 
 BJ_TZ = timezone(timedelta(hours=8))
 from channel.channel_config import USER_MESSAGE_FILE
@@ -344,13 +351,15 @@ async def _mirror_main_post_via_telethon(
 
     # A Telegram album stores its caption on one item (usually the first). Use
     # that message as the caption source and send every media item together.
+    # 相册处理：保留原有逻辑
     if len(source_messages) > 1:
         caption_message = next(
             (message for message in source_messages if getattr(message, "message", None)),
             source_messages[0],
         )
         files = [getattr(message, "media", None) for message in source_messages]
-        files = [media for media in files if media is not None]
+        # 过滤非文件类型的网页预览
+        files = [media for media in files if media is not None and not isinstance(media, MessageMediaWebPage)]
         if files:
             return await _send_album_with_caption(
                 forward_client,
@@ -364,6 +373,11 @@ async def _mirror_main_post_via_telethon(
     text = getattr(source_message, "message", None) or ""
     entities = getattr(source_message, "entities", None)
     media = getattr(source_message, "media", None)
+    
+        # 网页预览不是文件，不能传给 send_file
+    if isinstance(media, MessageMediaWebPage):
+        media = None
+        
     # send_message/send_file is a true copy: unlike forward_messages it does
     # not display “转发自 …” in the backup channel.
     return await _send_message_safe(
@@ -382,25 +396,67 @@ async def _edit_backup_post_via_telethon(
     backup_message_id: int,
     source_message,
 ) -> None:
-    client = await _get_backup_telethon_client(context, config, role="forward")
-    if getattr(source_message, "text", None) is not None:
-        html_text = getattr(source_message, "text_html", None)
+
+
+    client = await _get_backup_telethon_client(
+        context,
+        config,
+        role="forward",
+    )
+
+    text = (
+        getattr(source_message, "text", None)
+        or getattr(source_message, "caption", None)
+        or ""
+    )
+
+    html_text = (
+        getattr(source_message, "text_html", None)
+        or getattr(source_message, "caption_html", None)
+    )
+
+    parse_mode = "html" if html_text is not None else None
+    edit_text = html_text if html_text is not None else text
+
+    media = getattr(source_message, "media", None)
+
+    # 网页预览不是文件，不需要替换媒体
+    if isinstance(media, MessageMediaWebPage):
+        media = None
+
+    # 图片或视频发生变化时，下载新媒体并替换备用频道内容
+    if isinstance(media, (MessageMediaPhoto, MessageMediaDocument)):
+        media_bytes = await client.download_media(
+            source_message,
+            file=bytes,
+        )
+
+        if not media_bytes:
+            raise RuntimeError("无法下载主频道编辑后的媒体")
+
+        # 根据原消息的文件名确定扩展名
+        file_name = getattr(source_message, "file", None)
+        file_name = getattr(file_name, "name", None) or "edited_media"
+
+        media_file = io.BytesIO(media_bytes)
+        media_file.name = file_name
+
         await client.edit_message(
             backup_channel_id,
             backup_message_id,
-            html_text if html_text is not None else (source_message.text or ""),
-            parse_mode="html" if html_text is not None else None,
+            edit_text,
+            file=media_file,
+            parse_mode=parse_mode,
         )
-    elif getattr(source_message, "caption", None) is not None:
-        html_caption = getattr(source_message, "caption_html", None)
-        await client.edit_message(
-            backup_channel_id,
-            backup_message_id,
-            html_caption if html_caption is not None else (source_message.caption or ""),
-            parse_mode="html" if html_caption is not None else None,
-        )
-    else:
-        raise RuntimeError("主频道编辑内容为空")
+        return
+
+    # 纯文字或网页链接：只修改文字
+    await client.edit_message(
+        backup_channel_id,
+        backup_message_id,
+        edit_text,
+        parse_mode=parse_mode,
+    )
 
 
 async def _mirror_main_post_to_backup(
@@ -502,7 +558,18 @@ async def _sync_main_post_edit_to_backup(
         historic_item = historic.get((main_channel_id, main_message_id), {})
         historic_backup_message_id = _as_int(historic_item.get("target_message_id"))
         if historic_backup_message_id is None:
-            return False
+            # 没有找到备用帖映射，说明这条主帖可能是直接在频道发布的，
+            # 或者之前的备用帖映射丢失。
+            # 重新复制主帖到备用频道，并由复制函数自动记录映射。
+            copied = await _mirror_main_post_to_backup(
+                context,
+                config,
+                main_channel_id,
+                main_message_id,
+            )
+
+            return copied is not None
+        
         _record_backup_post_mapping(
             main_channel_id,
             main_message_id,
@@ -4349,7 +4416,30 @@ async def _capture_comment_source_message(
             entries,
         )
                     
-        await _capture_queued_main_publication(context, msg, main_channel_id)
+        # 判断这条消息是否属于机器人发布队列。
+        # 队列中的消息由 _finalize_queued_main_publication 负责备份，
+        # 这里不能再次复制，否则会造成备用频道重复。
+        queued_id, queued_publication = _match_queued_main_publication(
+            msg,
+            main_channel_id,
+        )
+
+        if queued_id and isinstance(queued_publication, dict):
+            await _capture_queued_main_publication(
+                context,
+                msg,
+                main_channel_id,
+            )
+        else:
+            # 频道内直接发布的消息，不经过机器人发布流程，
+            # 直接复制到备用频道。
+            await _mirror_main_post_to_backup(
+                context,
+                config,
+                main_channel_id,
+                msg.message_id,
+            )
+
         print(
             "✅ 已收录新发布频道帖关键词 "
             f"channel={main_channel_id} message={msg.message_id} keywords={len(entries)}"

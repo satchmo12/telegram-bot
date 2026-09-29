@@ -62,7 +62,7 @@
     "proof_required": true,
     "reject_reason_required": true,
     "comment_forward_enabled": true,
-    "forward_channel_id": -1003968770671,
+    "forward_channel_id": -1004428338952,
     "keyword_extract_labels": [
         "标签",
         "艺名",
@@ -81,7 +81,7 @@
     },
     "discussion_mapping_session": "main",
     "report_link_enabled": true,
-    "template_publish_enabled": true,
+    "template_publish_enabled": false,
     "publish_templates": [
         {
             "id": 5,
