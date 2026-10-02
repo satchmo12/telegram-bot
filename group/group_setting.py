@@ -73,7 +73,10 @@ from channel.channel_force import (
     set_force_subscribe_targets,
     unmute_force_subscribe_chat,
 )
-from forward.message_forward import build_message_payload
+from forward.message_forward import (
+    build_message_payload,
+    send_message_payload as _send_message_payload,
+)
 
 CALLBACK_PREFIX = "gcfg"
 FORCE_SUBSCRIBE_FILE = "config_data/force_subscribe.json"
@@ -91,6 +94,7 @@ TOGGLE_FIELDS = [
     ("ad_filter", "广告拦截"),
     ("recommend", "群推荐"),
     ("name_change_notice", "用户名变更提示"),
+    ("invite_approval_enabled", "邀请审核"),
     ("active_speak_enabled", "主动说话"),
 ]
 GAME_TOGGLE_FIELDS = [
@@ -426,18 +430,36 @@ async def _open_lottery_settings_panel(
     
     
 MAX_GROUP_ADS = 20
+MAX_AD_MEDIA = 10
+
+
+def _normalize_ad_media(raw_media, legacy_cover=None) -> list[dict]:
+    """Normalize the new media list and migrate the former single cover."""
+    candidates = raw_media if isinstance(raw_media, list) else [legacy_cover]
+    media = []
+    for item in candidates[:MAX_AD_MEDIA]:
+        if not isinstance(item, dict):
+            continue
+        media_type = str(item.get("type") or "").lower()
+        file_id = str(item.get("file_id") or "").strip()
+        if media_type in {"photo", "video"} and file_id:
+            media.append({"type": media_type, "file_id": file_id})
+    return media
+
 
 def _default_group_ad(ad_id: int) -> dict:
     return {
         "id": int(ad_id),
+        "name": "",
         "enabled": False,
         "mode": "interval",
         "interval_min": 120,
         "times": "",
         "text": "",
         AD_PUSH_MESSAGE_KEY: None,
-         # 广告封面，只支持单张图片
+         # 兼容旧版单封面；新广告可配置最多 10 张图片/视频。
         "cover": None,
+        "media": [],
 
         # 底部按钮
         "buttons": [],
@@ -451,6 +473,7 @@ def _normalize_group_ad(raw: dict, ad_id: int) -> dict:
     if isinstance(raw, dict):
         ad.update({key: raw[key] for key in ad if key in raw})
     ad["id"] = int(ad_id)
+    ad["name"] = str(ad.get("name", "") or "").strip()[:64]
     ad["enabled"] = bool(ad.get("enabled", False))
     ad["mode"] = "fixed" if str(ad.get("mode", "interval")).lower() == "fixed" else "interval"
     try:
@@ -463,12 +486,11 @@ def _normalize_group_ad(raw: dict, ad_id: int) -> dict:
         ad[AD_PUSH_MESSAGE_KEY] = None
     ad["pin"] = bool(ad.get("pin", False))
     
-    cover = ad.get("cover")
-    if not isinstance(cover, dict):
-        ad["cover"] = None
-    else:
-        if cover.get("type") != "photo" or not cover.get("file_id"):
-            ad["cover"] = None
+    raw_media = raw.get("media") if isinstance(raw, dict) and "media" in raw else None
+    raw_cover = raw.get("cover") if isinstance(raw, dict) else ad.get("cover")
+    ad["media"] = _normalize_ad_media(raw_media, raw_cover)
+    # Keep a normalized single-cover mirror so existing saved configurations remain compatible.
+    ad["cover"] = ad["media"][0] if ad["media"] else None
 
     buttons = ad.get("buttons")
     if not isinstance(buttons, list):
@@ -562,7 +584,7 @@ def _build_ad_push_settings_text(chat_id: str, cfg: dict) -> str:
         lines.append("\n当前没有广告，请点击“➕ 新增广告”。")
     for ad in ads:
         lines.append(
-            f"#{ad['id']} {'✅' if ad.get('enabled') else '🚫'} "
+            f"#{ad['id']} {ad.get('name') or '未命名'} · {'✅' if ad.get('enabled') else '🚫'} "
             f"{'定时' if ad.get('mode') == 'fixed' else '间隔'} · "
             f"{'已设置消息' if _group_ad_ready(ad) else '未设置消息'}"
         )
@@ -593,6 +615,8 @@ def _build_ad_push_settings_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardM
 def _build_group_ad_detail_text(chat_id: str, ad: dict) -> str:
     return "\n".join([
         f"📢 本群广告 #{ad['id']}",
+        f"名称：{ad.get('name') or '未命名'}",
+        f"媒体：{len(ad.get('media', []))} / {MAX_AD_MEDIA} 张（图片/视频）",
         f"状态：{'✅ 开启' if ad.get('enabled') else '🚫 关闭'}",
         f"模式：{'定时' if ad.get('mode') == 'fixed' else '间隔'}",
         f"间隔：每 {ad.get('interval_min')} 分钟",
@@ -611,12 +635,13 @@ def _build_group_ad_detail_keyboard(chat_id: str, ad: dict) -> InlineKeyboardMar
             callback_data=f"{CALLBACK_PREFIX}:ad_multi_toggle:{chat_id}:{ad_id}",
         )],
         [
+            InlineKeyboardButton("🏷 广告名称", callback_data=f"{CALLBACK_PREFIX}:ad_multi_name:{chat_id}:{ad_id}"),
             InlineKeyboardButton("📝 文案", callback_data=f"{CALLBACK_PREFIX}:ad_multi_text:{chat_id}:{ad_id}"),
-            InlineKeyboardButton("📎 推送消息", callback_data=f"{CALLBACK_PREFIX}:ad_multi_message:{chat_id}:{ad_id}"),
         ],
         [
+            InlineKeyboardButton("📎 推送消息", callback_data=f"{CALLBACK_PREFIX}:ad_multi_message:{chat_id}:{ad_id}"),
             InlineKeyboardButton(
-                f"{'🖼' if ad.get('cover') else '⬜'} 设置封面",
+                f"🖼 图片/视频 ({len(ad.get('media', []))}/{MAX_AD_MEDIA})",
                 callback_data=f"{CALLBACK_PREFIX}:ad_multi_ad_cover:{chat_id}:{ad_id}",
             ),
             InlineKeyboardButton(
@@ -650,14 +675,16 @@ MAX_GLOBAL_ADS = 20
 def _default_global_ad(ad_id: int) -> dict:
     return {
         "id": int(ad_id),
+        "name": "",
         "enabled": False,
         "mode": "interval",
         "interval_min": 120,
         "times": "",
         "text": "",
         GLOBAL_AD_PUSH_MESSAGE_KEY: None,
-        # 广告封面，只支持单张图片
+        # 兼容旧版单封面；新广告可配置最多 10 张图片/视频。
         "cover": None,
+        "media": [],
 
         # 底部按钮
         "buttons": [],
@@ -675,6 +702,7 @@ def _normalize_global_ad(raw: dict, ad_id: int) -> dict:
     if isinstance(raw, dict):
         ad.update({key: raw[key] for key in ad if key in raw})
     ad["id"] = int(ad_id)
+    ad["name"] = str(ad.get("name", "") or "").strip()[:64]
     ad["enabled"] = bool(ad.get("enabled", False))
     ad["mode"] = "fixed" if str(ad.get("mode", "interval")).lower() == "fixed" else "interval"
     try:
@@ -692,12 +720,11 @@ def _normalize_global_ad(raw: dict, ad_id: int) -> dict:
         str(group_id) for group_id in ad["exclude_group_ids"] if str(group_id).strip()
     ))
     
-    cover = ad.get("cover")
-    if not isinstance(cover, dict):
-        ad["cover"] = None
-    else:
-        if cover.get("type") != "photo" or not cover.get("file_id"):
-            ad["cover"] = None
+    raw_media = raw.get("media") if isinstance(raw, dict) and "media" in raw else None
+    raw_cover = raw.get("cover") if isinstance(raw, dict) else ad.get("cover")
+    ad["media"] = _normalize_ad_media(raw_media, raw_cover)
+    # Keep a normalized single-cover mirror so existing saved configurations remain compatible.
+    ad["cover"] = ad["media"][0] if ad["media"] else None
 
     buttons = ad.get("buttons")
     if not isinstance(buttons, list):
@@ -731,7 +758,7 @@ def _get_global_ad_push_config() -> dict:
     ads = raw.get("ads")
     if not isinstance(ads, list):
         # Migrate the legacy one-ad configuration into the new list format.
-        legacy_keys = {"enabled", "mode", "interval_min", "times", "text", GLOBAL_AD_PUSH_MESSAGE_KEY, "exclude_group_ids"}
+        legacy_keys = {"enabled", "mode", "interval_min", "times", "text", GLOBAL_AD_PUSH_MESSAGE_KEY, "exclude_group_ids", "name", "cover", "media", "buttons", "pin"}
         if any(key in raw for key in legacy_keys):
             ads = [_normalize_global_ad(raw, 1)]
         else:
@@ -844,7 +871,7 @@ def _build_global_ad_push_settings_text(cfg: dict, groups: dict) -> str:
         for ad in ads:
             state = "✅" if ad.get("enabled") else "🚫"
             ready = "已设置消息" if _global_ad_payload_ready(ad) else "未设置消息"
-            lines.append(f"#{ad['id']} {state} {_global_ad_mode_text(ad)} · {ready}")
+            lines.append(f"#{ad['id']} {ad.get('name') or '未命名'} · {state} {_global_ad_mode_text(ad)} · {ready}")
     return "\n".join(lines)
 
 
@@ -874,6 +901,8 @@ def _build_global_ad_detail_text(ad: dict, groups: dict) -> str:
     message = "已设置" if _global_ad_payload_ready(ad) else "未设置"
     return "\n".join([
         f"📢 全群广告 #{ad['id']}",
+        f"名称：{ad.get('name') or '未命名'}",
+        f"媒体：{len(ad.get('media', []))} / {MAX_AD_MEDIA} 张（图片/视频）",
         f"状态：{'✅ 开启' if ad.get('enabled') else '🚫 关闭'}",
         f"模式：{_global_ad_mode_text(ad)}",
         f"间隔：每 {ad.get('interval_min')} 分钟",
@@ -894,12 +923,13 @@ def _build_global_ad_detail_keyboard(ad: dict) -> InlineKeyboardMarkup:
             callback_data=f"{CALLBACK_PREFIX}:global_ad_toggle:{ad_id}",
         )],
         [
+            InlineKeyboardButton("🏷 广告名称", callback_data=f"{CALLBACK_PREFIX}:global_ad_name:{ad_id}"),
             InlineKeyboardButton("📝 文案", callback_data=f"{CALLBACK_PREFIX}:global_ad_text:{ad_id}"),
-            InlineKeyboardButton("📎 推送消息", callback_data=f"{CALLBACK_PREFIX}:global_ad_message:{ad_id}"),
         ],
         [
+            InlineKeyboardButton("📎 推送消息", callback_data=f"{CALLBACK_PREFIX}:global_ad_message:{ad_id}"),
             InlineKeyboardButton(
-                f"{'🖼' if ad.get('cover') else '⬜'} 设置封面",
+                f"🖼 图片/视频 ({len(ad.get('media', []))}/{MAX_AD_MEDIA})",
                 callback_data=f"{CALLBACK_PREFIX}:global_ad_cover:{ad_id}",
             ),
             InlineKeyboardButton(
@@ -2291,22 +2321,18 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         if action == "global_ad_cover":
             context.user_data["group_setting_stage"] = {
                 "kind": "global_ad",
-                "field": "cover",
+                "field": "media",
                 "ad_id": ad_id,
             }
-
             return await query.edit_message_text(
-                "🖼 请发送一张图片作为广告封面。\n\n"
-                "只支持单张图片。\n"
-                "发送“清空”可移除封面。",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            "⬅️ 返回广告",
-                            callback_data=f"{CALLBACK_PREFIX}:global_ad_open:{ad_id}",
-                        )
-                    ]
-                ]),
+                f"🖼 请逐张发送广告图片或视频（最多 {MAX_AD_MEDIA} 张）。\n\n"
+                "发送完后请输入“完成”保存；发送“清空”可移除全部图片/视频。",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "⬅️ 返回广告",
+                        callback_data=f"{CALLBACK_PREFIX}:global_ad_open:{ad_id}",
+                    )
+                ]]),
             )
 
         if action == "global_ad_buttons":
@@ -2334,7 +2360,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                     ]
                 ]),
             )
-        if action in {"global_ad_text", "global_ad_message", "global_ad_interval", "global_ad_times"}:
+        if action in {"global_ad_name", "global_ad_text", "global_ad_message", "global_ad_interval", "global_ad_times"}:
             field = action.removeprefix("global_ad_")
             context.user_data["group_setting_stage"] = {
                 "kind": "global_ad",
@@ -2345,6 +2371,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                 [[InlineKeyboardButton("⬅️ 返回广告", callback_data=f"{CALLBACK_PREFIX}:global_ad_open:{ad_id}")]]
             )
             prompts = {
+                "name": "请输入广告名称（最多 64 个字符）；发送“清空”可移除名称。",
                 "text": "请输入广告文案；发送“清空”可移除。",
                 "message": "请发送要用于全群推送的消息。支持文本、图片、视频、文件、语音等；发送“清空”可移除。",
                 "interval": f"请输入广告间隔（分钟，{AD_PUSH_MIN_INTERVAL}-{AD_PUSH_MAX_INTERVAL}）。",
@@ -2673,25 +2700,21 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         if action == "ad_multi_ad_cover":
             context.user_data["group_setting_stage"] = {
                 "kind": "group_ad",
-                "field": "cover",
+                "field": "media",
                 "chat_id": chat_id_str,
                 "ad_id": ad_id,
             }
-
             return await query.edit_message_text(
-                "🖼 请发送一张图片作为广告封面。\n\n"
-                "只支持单张图片。\n"
-                "发送“清空”可移除封面。",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            "⬅️ 返回广告",
-                            callback_data=f"{CALLBACK_PREFIX}:ad_multi_open:{chat_id_str}:{ad_id}",
-                        )
-                    ]
-                ]),
+                f"🖼 请逐张发送广告图片或视频（最多 {MAX_AD_MEDIA} 张）。\n\n"
+                "发送完后请输入“完成”保存；发送“清空”可移除全部图片/视频。",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "⬅️ 返回广告",
+                        callback_data=f"{CALLBACK_PREFIX}:ad_multi_open:{chat_id_str}:{ad_id}",
+                    )
+                ]]),
             )
-        
+
         if action == "ad_multi_ad_buttons":
             context.user_data["group_setting_stage"] = {
                 "kind": "group_ad",
@@ -2719,7 +2742,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                 ]),
             )
             
-        if action in {"ad_multi_text", "ad_multi_message", "ad_multi_interval", "ad_multi_times" }:
+        if action in {"ad_multi_name", "ad_multi_text", "ad_multi_message", "ad_multi_interval", "ad_multi_times" }:
             field = action.removeprefix("ad_multi_")
             context.user_data["group_setting_stage"] = {
                 "kind": "group_ad",
@@ -2728,6 +2751,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                 "ad_id": ad_id,
             }
             prompts = {
+                "name": "请输入广告名称（最多 64 个字符）；发送“清空”可移除名称。",
                 "text": "请输入广告文案；发送“清空”可移除。",
                 "message": "请发送要推送的消息。支持文本、图片、视频、文件、语音等；发送“清空”可移除。",
                 "interval": f"请输入广告间隔（分钟，{AD_PUSH_MIN_INTERVAL}-{AD_PUSH_MAX_INTERVAL}）。",
@@ -3432,6 +3456,13 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
                     ad["text"] = ""
                 except Exception as exc:
                     return await update.message.reply_text(f"❌ 暂不支持该消息类型：{exc}")
+        elif field == "name":
+            if text_value in {"清空", "关闭"}:
+                ad["name"] = ""
+            elif not text_value:
+                return await update.message.reply_text("❗ 请输入广告名称。")
+            else:
+                ad["name"] = text_value[:64]
         elif field == "text":
             if not text_value:
                 return await update.message.reply_text("❗ 请输入广告文案。")
@@ -3455,32 +3486,42 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
                 return await update.message.reply_text("❗ 时间格式示例：09:00,12:30,21:00")
             ad["times"] = ",".join(slots)
             ad["mode"] = "fixed"
-        elif field == "cover":
-            if update.message.photo:
-                photo = update.message.photo[-1]
-
-                ad["cover"] = {
-                    "type": "photo",
-                    "file_id": photo.file_id,
-                }
-
-            elif update.message.text and update.message.text.strip() in {"清空", "关闭"}:
+        elif field == "media":
+            if text_value in {"清空", "关闭"}:
+                ad["media"] = []
                 ad["cover"] = None
-
-            else:
-                return await update.message.reply_text(
-                    "❗ 请发送一张图片作为封面，或发送“清空”移除封面。"
+            elif text_value == "完成":
+                context.user_data.pop("group_setting_stage", None)
+                data[chat_id_str] = cfg
+                save_json(GROUP_LIST_FILE, data)
+                await update.message.reply_text(
+                    _build_group_ad_detail_text(chat_id_str, ad),
+                    reply_markup=_build_group_ad_detail_keyboard(chat_id_str, ad),
                 )
-
-            context.user_data.pop("group_setting_stage", None)
-            data[chat_id_str] = cfg
-            save_json(GROUP_LIST_FILE, data)
-
-            await update.message.reply_text(
-                _build_group_ad_detail_text(chat_id_str, ad),
-                reply_markup=_build_group_ad_detail_keyboard(chat_id_str, ad),
-            )
-            raise ApplicationHandlerStop
+                raise ApplicationHandlerStop
+            else:
+                if update.message.photo:
+                    item = {"type": "photo", "file_id": update.message.photo[-1].file_id}
+                elif update.message.video:
+                    item = {"type": "video", "file_id": update.message.video.file_id}
+                else:
+                    return await update.message.reply_text(
+                        "❗ 请发送图片或视频；发送“完成”保存，或发送“清空”移除全部媒体。"
+                    )
+                media = _normalize_ad_media(ad.get("media"), ad.get("cover"))
+                if len(media) >= MAX_AD_MEDIA:
+                    return await update.message.reply_text(
+                        f"❗ 最多只能设置 {MAX_AD_MEDIA} 张图片/视频；请发送“完成”保存。"
+                    )
+                media.append(item)
+                ad["media"] = media
+                ad["cover"] = media[0]
+                data[chat_id_str] = cfg
+                save_json(GROUP_LIST_FILE, data)
+                await update.message.reply_text(
+                    f"✅ 已添加第 {len(media)} 张图片/视频。可继续发送，或发送“完成”保存。"
+                )
+                raise ApplicationHandlerStop
         elif field == "buttons":
             if text_value in {"清空", "关闭", "无"}:
                 ad["buttons"] = []
@@ -3573,6 +3614,13 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
                     ad["text"] = ""
                 except Exception as exc:
                     return await update.message.reply_text(f"❌ 暂不支持该消息类型：{exc}")
+        elif field == "name":
+            if text_value in {"清空", "关闭"}:
+                ad["name"] = ""
+            elif not text_value:
+                return await update.message.reply_text("❗ 请输入广告名称。")
+            else:
+                ad["name"] = text_value[:64]
         elif field == "text":
             if not text_value:
                 return await update.message.reply_text("❗ 请输入广告文案。")
@@ -3598,35 +3646,43 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
                 return await update.message.reply_text("❗ 时间格式示例：09:00,12:30,21:00")
             ad["times"] = ",".join(slots)
             ad["mode"] = "fixed"
-        elif field == "cover":
-            if update.message.photo:
-                photo = update.message.photo[-1]
-
-                ad["cover"] = {
-                    "type": "photo",
-                    "file_id": photo.file_id,
-                }
-
-            elif update.message.text and update.message.text.strip() in {"清空", "关闭"}:
+        elif field == "media":
+            if text_value in {"清空", "关闭"}:
+                ad["media"] = []
                 ad["cover"] = None
-
-            else:
-                return await update.message.reply_text(
-                    "❗ 请发送一张图片作为封面，或发送“清空”移除封面。"
+            elif text_value == "完成":
+                context.user_data.pop("group_setting_stage", None)
+                _save_global_ad_push_config(cfg)
+                groups = get_group_whitelist(context)
+                await update.message.reply_text(
+                    _build_global_ad_detail_text(ad, groups),
+                    reply_markup=_build_global_ad_detail_keyboard(ad),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
                 )
-
-            context.user_data.pop("group_setting_stage", None)
-            _save_global_ad_push_config(cfg)
-
-            groups = get_group_whitelist(context)
-
-            await update.message.reply_text(
-                _build_global_ad_detail_text(ad, groups),
-                reply_markup=_build_global_ad_detail_keyboard(ad),
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-            raise ApplicationHandlerStop
+                raise ApplicationHandlerStop
+            else:
+                if update.message.photo:
+                    item = {"type": "photo", "file_id": update.message.photo[-1].file_id}
+                elif update.message.video:
+                    item = {"type": "video", "file_id": update.message.video.file_id}
+                else:
+                    return await update.message.reply_text(
+                        "❗ 请发送图片或视频；发送“完成”保存，或发送“清空”移除全部媒体。"
+                    )
+                media = _normalize_ad_media(ad.get("media"), ad.get("cover"))
+                if len(media) >= MAX_AD_MEDIA:
+                    return await update.message.reply_text(
+                        f"❗ 最多只能设置 {MAX_AD_MEDIA} 张图片/视频；请发送“完成”保存。"
+                    )
+                media.append(item)
+                ad["media"] = media
+                ad["cover"] = media[0]
+                _save_global_ad_push_config(cfg)
+                await update.message.reply_text(
+                    f"✅ 已添加第 {len(media)} 张图片/视频。可继续发送，或发送“完成”保存。"
+                )
+                raise ApplicationHandlerStop
         elif field == "buttons":
             if text_value in {"清空", "关闭", "无"}:
                 ad["buttons"] = []
@@ -4142,50 +4198,20 @@ def _global_ad_reply_markup(ad: dict):
 async def send_message_payload(
     bot,
     chat_id,
-    record: dict,
-    payload,
-    reply_markup=None
+    record: Optional[dict] = None,
+    payload: Optional[dict] = None,
+    reply_markup=None,
 ):
-    
-    
-    """Send the lottery as one text post or one cover-media post with a caption."""
-    text= payload.get("text", "")
-    
-    entities = [
-        MessageEntity.de_json(item, bot)
-        for item in payload.get("entities", [])
-        if isinstance(item, dict)
-    ]
-        
-    cover = record.get("cover")
-    if not isinstance(cover, dict):
-        return await bot.send_message(
-            chat_id=chat_id,
-            text= text,
-            entities=entities or None,
-            reply_markup=reply_markup,
-        )
-
-    # Telegram captions are limited to 1024 characters. Do not silently split
-    # the cover and lottery copy, because this workflow requires one message.
-    if len(text) > 1024:
-        raise ValueError("设置封面时，抽奖文案不能超过 1024 个字符。请缩短抽奖说明后再预览或发布。")
-
-    payload_type = str(cover.get("type") or "").lower()
-    file_id = cover.get("file_id")
-    if not file_id:
-        raise ValueError("抽奖封面文件无效，请重新上传图片或视频。")
-    common = {
-        "chat_id": chat_id,
-        "caption": text,
-        "caption_entities": entities or None,
-        "reply_markup": reply_markup,
-    }
-    if payload_type == "photo":
-        return await bot.send_photo(photo=file_id, **common)
-    if payload_type == "video":
-        return await bot.send_video(video=file_id, **common)
-    raise ValueError("抽奖封面仅支持图片或视频，请重新设置封面。")
+    """Compatibility wrapper around the shared scheduled-ad sender."""
+    if payload is None and isinstance(record, dict) and record.get("type"):
+        payload, record = record, None
+    return await _send_message_payload(
+        bot,
+        chat_id=chat_id,
+        payload=payload or {},
+        record=record,
+        reply_markup=reply_markup,
+    )
 
 
 def register_group_setting_handlers(app):

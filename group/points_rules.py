@@ -119,7 +119,7 @@ def award_talk_points(chat_id: str, user_id: str, text: str, cfg: dict) -> int:
     awarded = min(settings["amount"], remaining)
     if awarded <= 0:
         return 0
-    change_points(chat_id, user_id, awarded)
+    change_points(chat_id, user_id, awarded, reason="发言积分")
     day_log["talk"] = awarded_today + awarded
     _save_reward_log(data)
     return awarded
@@ -151,7 +151,7 @@ def award_invite_points(chat_id: str, inviter_id: int, invitee_ids: list[int], c
     awarded = rewarded_invites * settings["amount"]
     if awarded <= 0:
         return 0
-    change_points(chat_id, inviter_id, awarded)
+    change_points(chat_id, inviter_id, awarded, reason="邀请奖励")
     day_log["invite"] = awarded_today + awarded
     _save_reward_log(data)
     return awarded

@@ -11,6 +11,7 @@ from group.group_logger import register_group_logger_handlers
 from group.group_media_tools import register_group_media_tools_handlers
 from group.group_setting import register_group_setting_handlers
 from group.grouplist import register_user_tracker_handlers
+from group.invite_approval import register_invite_approval_handlers
 from group.invite_stats import register_invite_handlers
 from group.save_photos import register_save_photos_handlers
 from group.talk_stats import register_talk_handlers
@@ -57,5 +58,8 @@ def register_group_handlers(app):
     register_user_tracker_handlers(app)
     register_handle_force_handlers(app)
     
+    register_invite_approval_handlers(app)
+    
     # 有吞噬会掉的方法  app.add_handler(CallbackQueryHandler(menu_button_handler))
     register_menu_handlers(app)
+    

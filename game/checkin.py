@@ -50,7 +50,7 @@ async def daycheckin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 发放签到积分
     awarded = points_cfg["amount"]
-    change_points(chat_id, user.id, awarded)
+    change_points(chat_id, user.id, awarded, reason="每日签到")
 
     points = get_points(chat_id, user.id)
 

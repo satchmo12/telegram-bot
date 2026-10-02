@@ -522,7 +522,7 @@ async def ai_group_reply_handler(
     ai_settings = get_ai_reply_settings(context, chat_id)
 
     if not ai_settings["enabled"]:
-        print(f"[AI][SKIP] 群 {chat_id} 没有开启 AI 接话")
+        # print(f"[AI][SKIP] 群 {chat_id} 没有开启 AI 接话")
         return
 
     # ========================================================
@@ -579,9 +579,9 @@ async def ai_group_reply_handler(
     # ========================================================
 
     if chat_id in processing_chats:
-        print(
-            f"[AI][SKIP] 群 {chat_id} 正在处理另一个 AI 请求"
-        )
+        # print(
+        #     f"[AI][SKIP] 群 {chat_id} 正在处理另一个 AI 请求"
+        # )
         return
 
     # ========================================================
@@ -717,10 +717,10 @@ async def ai_group_reply_handler(
     finally:
         processing_chats.discard(chat_id)
 
-        print(
-            f"[AI][END] 群 {chat_id} 本次 AI 处理结束"
-        )
-        print("=" * 70)
+        # print(
+        #     f"[AI][END] 群 {chat_id} 本次 AI 处理结束"
+        # )
+        # print("=" * 70)
 
 
 # ============================================================

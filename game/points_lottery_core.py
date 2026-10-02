@@ -140,7 +140,7 @@ def draw_points_lottery(chat_id: str, user_id: int, user_name: str, draw_count: 
     if not valid_prizes:
         return False, "奖池为空，暂时无法抽奖。", []
 
-    change_points(chat_id, user_id, -total_cost)
+    change_points(chat_id, user_id, -total_cost, reason=f"积分抽奖 ×{draw_count}")
 
     results = []
     weighted_total = sum(_normalize_int(p.get("rate", 0), 0, PRIZE_RATE_MIN, PRIZE_RATE_MAX) for p in valid_prizes)

@@ -583,6 +583,7 @@ GROUP_CONFIG_DEFAULTS = {
     "invite_points_daily_limit": 500,
     "force_subscribe": False,
     "name_change_notice": False,
+    "invite_approval_enabled": False,
     "points_enabled": True,
 
 }

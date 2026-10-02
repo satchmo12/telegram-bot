@@ -73,7 +73,7 @@ def can_exchange_item(chat_id, user_id, item_name, count=1):
 def exchange_item(chat_id, user_id, item_name, count=1):
     # 扣积分
     cost = EXCHANGE_ITEMS[item_name]["points_cost"] * count
-    if not change_points(chat_id, user_id, -cost):
+    if not change_points(chat_id, user_id, -cost, reason=f"兑换道具：{item_name} ×{count}"):
         return False, "扣除积分失败"
     # 添加道具到背包
     change_bag_item(chat_id, user_id, item_name, count)

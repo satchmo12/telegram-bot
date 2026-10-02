@@ -1186,10 +1186,19 @@ def _register_checkin_post(
     _save_checkin_posts(data)
 
 
-def _checkin_field_values(post: dict, label: str) -> list[str]:
+def _checkin_field_values(
+    post: dict,
+    label: str,
+    *,
+    recover_from_keyword_index: bool = True,
+) -> list[str]:
     values = (post.get("fields", {}) or {}).get(label, [])
     if isinstance(values, list) and values:
         return [str(item) for item in values if item]
+    # Scanning the complete keyword index is expensive.  The online roster
+    # deliberately skips this legacy recovery path so it can reply promptly.
+    if not recover_from_keyword_index:
+        return []
     # Recover display fields for posts recorded by an older version before
     # fields were persisted in the check-in file.
     channel_id = _as_int(post.get("channel_id"))
@@ -1289,12 +1298,21 @@ async def _hydrate_checkin_post_fields(
         return False
 
 
-def _checkin_display_value(post: dict, config: dict) -> str:
+def _checkin_display_value(
+    post: dict,
+    config: dict,
+    *,
+    recover_from_keyword_index: bool = True,
+) -> str:
     # Multiple configured fields are concatenated without a separator, e.g.
     # “艺名+课费” renders as “雪500p”.
     parts = []
     for label in _checkin_display_labels(config):
-        values = _checkin_field_values(post, label)
+        values = _checkin_field_values(
+            post,
+            label,
+            recover_from_keyword_index=recover_from_keyword_index,
+        )
         if values:
             parts.append("、".join(_clean_keyword_value(item) for item in values))
     if parts:
@@ -1302,17 +1320,27 @@ def _checkin_display_value(post: dict, config: dict) -> str:
     fallback_values = _checkin_field_values(
         post,
         str(config.get("checkin_user_label") or "联系").strip(),
+        recover_from_keyword_index=recover_from_keyword_index,
     )
     if fallback_values:
         return "、".join(fallback_values)[:100]
     return "在线用户"
 
 
-def _checkin_group_value(post: dict, config: dict) -> str:
+def _checkin_group_value(
+    post: dict,
+    config: dict,
+    *,
+    recover_from_keyword_index: bool = True,
+) -> str:
     label = str(config.get("checkin_group_label") or "").strip()
     if not label:
         return ""
-    values = _checkin_field_values(post, label)
+    values = _checkin_field_values(
+        post,
+        label,
+        recover_from_keyword_index=recover_from_keyword_index,
+    )
     if values:
         return "、".join(_clean_keyword_value(item) for item in values)[:100]
     return "未分类"
@@ -1337,11 +1365,20 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
     if not bool(config.get("checkin_enabled", False)):
         return False
 
+    online_started_at = time.perf_counter() if command == online_command else None
     data = _load_checkin_posts()
-    if _cleanup_expired_checkin_posts(data):
+    # The roster has its own lightweight expiry filter below.  Avoid scanning
+    # and rewriting every saved post whenever somebody asks “在线宝宝”.
+    if command != online_command and _cleanup_expired_checkin_posts(data):
         _save_checkin_posts(data)
     posts = data.get("posts", {})
     if not posts:
+        # Rebuilding every historical post from the complete keyword index can
+        # take a long time.  An online-roster request only needs active checkins,
+        # so return immediately instead of blocking the group message.
+        if command == online_command:
+            await msg.reply_text("当前暂无在线宝宝。")
+            return True
         _rebuild_checkin_posts_from_keyword_index(config)
         data = _load_checkin_posts()
         posts = data.get("posts", {})
@@ -1398,23 +1435,30 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
         )
         return True
 
+    now_ts = int(time.time())
     online_posts = [
         post for post in posts.values()
-        if isinstance(post, dict) and isinstance(post.get("checkins"), dict) and post.get("checkins")
+        if (
+            isinstance(post, dict)
+            and isinstance(post.get("checkins"), dict)
+            and any(
+                isinstance(checkin, dict)
+                and (
+                    not int(checkin.get("expires_at", 0) or 0)
+                    or int(checkin.get("expires_at", 0) or 0) > now_ts
+                )
+                for checkin in post.get("checkins", {}).values()
+            )
+        )
     ]
-    hydrated = False
-    for post in online_posts:
-        hydrated = await _hydrate_checkin_post_fields(context, post, config) or hydrated
-    if hydrated:
-        data = _load_checkin_posts()
-        posts = data.get("posts", {})
-        online_posts = [
-            post for post in posts.values()
-            if isinstance(post, dict) and isinstance(post.get("checkins"), dict) and post.get("checkins")
-        ]
     if not online_posts:
         await msg.reply_text("当前暂无在线宝宝。")
         return True
+
+    # Do not perform legacy-field hydration here.  It can issue one sequential
+    # Telethon request per online post, making “在线宝宝” wait many seconds.
+    # Newly registered posts already persist their fields; old incomplete posts
+    # use the lightweight “在线用户” fallback in this fast display path.
 
     grouped: dict[str, list[dict]] = {}
 
@@ -1427,11 +1471,25 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
         if message_id <= 0:
             continue
 
-        group = _checkin_group_value(post, config)
+        group = _checkin_group_value(
+            post,
+            config,
+            recover_from_keyword_index=False,
+        )
         grouped.setdefault(group, []).append(post)
 
     lines = [f"🟢 {online_text}"]
     link_items = []
+    source_channels = set()
+
+    def checkin_post_link(post: dict):
+        """Use a local private-post link; never wait for Bot API get_chat here."""
+        channel_id = _as_int(post.get("channel_id"))
+        message_id = _as_int(post.get("message_id"))
+        if channel_id is None or message_id is None:
+            return None
+        source_channels.add(channel_id)
+        return _fallback_channel_message_link(channel_id, message_id)
 
     for group, group_posts in grouped.items():
         if group:
@@ -1440,8 +1498,12 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
         names = []
 
         for post in group_posts:
-            link = await _route_message_link(context, post)
-            name_text = _checkin_display_value(post, config)
+            link = checkin_post_link(post)
+            name_text = _checkin_display_value(
+                post,
+                config,
+                recover_from_keyword_index=False,
+            )
 
             names.append(name_text)
 
@@ -1481,6 +1543,14 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
         entities=text_link_entities or None,
         disable_web_page_preview=True,
     )
+    if online_started_at is not None:
+        elapsed = time.perf_counter() - online_started_at
+        if elapsed >= 0.5:
+            print(
+                "[性能] 在线宝宝响应耗时 "
+                f"{elapsed:.3f}s posts={len(online_posts)} "
+                f"channels={len(source_channels)}"
+            )
     return True
 
 
@@ -5748,7 +5818,7 @@ def _grant_approved_submission_reward(config: dict, submission: dict) -> dict:
         return {"status": "zero_amount", "amount": amount}
 
     try:
-        balance = change_points(group_id, user_id, amount)
+        balance = change_points(group_id, user_id, amount, reason="评论审核奖励")
     except Exception as exc:
         print(
             "评论奖励积分发放失败 "

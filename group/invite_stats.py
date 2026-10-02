@@ -1,3 +1,5 @@
+import time
+
 from telegram import Update
 from telegram.ext import ChatMemberHandler, CommandHandler, MessageHandler, ContextTypes, filters
 from html import escape
@@ -6,6 +8,7 @@ import secrets
 import string
 from command_router import register_command
 from group.grouplist import load_users
+from group.invite_approval import get_approval_request, update_approval_request
 from group.points_rules import award_invite_points
 from utils import get_group_whitelist, load_json, save_json, safe_reply
 
@@ -512,51 +515,304 @@ async def _credit_invite_join(
     return added_invitees
 
 
-async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.new_chat_members or not update.effective_chat:
+async def handle_new_member(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if (
+        not update.message
+        or not update.message.new_chat_members
+        or not update.effective_chat
+    ):
         return
 
     chat_id = update.effective_chat.id
-    new_members = [member for member in update.message.new_chat_members if member]
-    new_member_ids = [member.id for member in new_members]
-    if not new_member_ids:
+
+    new_members = [
+        member
+        for member in update.message.new_chat_members
+        if member
+    ]
+
+    if not new_members:
         return
+
+    new_member_ids = [member.id for member in new_members]
+
     member_usernames = {
         int(member.id): member.username
         for member in new_members
         if getattr(member, "username", None)
     }
+
     member_names = {
         int(member.id): member.full_name
         for member in new_members
     }
 
-    invite_link_obj = getattr(update.message, "invite_link", None)
-    used_invite_link = getattr(invite_link_obj, "invite_link", None) if invite_link_obj else None
-    if used_invite_link:
+    # Telegram 本次入群实际使用的邀请链接
+    invite_link_obj = getattr(
+        update.message,
+        "invite_link",
+        None,
+    )
+
+    used_invite_link = (
+        getattr(invite_link_obj, "invite_link", None)
+        if invite_link_obj
+        else None
+    )
+
+    # ========================================================
+    # 1. 优先处理「管理员审核通过」的用户
+    #
+    # 注意：
+    # 审核通过后实际使用的 approved_invite_link
+    # 不一定存在 invite_link_map。
+    #
+    # 因此：
+    #   approved_invite_link = 负责让用户进群
+    #   invite_link          = 负责找到原邀请人
+    #
+    # _credit_invite_join() 不修改，
+    # 这里传 request["invite_link"] 给它。
+    # ========================================================
+
+    approval_handled_ids = set()
+
+    for member in new_members:
+
+        user_id = member.id
+
+        request = get_approval_request(
+            chat_id,
+            user_id,
+        )
+
+        if not request:
+            continue
+
+        # 只有管理员已经审核通过的申请才走这里
+        if request.get("status") != "approved":
+            continue
+
+        inviter_id = int(
+            request.get("inviter_id", 0) or 0
+        )
+
+        inviter_name = (
+            request.get("inviter_name")
+            or "好友"
+        )
+
+        # ----------------------------------------------------
+        # 防止自己邀请自己
+        # ----------------------------------------------------
+        if not inviter_id or inviter_id == user_id:
+
+            update_approval_request(
+                chat_id,
+                user_id,
+                {
+                    "status": "joined",
+                    "joined_at": int(time.time()),
+                },
+            )
+
+            approval_handled_ids.add(user_id)
+            continue
+
+        # ----------------------------------------------------
+        # 关键：
+        #
+        # 不使用 approved_invite_link。
+        #
+        # 使用申请时保存的原始 invite_link。
+        #
+        # 例如：
+        #
+        # approved_invite_link:
+        # https://t.me/+thrN6NccbKs1M2Fk
+        #
+        # invite_link:
+        # https://t.me/+3ThhDNK89CJhMGE0
+        #
+        # 后者才存在 invite_link_map 中。
+        # ----------------------------------------------------
+
+        original_invite_link = str(
+            request.get("invite_link") or ""
+        ).strip()
+
+        if not original_invite_link:
+            print(
+                f"[邀请积分] 审核记录缺少原始邀请链接 "
+                f"chat={chat_id} "
+                f"user={user_id} "
+                f"inviter={inviter_id}"
+            )
+
+            # 已经审核通过并且用户已经实际进群，
+            # 即使没有原始邀请链接，也不要让这个用户
+            # 后面再次进入普通邀请逻辑。
+            approval_handled_ids.add(user_id)
+            continue
+
+        try:
+            # =================================================
+            # 审核用户也统一走原来的邀请积分函数
+            # =================================================
+
+            added_invitees = await _credit_invite_join(
+                context,
+                chat_id,
+                [user_id],
+                original_invite_link,
+                {
+                    user_id: member_usernames.get(user_id)
+                },
+                {
+                    user_id: member_names.get(user_id)
+                },
+            )
+
+            # ------------------------------------------------
+            # 标记这个审核用户已经入群处理过
+            #
+            # 即使 added_invitees == []，
+            # 也不能让他继续进入下面的普通邀请逻辑。
+            #
+            # 因为 [] 可能只是：
+            #   1. 已经记录过
+            #   2. 用户没有 username
+            #   3. 积分没有开启
+            # ------------------------------------------------
+            approval_handled_ids.add(user_id)
+
+            update_approval_request(
+                chat_id,
+                user_id,
+                {
+                    "status": "joined",
+                    "joined_at": int(time.time()),
+                    "points_processed": True,
+                },
+            )
+
+        except Exception as exc:
+            print(
+                f"⚠️ 审核用户邀请积分处理失败: "
+                f"chat={chat_id} "
+                f"user={user_id} "
+                f"inviter={inviter_id}, "
+                f"{exc}"
+            )
+
+            # 即使本次积分处理异常，也不要让它继续
+            # 被下面的普通邀请逻辑再次处理。
+            approval_handled_ids.add(user_id)
+
+    # ========================================================
+    # 2. 普通邀请链接用户
+    #
+    # 已经在上面处理过的审核用户排除掉。
+    # ========================================================
+
+    remaining_member_ids = [
+        uid
+        for uid in new_member_ids
+        if uid not in approval_handled_ids
+    ]
+
+    if used_invite_link and remaining_member_ids:
+
+        remaining_usernames = {
+            uid: member_usernames[uid]
+            for uid in remaining_member_ids
+            if uid in member_usernames
+        }
+
+        remaining_names = {
+            uid: member_names[uid]
+            for uid in remaining_member_ids
+            if uid in member_names
+        }
+
+        # ====================================================
+        # 普通用户继续使用原来的逻辑
+        # _credit_invite_join() 完全不修改
+        # ====================================================
+
         await _credit_invite_join(
             context,
             chat_id,
-            new_member_ids,
+            remaining_member_ids,
             used_invite_link,
-            member_usernames,
-            member_names,
+            remaining_usernames,
+            remaining_names,
         )
+
         return
 
-    # Retain the legacy fallback for ordinary manual additions. It has no
-    # invite-link attribution, but preserves existing invitation statistics.
-    inviter = update.message.from_user
-    if inviter and any(uid != inviter.id for uid in new_member_ids):
-        added_invitees = update_invite_stats_by_user(
-            load_invite_stats(), chat_id, inviter.id, inviter.full_name, new_member_ids
-        )
-        try:
-            group_cfg = get_group_whitelist(context).get(str(chat_id), {})
-            award_invite_points(str(chat_id), inviter.id, added_invitees, group_cfg)
-        except Exception as exc:
-            print(f"⚠️ 邀请积分发放失败: chat={chat_id} inviter={inviter.id}, {exc}")
+    if used_invite_link:
+        return
 
+    # ========================================================
+    # 3. 没有邀请链接的情况：
+    #    保留原来的手动拉人统计
+    # ========================================================
+
+    inviter = update.message.from_user
+
+    if inviter and any(
+        uid != inviter.id
+        for uid in new_member_ids
+    ):
+
+        # 注意：
+        # 审核用户已经在第 1 步加入 approval_handled_ids，
+        # 所以这里不能再统计审核用户。
+        manual_member_ids = [
+            uid
+            for uid in new_member_ids
+            if uid not in approval_handled_ids
+            and uid != inviter.id
+        ]
+
+        if not manual_member_ids:
+            return
+
+        added_invitees = update_invite_stats_by_user(
+            load_invite_stats(),
+            chat_id,
+            inviter.id,
+            inviter.full_name,
+            manual_member_ids,
+        )
+
+        if not added_invitees:
+            return
+
+        try:
+            group_cfg = (
+                get_group_whitelist(context)
+                .get(str(chat_id), {})
+            )
+
+            award_invite_points(
+                str(chat_id),
+                inviter.id,
+                added_invitees,
+                group_cfg,
+            )
+
+        except Exception as exc:
+            print(
+                f"⚠️ 邀请积分发放失败: "
+                f"chat={chat_id} "
+                f"inviter={inviter.id}, "
+                f"{exc}"
+            )
 
 async def handle_chat_member_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Capture joins where Telegram omits the new_chat_members service message.

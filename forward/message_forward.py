@@ -6,7 +6,15 @@ from typing import Optional
 import time
 from datetime import datetime
 from html import escape
-from telegram import Chat, InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity, Update
+from telegram import (
+    Chat,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    InputMediaVideo,
+    MessageEntity,
+    Update,
+)
 from telegram.ext import ApplicationHandlerStop, ContextTypes, MessageHandler, filters
 import os
 import asyncio
@@ -436,55 +444,128 @@ def build_message_payload(msg) -> dict:
     raise ValueError("不支持的消息类型")
 
 
-async def send_message_payload(bot, chat_id, payload: dict):
+def _ad_media_items(record: Optional[dict]) -> list[dict]:
+    """Return valid configured ad photos/videos, including legacy single-cover data."""
+    if not isinstance(record, dict):
+        return []
+    raw_items = record.get("media")
+    if not isinstance(raw_items, list):
+        legacy_cover = record.get("cover")
+        raw_items = [legacy_cover] if isinstance(legacy_cover, dict) else []
+
+    items = []
+    for item in raw_items[:10]:  # Telegram media groups accept 2-10 items.
+        if not isinstance(item, dict):
+            continue
+        media_type = str(item.get("type") or "").lower()
+        file_id = str(item.get("file_id") or "").strip()
+        if media_type in {"photo", "video"} and file_id:
+            items.append({"type": media_type, "file_id": file_id})
+    return items
+
+
+def _payload_entities(bot, payload: dict) -> list[MessageEntity]:
+    return [
+        MessageEntity.de_json(item, bot)
+        for item in payload.get("entities", [])
+        if isinstance(item, dict)
+    ]
+
+
+async def send_message_payload(
+    bot,
+    chat_id,
+    payload: dict,
+    *,
+    record: Optional[dict] = None,
+    reply_markup=None,
+):
+    """Send a saved payload, optionally prefixed by configured ad photos/videos.
+
+    A single configured item receives the inline keyboard directly. Telegram does
+    not allow an inline keyboard on ``sendMediaGroup``; for multiple items the
+    keyboard is therefore sent as the immediately following action message.
+    """
     if not isinstance(payload, dict):
         raise ValueError("消息载荷无效")
 
+    configured_media = _ad_media_items(record)
+    if configured_media:
+        text = str(payload.get("text") or payload.get("caption") or "")
+        if len(text) > 1024:
+            raise ValueError("设置图片或视频时，广告文案不能超过 1024 个字符。")
+        entities = _payload_entities(bot, payload)
+        if len(configured_media) == 1:
+            item = configured_media[0]
+            common = {
+                "chat_id": chat_id,
+                "caption": text,
+                "caption_entities": entities or None,
+                "reply_markup": reply_markup,
+            }
+            if item["type"] == "photo":
+                return await bot.send_photo(photo=item["file_id"], **common)
+            return await bot.send_video(video=item["file_id"], **common)
+
+        media_group = []
+        for index, item in enumerate(configured_media):
+            common = {}
+            if index == 0:
+                common = {"caption": text, "caption_entities": entities or None}
+            if item["type"] == "photo":
+                media_group.append(InputMediaPhoto(media=item["file_id"], **common))
+            else:
+                media_group.append(InputMediaVideo(media=item["file_id"], **common))
+        sent_messages = await bot.send_media_group(chat_id=chat_id, media=media_group)
+        if reply_markup:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="👇 点击下方按钮了解更多",
+                reply_markup=reply_markup,
+            )
+        return sent_messages[0]
+
     payload_type = str(payload.get("type", "")).strip().lower()
     if payload_type == "text":
-        entities = [
-            MessageEntity.de_json(item, bot)
-            for item in payload.get("entities", [])
-            if isinstance(item, dict)
-        ]
-
         return await bot.send_message(
             chat_id=chat_id,
             text=payload.get("text", ""),
-            entities=entities or None,
+            entities=_payload_entities(bot, payload) or None,
+            reply_markup=reply_markup,
         )
-        
+
+    common = {"reply_markup": reply_markup}
     if payload_type == "photo":
         return await bot.send_photo(
-            chat_id, payload.get("file_id"), caption=payload.get("caption", "")
+            chat_id, payload.get("file_id"), caption=payload.get("caption", ""), **common
         )
     if payload_type == "animation":
         return await bot.send_animation(
-            chat_id, payload.get("file_id"), caption=payload.get("caption", "")
+            chat_id, payload.get("file_id"), caption=payload.get("caption", ""), **common
         )
     if payload_type == "video":
         return await bot.send_video(
-            chat_id, payload.get("file_id"), caption=payload.get("caption", "")
+            chat_id, payload.get("file_id"), caption=payload.get("caption", ""), **common
         )
     if payload_type == "document":
         return await bot.send_document(
-            chat_id, payload.get("file_id"), caption=payload.get("caption", "")
+            chat_id, payload.get("file_id"), caption=payload.get("caption", ""), **common
         )
     if payload_type == "sticker":
-        return await bot.send_sticker(chat_id, payload.get("file_id"))
+        return await bot.send_sticker(chat_id, payload.get("file_id"), **common)
     if payload_type == "voice":
         return await bot.send_voice(
-            chat_id, payload.get("file_id"), caption=payload.get("caption", "")
+            chat_id, payload.get("file_id"), caption=payload.get("caption", ""), **common
         )
     if payload_type == "audio":
         return await bot.send_audio(
-            chat_id, payload.get("file_id"), caption=payload.get("caption", "")
+            chat_id, payload.get("file_id"), caption=payload.get("caption", ""), **common
         )
     if payload_type == "video_note":
-        return await bot.send_video_note(chat_id, payload.get("file_id"))
+        return await bot.send_video_note(chat_id, payload.get("file_id"), **common)
     if payload_type == "location":
         return await bot.send_location(
-            chat_id, payload.get("latitude"), payload.get("longitude")
+            chat_id, payload.get("latitude"), payload.get("longitude"), **common
         )
     if payload_type == "contact":
         return await bot.send_contact(
@@ -492,6 +573,7 @@ async def send_message_payload(bot, chat_id, payload: dict):
             payload.get("phone_number"),
             payload.get("first_name", ""),
             last_name=payload.get("last_name"),
+            **common,
         )
     raise ValueError("不支持的消息类型")
 

@@ -45,6 +45,7 @@ from modules import register_all_handlers  # 注册各功能模块
 from dispatcher import message_router  # 最终文本处理路由器
 from channel.telethon_forwarder import start_telethon_forwarder_job, stop_telethon_forwarder
 from channel.telethon_login import _clear_login_state
+from info.economy import handle_points_log_start_parameter
 from info.storage import ensure_info_migrated
 from channel.channel_config import is_active_subscription
 from channel.publish_setting import (
@@ -662,23 +663,111 @@ def _can_configure_start_welcome(context: ContextTypes.DEFAULT_TYPE, user) -> bo
     return bool(is_owner and is_active_subscription(user))
 
 
-def _welcome_template_text(bot_name: str) -> str:
-    safe_name = html.escape(str(bot_name or "机器人"))
-    configured = str(_load_start_welcome_config().get("text") or "").strip()
-    if configured:
-        # Custom content is plain text to avoid broken HTML from arbitrary input.
-        return html.escape(configured).replace("{bot_name}", safe_name)
+def _utf16_length(value: str) -> int:
+    """Telegram entity offsets are measured in UTF-16 code units."""
+    return len(value.encode("utf-16-le")) // 2
 
-    if str(bot_name or "").strip() == MASTER_BOT_NAME:
-        return f"👏 欢迎使用 {safe_name}\n 能帮你便捷安全地管理频道和群组，是TG上领先的管理的机器人之一\n➡️请赋予我频道/群组管理员权限！"
 
-    if MASTER_BOT_USERNAME:
-        master_label = (
-            f'<a href="https://t.me/{html.escape(MASTER_BOT_USERNAME, quote=True)}">{html.escape(MASTER_BOT_NAME)}</a>'
+def _serialize_start_welcome_entities(message) -> list[dict]:
+    """Persist only custom-emoji entities from a configured welcome message."""
+    return [
+        entity.to_dict()
+        for entity in (getattr(message, "entities", None) or [])
+        if getattr(entity, "type", None) == "custom_emoji"
+        and getattr(entity, "custom_emoji_id", None)
+    ]
+
+
+def _render_start_welcome_entities(template: str, raw_entities, bot_name: str):
+    """Render {bot_name} while retaining saved custom-emoji entity offsets."""
+    placeholder = "{bot_name}"
+    replacement = str(bot_name or "机器人")
+    entities = []
+    for raw in raw_entities if isinstance(raw_entities, list) else []:
+        if not isinstance(raw, dict) or raw.get("type") != "custom_emoji":
+            continue
+        try:
+            entities.append(MessageEntity.de_json(raw, None))
+        except Exception:
+            continue
+
+    positions = []
+    cursor = 0
+    while True:
+        index = template.find(placeholder, cursor)
+        if index < 0:
+            break
+        positions.append(_utf16_length(template[:index]))
+        cursor = index + len(placeholder)
+
+    placeholder_length = _utf16_length(placeholder)
+    replacement_length = _utf16_length(replacement)
+    rendered_entities = []
+    for entity in entities:
+        start = int(entity.offset)
+        end = start + int(entity.length)
+        # Do not retain malformed entities that overlap a substituted placeholder.
+        if any(start < offset + placeholder_length and end > offset for offset in positions):
+            continue
+        shift = sum(
+            replacement_length - placeholder_length
+            for offset in positions
+            if offset + placeholder_length <= start
         )
-    else:
-        master_label = html.escape(MASTER_BOT_NAME)
-    return f"👏 欢迎使用 {safe_name} 克隆自 {master_label}\n 能帮你便捷安全地管理频道和群组，是TG上领先的管理的机器人之一\n➡️请赋予我频道/群组管理员权限！"
+        rendered_entities.append(
+            MessageEntity(
+                type=entity.type,
+                offset=start + shift,
+                length=entity.length,
+                custom_emoji_id=entity.custom_emoji_id,
+            )
+        )
+    return template.replace(placeholder, replacement), rendered_entities or None
+
+
+def _configured_start_welcome_payload(bot_name: str):
+    config = _load_start_welcome_config()
+    template = str(config.get("text") or "")
+    if not template.strip():
+        return None
+    return _render_start_welcome_entities(
+        template,
+        config.get("entities"),
+        bot_name,
+    )
+
+
+def _default_start_welcome_payload(bot_name: str):
+    """Build the default welcome text with Telegram entities, not HTML markup."""
+    display_name = str(bot_name or "机器人")
+    leading_emoji = MessageEntity(
+        type="custom_emoji",
+        offset=0,
+        length=_utf16_length("👏"),
+        custom_emoji_id="5203996991054432397",
+    )
+    suffix = "\n 能帮你便捷安全地管理频道和群组，是TG上领先的管理的机器人之一\n➡️请赋予我频道/群组管理员权限！"
+    if display_name.strip() == MASTER_BOT_NAME:
+        return f"👏 欢迎使用 {display_name}{suffix}", [leading_emoji]
+
+    master_name = str(MASTER_BOT_NAME or "小雅")
+    prefix = f"👏 欢迎使用 {display_name} 克隆自 "
+    text = f"{prefix}{master_name}{suffix}"
+    entities = [leading_emoji]
+    if MASTER_BOT_USERNAME:
+        entities.append(
+            MessageEntity(
+                type="text_link",
+                offset=_utf16_length(prefix),
+                length=_utf16_length(master_name),
+                url=f"https://t.me/{str(MASTER_BOT_USERNAME).lstrip('@')}",
+            )
+        )
+    return text, entities
+
+
+def _start_welcome_payload(bot_name: str):
+    return _configured_start_welcome_payload(bot_name) or _default_start_welcome_payload(bot_name)
 
 
 def _clear_submission_draft(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -695,10 +784,16 @@ def _clear_submission_draft(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """兜底 /start：保证未启用 verification 的机器人也能响应。"""
-    
-    await show_menu(update, context)
-      
     if not update.message:
+        return
+    # 积分流水链接优先在私聊中打开，不再额外发送开始菜单。
+    if update.effective_chat and update.effective_chat.type == "private":
+        if context.args and await handle_points_log_start_parameter(
+            update, context, context.args[0]
+        ):
+            return
+        await show_menu(update, context)
+    else:
         return
 
     if context.args:
@@ -731,20 +826,7 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
 
 
-    text = _build_start_welcome_text(bot_name)
-    # text = "🎁"
-    
-    entities = None
-    configured = str(_load_start_welcome_config().get("text") or "").strip()
-    if not configured: 
-        entities = [
-            MessageEntity(
-                type="custom_emoji",
-                offset=0,
-                length=2,
-                custom_emoji_id="5203996991054432397",
-            )
-        ]
+    text, entities = _start_welcome_payload(bot_name)
     
 
     await update.message.reply_text(
@@ -779,10 +861,11 @@ async def start_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = update.effective_user.id if update.effective_user else None
     keyboard_rows = _build_start_panel_rows(context, user_id, update.effective_user)
     keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
+    text, entities = _start_welcome_payload(bot_name)
     return await query.edit_message_text(
-        _build_start_welcome_text(bot_name),
+        text,
+        entities=entities,
         reply_markup=keyboard,
-        parse_mode="HTML",
         disable_web_page_preview=True,
     )
 
@@ -1014,7 +1097,7 @@ def _build_start_panel_rows(
     return rows
 
 def _build_start_welcome_text(bot_name: str) -> str:
-    return _welcome_template_text(bot_name)
+    return _start_welcome_payload(bot_name)[0]
 
 
 async def start_welcome_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1033,10 +1116,11 @@ async def start_welcome_callback(update: Update, context: ContextTypes.DEFAULT_T
         user_id = update.effective_user.id if update.effective_user else None
         keyboard_rows = _build_start_panel_rows(context, user_id, update.effective_user)
         keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
+        text, entities = _start_welcome_payload(bot_name)
         return await query.edit_message_text(
-            _build_start_welcome_text(bot_name),
+            text,
+            entities=entities,
             reply_markup=keyboard,
-            parse_mode="HTML",
             disable_web_page_preview=True,
         )
     if action == "reset":
@@ -1044,10 +1128,11 @@ async def start_welcome_callback(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data.pop(START_WELCOME_EDIT_KEY, None)
         await query.answer("已恢复默认欢迎词。")
         bot_name = context.application.bot_data.get("name", "机器人")
+        text, entities = _start_welcome_payload(bot_name)
         return await query.edit_message_text(
-            _build_start_welcome_text(bot_name),
+            text,
+            entities=entities,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ 返回首页", callback_data="start:back")]]),
-            parse_mode="HTML",
             disable_web_page_preview=True,
         )
     context.user_data[START_WELCOME_EDIT_KEY] = True
@@ -1055,7 +1140,7 @@ async def start_welcome_callback(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     return await query.edit_message_text(
         "✏️ <b>配置欢迎词</b>\n\n"
-        "请直接发送新的欢迎词。支持使用 <code>{bot_name}</code> 自动代入机器人名称。\n"
+        "请直接发送新的欢迎词；支持会员表情及 <code>{bot_name}</code> 自动代入机器人名称。\n"
         "发送“取消”放弃本次修改。\n\n"
         f"当前自定义内容：\n<code>{html.escape(current)}</code>",
         reply_markup=InlineKeyboardMarkup([
@@ -1074,23 +1159,32 @@ async def start_welcome_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if not update.message or not update.message.text:
         return
-    text = update.message.text.strip()
-    if text in {"取消", "返回"}:
+    text = update.message.text
+    text_for_command = text.strip()
+    if text_for_command in {"取消", "返回"}:
         context.user_data.pop(START_WELCOME_EDIT_KEY, None)
         await update.message.reply_text("已取消欢迎词修改。")
         raise ApplicationHandlerStop
-    if not text:
+    if not text_for_command:
         await update.message.reply_text("欢迎词不能为空，请重新发送。")
         raise ApplicationHandlerStop
     if len(text) > 3500:
         await update.message.reply_text("欢迎词不能超过 3500 个字符，请重新发送。")
         raise ApplicationHandlerStop
-    save_json(START_WELCOME_FILE, {"text": text})
+    save_json(
+        START_WELCOME_FILE,
+        {
+            "text": text,
+            "entities": _serialize_start_welcome_entities(update.message),
+        },
+    )
     context.user_data.pop(START_WELCOME_EDIT_KEY, None)
     bot_name = context.application.bot_data.get("name", "机器人")
+    preview_text, preview_entities = _configured_start_welcome_payload(bot_name)
+    await update.message.reply_text("✅ 欢迎词已保存，预览如下：")
     await update.message.reply_text(
-        "✅ 欢迎词已保存，预览如下：\n\n" + _build_start_welcome_text(bot_name),
-        parse_mode="HTML",
+        preview_text,
+        entities=preview_entities,
         disable_web_page_preview=True,
     )
     raise ApplicationHandlerStop
@@ -1426,24 +1520,31 @@ async def post_init_setup(app):
 configure_runtime_hooks(create_app, post_init_setup)
 
 
-async def handle_join_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+
+
+async def handle_join_start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     if not update.message:
         return False
 
     text = update.message.text or ""
-    start_param = context.args[0]
+
     if not text.startswith("/start"):
         return False
 
-    parts = text.split(maxsplit=1)
-
-    if len(parts) < 2:
+    # 防止没有参数时出现 IndexError
+    if not context.args:
         return False
 
-    # 短邀请码，例如：
-    # /start aK72xP
-    # invite_code = parts[1].strip()
-    
+    start_param = context.args[0]
+
+    # 只处理邀请链接
+    if not start_param.startswith("invite_"):
+        return False
+
     invite_code = start_param[len("invite_"):].strip()
 
     if not invite_code:
@@ -1455,6 +1556,7 @@ async def handle_join_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     invite_link = None
     inviter_id = None
     inviter_name = "好友"
+    inviter_username = None
     chat_id = None
 
     for chat_key, group_link_map in link_map_data.items():
@@ -1465,25 +1567,7 @@ async def handle_join_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             invite_link = link
             inviter_id = int(info.get("inviter_id", 0))
             inviter_name = info.get("inviter_name") or "好友"
-            
             inviter_username = info.get("inviter_username")
-
-            if inviter_username:
-                username = inviter_username.lstrip("@")
-
-                inviter_display = (
-                    f'<a href="https://t.me/{html.escape(username)}">'
-                    f'{html.escape(inviter_name)}'
-                    f'</a>'
-                )
-            elif inviter_id:
-                inviter_display = (
-                    f'<a href="tg://user?id={inviter_id}">'
-                    f'{html.escape(inviter_name)}'
-                    f'</a>'
-                )
-            else:
-                inviter_display = html.escape(inviter_name)
 
             try:
                 chat_id = int(chat_key)
@@ -1501,6 +1585,24 @@ async def handle_join_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return True
 
+    # 邀请人显示名称
+    if inviter_username:
+        username = inviter_username.lstrip("@")
+
+        inviter_display = (
+            f'<a href="https://t.me/{html.escape(username)}">'
+            f'{html.escape(inviter_name)}'
+            f'</a>'
+        )
+    elif inviter_id:
+        inviter_display = (
+            f'<a href="tg://user?id={inviter_id}">'
+            f'{html.escape(inviter_name)}'
+            f'</a>'
+        )
+    else:
+        inviter_display = html.escape(inviter_name)
+
     # 获取群名称
     chat_title = "群聊"
 
@@ -1511,20 +1613,57 @@ async def handle_join_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "🚀 加入群聊",
-                url=invite_link,
-            )
+    # 获取群配置
+    chat_key = str(chat_id) if chat_id else ""
+
+    group_config = (
+        get_group_whitelist(context).get(chat_key, {})
+    )
+
+    # 是否开启管理员审核
+    approval_enabled = bool(
+        group_config.get("invite_approval_enabled", False)
+    )
+
+    if approval_enabled:
+        # 开启审核：不发送真实群链接
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "📨 申请加入群聊",
+                    callback_data=f"invite_apply:{invite_code}",
+                )
+            ]
         ]
-    ]
+
+        message_text = (
+            f"👋 欢迎你！\n\n"
+            f"📢 群聊：{html.escape(chat_title)}\n"
+            f"👤 邀请人：{inviter_display}\n\n"
+            f"🔐 该群开启了入群审核，请点击下方按钮提交申请。\n"
+            f"管理员审核通过后，你将收到入群链接。"
+        )
+
+    else:
+        # 关闭审核：保持原来的直接入群逻辑
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "🚀 加入群聊",
+                    url=invite_link,
+                )
+            ]
+        ]
+
+        message_text = (
+            f"👋 欢迎你！\n\n"
+            f"📢 群聊：{html.escape(chat_title)}\n"
+            f"👤 邀请人：{inviter_display}\n\n"
+            f"点击下面按钮加入群聊 👇"
+        )
 
     await update.message.reply_text(
-        f"👋 欢迎你！\n\n"
-        f"📢 群聊：{html.escape(chat_title)}\n"
-        f"👤 邀请人：{inviter_display}\n\n"
-        f"点击下面按钮加入群聊 👇",
+        message_text,
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="HTML",
         disable_web_page_preview=True,

@@ -1439,6 +1439,22 @@ async def _pin_ad_message_if_enabled(bot, chat_id: int, sent_message, ad: dict) 
         return False
 
 
+def _ad_reply_markup(ad: dict):
+    """Build the configured inline keyboard for both scheduled ad modes."""
+    buttons = ad.get("buttons", []) if isinstance(ad, dict) else []
+    if not isinstance(buttons, list):
+        return None
+    rows = []
+    for button in buttons[:3]:
+        if not isinstance(button, dict):
+            continue
+        label = str(button.get("text") or "").strip()
+        url = str(button.get("url") or "").strip()
+        if label and url:
+            rows.append([InlineKeyboardButton(label[:64], url=url)])
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
 def _global_ad_records(cfg: dict) -> list[dict]:
     """Read new multi-ad config, with compatibility for the former single ad."""
     ads = cfg.get("ads") if isinstance(cfg, dict) else None
@@ -1521,7 +1537,13 @@ async def _global_ad_push_to_groups(
             if not bool(group_cfg.get("bot_in_group", False)):
                 continue
             try:
-                sent_message = await send_message_payload(context.bot, chat_id=int(chat_id), payload=payload)
+                sent_message = await send_message_payload(
+                    context.bot,
+                    chat_id=int(chat_id),
+                    payload=payload,
+                    record=ad,
+                    reply_markup=_ad_reply_markup(ad),
+                )
                 await _pin_ad_message_if_enabled(context.bot, int(chat_id), sent_message, ad)
                 sent += 1
             except Exception as exc:
@@ -1600,7 +1622,13 @@ async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
                 if last_ad_push_slot.get(ad_key) == slot_key:
                     continue
                 try:
-                    sent_message = await send_message_payload(context.bot, chat_id=int(chat_id), payload=payload)
+                    sent_message = await send_message_payload(
+                        context.bot,
+                        chat_id=int(chat_id),
+                        payload=payload,
+                        record=ad,
+                        reply_markup=_ad_reply_markup(ad),
+                    )
                     await _pin_ad_message_if_enabled(context.bot, int(chat_id), sent_message, ad)
                     last_ad_push_slot[ad_key] = slot_key
                 except Exception as exc:
@@ -1621,7 +1649,13 @@ async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
             if now_ts - last_ad_push_ts.get(ad_key, 0) < interval_min * 60:
                 continue
             try:
-                sent_message = await send_message_payload(context.bot, chat_id=int(chat_id), payload=payload)
+                sent_message = await send_message_payload(
+                    context.bot,
+                    chat_id=int(chat_id),
+                    payload=payload,
+                    record=ad,
+                    reply_markup=_ad_reply_markup(ad),
+                )
                 await _pin_ad_message_if_enabled(context.bot, int(chat_id), sent_message, ad)
                 last_ad_push_ts[ad_key] = now_ts
             except Exception as exc:

@@ -1,8 +1,9 @@
 from datetime import datetime
+import time
 from email.mime import application
 from html import escape
 import re
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CommandHandler, ContextTypes
 from telegram.ext import CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.helpers import mention_html
@@ -16,6 +17,7 @@ from tool.pagination_helper import (
 from info.storage import iter_group_infos, load_group_info, save_group_info
 
 from utils import (
+    bot_datetime_from_timestamp,
     can_use_command,
     get_group_whitelist,
     is_bot_owner,
@@ -132,6 +134,10 @@ def change_user_attribute(
     if attr_name.startswith("target_"):
         attr_name = attr_name[len("target_") :]
 
+    # Point changes made by action effects also need an auditable transaction.
+    if attr_name == "points":
+        return change_points(chat_id, user_id, delta, reason="行为效果")
+
     current = user_data.get(attr_name, DEFAULT_USER_DATA.get(attr_name, 0))
 
     if attr_name != "balance":
@@ -149,8 +155,200 @@ def change_balance(chat_id, user_id, amount):
     )
 
 
-def change_points(chat_id, user_id, amount):
-    return change_user_attribute(chat_id, user_id, "points", amount, max_value=999999)
+POINT_LOGS_KEY = "point_logs"
+POINT_LOG_PAGE_SIZE = 8
+
+
+def _normalize_points(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _point_logs_for_user(group_data: dict, user_id) -> list[dict]:
+    """Return the mutable, newest-first point history for one group user."""
+    logs_by_user = group_data.setdefault(POINT_LOGS_KEY, {})
+    if not isinstance(logs_by_user, dict):
+        logs_by_user = {}
+        group_data[POINT_LOGS_KEY] = logs_by_user
+    logs = logs_by_user.setdefault(str(user_id), [])
+    if not isinstance(logs, list):
+        logs = []
+        logs_by_user[str(user_id)] = logs
+    return logs
+
+
+def get_point_logs(chat_id, user_id) -> list[dict]:
+    """Load a user's point transactions in reverse chronological order."""
+    group_data = load_group_info(chat_id)
+    raw_logs = group_data.get(POINT_LOGS_KEY, {})
+    logs = raw_logs.get(str(user_id), []) if isinstance(raw_logs, dict) else []
+    valid_logs = [item for item in logs if isinstance(item, dict)]
+    return sorted(
+        valid_logs,
+        key=lambda item: _normalize_points(item.get("timestamp")),
+        reverse=True,
+    )
+
+
+def change_points(chat_id, user_id, amount, reason: str = "积分变动"):
+    """Change points and persist a transaction record with its resulting balance."""
+    chat_id, user_id = str(chat_id), str(user_id)
+    requested_delta = _normalize_points(amount)
+    group_data = load_group_info(chat_id)
+    users = group_data.setdefault("users", {})
+    if not isinstance(users, dict):
+        users = {}
+        group_data["users"] = users
+
+    user_data = users.get(user_id)
+    if not isinstance(user_data, dict):
+        user_data = DEFAULT_USER_DATA.copy()
+        users[user_id] = user_data
+
+    old_balance = _normalize_points(user_data.get("points"))
+    new_balance = max(0, min(old_balance + requested_delta, 999999))
+    actual_delta = new_balance - old_balance
+    user_data["points"] = new_balance
+
+    if actual_delta:
+        logs = _point_logs_for_user(group_data, user_id)
+        # Insert at the front so entries created during the same second still
+        # display in true newest-to-oldest order.
+        logs.insert(0, {
+            "timestamp": int(time.time()),
+            "reason": str(reason or "积分变动").strip()[:80] or "积分变动",
+            "amount": actual_delta,
+            "balance": new_balance,
+        })
+
+    save_group_info(chat_id, group_data)
+    return new_balance
+
+
+def _point_log_keyboard(chat_id, page: int, total_pages: int) -> InlineKeyboardMarkup:
+    rows = []
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"pointslog:{chat_id}:{page - 1}"))
+    if page < total_pages:
+        nav.append(InlineKeyboardButton("➡️ 下一页", callback_data=f"pointslog:{chat_id}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    return InlineKeyboardMarkup(rows)
+
+
+async def _point_log_group_title(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id,
+) -> str:
+    """Resolve the latest accessible group title for the point-log header."""
+    configured = get_group_whitelist(context).get(str(chat_id), {})
+    configured_title = str((configured or {}).get("title") or "").strip()
+    try:
+        chat = await context.bot.get_chat(int(chat_id))
+        title = str(getattr(chat, "title", "") or "").strip()
+        if title:
+            return title
+    except Exception:
+        pass
+    return configured_title or f"群 {chat_id}"
+
+
+def _point_log_view(
+    chat_id,
+    user_id,
+    page: int,
+    group_title: str = "",
+    context: ContextTypes.DEFAULT_TYPE = None,
+) -> tuple[str, InlineKeyboardMarkup]:
+    logs = get_point_logs(chat_id, user_id)
+    total = len(logs)
+    total_pages = max(1, (total + POINT_LOG_PAGE_SIZE - 1) // POINT_LOG_PAGE_SIZE)
+    page = max(1, min(int(page or 1), total_pages))
+    current_balance = get_points(chat_id, user_id)
+    lines = [
+        "📜 积分流水",
+        f"群聊：{group_title or f'群 {chat_id}'}",
+        f"当前积分：{current_balance} 分",
+        f"第 {page}/{total_pages} 页 · 共 {total} 条",
+        "",
+    ]
+    if not logs:
+        lines.append("暂无积分流水。新产生的积分变动会显示在这里。")
+    else:
+        start = (page - 1) * POINT_LOG_PAGE_SIZE
+        for item in logs[start : start + POINT_LOG_PAGE_SIZE]:
+            timestamp = _normalize_points(item.get("timestamp"))
+            when = (
+                # Use this bot's configured timezone (for example, Asia/Shanghai
+                # for Beijing time), rather than the host machine's timezone.
+                bot_datetime_from_timestamp(timestamp, context).strftime("%Y-%m-%d %H:%M")
+                if timestamp > 0
+                else "未知时间"
+            )
+            delta = _normalize_points(item.get("amount"))
+            sign = "+" if delta > 0 else ""
+            reason = str(item.get("reason") or "积分变动")[:80]
+            balance = _normalize_points(item.get("balance"))
+            lines.extend([
+                f"{when} {reason}：{sign}{delta} 分 · 余额：{balance} 分",
+            ])
+    return "\n".join(lines).rstrip(), _point_log_keyboard(str(chat_id), page, total_pages)
+
+
+async def handle_points_log_start_parameter(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    parameter: str,
+) -> bool:
+    """Open a group's point log from the private-chat deep link."""
+    if not isinstance(parameter, str) or not parameter.startswith("pointslog_"):
+        return False
+    if not update.effective_chat or update.effective_chat.type != "private":
+        return False
+    try:
+        chat_id = int(parameter.removeprefix("pointslog_"))
+    except (TypeError, ValueError):
+        if update.message:
+            await update.message.reply_text("❗ 积分流水链接无效。")
+        return True
+    if not update.effective_user or not update.message:
+        return True
+    group_title = await _point_log_group_title(context, chat_id)
+    text, markup = _point_log_view(
+        chat_id,
+        update.effective_user.id,
+        1,
+        group_title,
+        context,
+    )
+    await update.message.reply_text(text, reply_markup=markup)
+    return True
+
+
+async def points_log_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.data or not query.from_user:
+        return
+    try:
+        _prefix, chat_id, page_text = query.data.split(":", 2)
+        page = int(page_text)
+    except (TypeError, ValueError):
+        return await query.answer("积分流水参数无效。", show_alert=True)
+    if not query.message or query.message.chat.type != "private":
+        return await query.answer("请在与机器人的私聊中查看积分流水。", show_alert=True)
+    group_title = await _point_log_group_title(context, chat_id)
+    text, markup = _point_log_view(
+        chat_id,
+        query.from_user.id,
+        page,
+        group_title,
+        context,
+    )
+    await query.answer()
+    await query.edit_message_text(text, reply_markup=markup)
 
 
 # ---------------- 每日恢复 ---------------- #
@@ -251,11 +449,26 @@ async def my_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     points = get_points(chat_id, user.id)
 
+    bot_username = str(getattr(context.bot, "username", "") or "").strip().lstrip("@")
+    if not bot_username:
+        try:
+            bot_username = str((await context.bot.get_me()).username or "").strip().lstrip("@")
+        except Exception:
+            bot_username = ""
+
+    reply_markup = None
+    if bot_username:
+        log_url = f"https://t.me/{bot_username}?start=pointslog_{chat_id}"
+        reply_markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📜 积分流水", url=log_url)
+        ]])
+
     await safe_reply(
         update,
         context,
-        text = f"🏅 当前{points_alias or '积分'}：{points} 分",
-        auto_delete_seconds = 30
+        text=f"🏅 当前{points_alias or '积分'}：{points} 分",
+        reply_markup=reply_markup,
+        auto_delete_seconds=30,
     )
 
 def format_rich_item(i, item):
@@ -496,14 +709,23 @@ async def add_info_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await safe_reply(update, context, "数量不能为 0。")
 
     attr_key = VALID_ATTRIBUTES[attr_name]
-    data = get_user_data(chat_id, target_user.id)
-    data[attr_key] = data.get(attr_key, 0) + value
-    save_user_data(chat_id, target_user.id, data)
+    if attr_key == "points":
+        current_value = change_points(
+            chat_id,
+            target_user.id,
+            value,
+            reason="管理员调整积分",
+        )
+    else:
+        data = get_user_data(chat_id, target_user.id)
+        data[attr_key] = data.get(attr_key, 0) + value
+        save_user_data(chat_id, target_user.id, data)
+        current_value = data[attr_key]
 
     await safe_reply(
         update,
         context,
-        f"已给 {target_user.full_name} 添加 {value} 点「{attr_name}」。当前{attr_name}为：{data[attr_key]}",
+        f"已给 {target_user.full_name} 添加 {value} 点「{attr_name}」。当前{attr_name}为：{current_value}",
         True,
     )
 
@@ -513,9 +735,10 @@ def clean_point(chat_id: str):
     users = chat.get("users", {})
     if not users:
         return False, "没有用户数据"
-    for user_data in users.values():
-        user_data["points"] = 0
-    save_group_info(chat_id, chat)
+    for user_id, user_data in users.items():
+        points = _normalize_points(user_data.get("points"))
+        if points > 0:
+            change_points(chat_id, user_id, -points, reason="管理员清空积分")
     return True, "✅ 所有用户积分已清零"
 
 
@@ -596,6 +819,7 @@ def register_economy_handlers(app):
     app.add_handler(CommandHandler("top_charm", top_charm))
     app.add_handler(CommandHandler("top_points", top_points))
     app.add_handler(CommandHandler("add_info", add_info_profile))
+    app.add_handler(CallbackQueryHandler(points_log_callback, pattern=r"^pointslog:-?\d+:\d+$"))
     # 财富排行榜分页回调
     app.add_handler(
         CallbackQueryHandler(rich_pagination_callback, pattern=r"^rich_\d+$")
