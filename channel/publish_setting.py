@@ -9,7 +9,14 @@ import random
 import re
 import time
 import uuid
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    InputMediaVideo,
+    MessageEntity,
+    Update,
+)
 from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, TypeHandler, filters
 from telegram.error import BadRequest, Forbidden
 
@@ -245,12 +252,27 @@ def _record_backup_post_mapping(
     backup_channel_id: int,
     backup_message_id: int,
 ) -> None:
+    _record_backup_post_mappings(
+        main_channel_id,
+        backup_channel_id,
+        [(main_message_id, backup_message_id)],
+    )
+
+
+def _record_backup_post_mappings(
+    main_channel_id: int,
+    backup_channel_id: int,
+    message_pairs: list[tuple[int, int]],
+) -> None:
+    """Persist all source→backup pairs from one copy operation together."""
     data = _load_backup_post_map()
-    data["mappings"][_comment_map_key(main_channel_id, main_message_id)] = {
-        "backup_channel_id": int(backup_channel_id),
-        "backup_message_id": int(backup_message_id),
-        "created_at": int(time.time()),
-    }
+    created_at = int(time.time())
+    for main_message_id, backup_message_id in message_pairs:
+        data["mappings"][_comment_map_key(main_channel_id, main_message_id)] = {
+            "backup_channel_id": int(backup_channel_id),
+            "backup_message_id": int(backup_message_id),
+            "created_at": created_at,
+        }
     _save_backup_post_map(data)
 
 
@@ -259,6 +281,79 @@ def _backup_post_mapping(main_channel_id: int, main_message_id: int) -> dict:
         _comment_map_key(main_channel_id, main_message_id)
     )
     return mapping if isinstance(mapping, dict) else {}
+
+
+def _copied_message_ids(copied) -> list[int]:
+    """Extract every target ID returned by Bot API or Telethon album sends."""
+    values = copied if isinstance(copied, (list, tuple)) else [copied]
+    result = []
+    for value in values:
+        message_id = _as_int(
+            getattr(value, "message_id", None) or getattr(value, "id", None)
+        )
+        if message_id is not None:
+            result.append(message_id)
+    return result
+
+
+def _infer_legacy_album_backup_mapping(
+    main_channel_id: int,
+    main_message_id: int,
+    backup_channel_id: int,
+) -> dict:
+    """Recover old one-entry album mappings without creating a stray new post.
+
+    Earlier versions stored only the first image of an album. Album message IDs
+    are consecutive in both channels, so a nearby stored first item can safely
+    provide the corresponding backup ID for the remaining (at most 10) items.
+    """
+    mappings = _load_backup_post_map().get("mappings", {})
+    best = None
+    for key, item in mappings.items():
+        if not isinstance(item, dict):
+            continue
+        if _as_int(item.get("backup_channel_id")) != backup_channel_id:
+            continue
+        try:
+            source_channel, source_message = (int(part) for part in str(key).split(":", 1))
+        except (TypeError, ValueError):
+            continue
+        if source_channel != main_channel_id:
+            continue
+        distance = main_message_id - source_message
+        if not 1 <= distance <= 9:
+            continue
+        target_message = _as_int(item.get("backup_message_id"))
+        if target_message is None:
+            continue
+        candidate = {
+            "backup_channel_id": backup_channel_id,
+            "backup_message_id": target_message + distance,
+        }
+        if best is None or distance < best[0]:
+            best = (distance, candidate)
+    return best[1] if best else {}
+
+
+def _edited_message_media(source_message):
+    """Return Bot API media for an edited photo/video message, if applicable."""
+    caption = getattr(source_message, "caption", None) or ""
+    caption_entities = getattr(source_message, "caption_entities", None)
+    photos = getattr(source_message, "photo", None) or []
+    if photos:
+        return InputMediaPhoto(
+            media=photos[-1].file_id,
+            caption=caption,
+            caption_entities=caption_entities,
+        )
+    video = getattr(source_message, "video", None)
+    if video:
+        return InputMediaVideo(
+            media=video.file_id,
+            caption=caption,
+            caption_entities=caption_entities,
+        )
+    return None
 
 
 def _backup_channel_use_telethon(config: dict) -> bool:
@@ -435,25 +530,32 @@ async def _edit_backup_post_via_telethon(
     edit_text = html_text if html_text is not None else text
 
     media = getattr(source_message, "media", None)
+    media_bytes = None
+    file_name = "edited_media"
 
-    # 网页预览不是文件，不需要替换媒体
-    if isinstance(media, MessageMediaWebPage):
-        media = None
+    # When this function is called by the PTB channel-post handler,
+    # ``source_message`` is a Bot API Message rather than a Telethon Message.
+    # Bot API Messages expose photo/video file IDs, not ``.media``.  Download
+    # that file through the bot first, then give Telethon bytes to replace the
+    # backup media.  Without this branch, captioned first album items only had
+    # their text edited and their image was never replaced.
+    if isinstance(media, (MessageMediaPhoto, MessageMediaDocument)):
+        media_bytes = await client.download_media(source_message, file=bytes)
+        file = getattr(source_message, "file", None)
+        file_name = getattr(file, "name", None) or file_name
+    elif not isinstance(media, MessageMediaWebPage):
+        photos = getattr(source_message, "photo", None) or []
+        attachment = photos[-1] if photos else getattr(source_message, "video", None)
+        if attachment is not None:
+            source_file = await context.bot.get_file(attachment.file_id)
+            media_bytes = bytes(await source_file.download_as_bytearray())
+            file_name = (
+                getattr(attachment, "file_name", None)
+                or ("edited_photo.jpg" if photos else "edited_video.mp4")
+            )
 
     # 图片或视频发生变化时，下载新媒体并替换备用频道内容
-    if isinstance(media, (MessageMediaPhoto, MessageMediaDocument)):
-        media_bytes = await client.download_media(
-            source_message,
-            file=bytes,
-        )
-
-        if not media_bytes:
-            raise RuntimeError("无法下载主频道编辑后的媒体")
-
-        # 根据原消息的文件名确定扩展名
-        file_name = getattr(source_message, "file", None)
-        file_name = getattr(file_name, "name", None) or "edited_media"
-
+    if media_bytes:
         media_file = io.BytesIO(media_bytes)
         media_file.name = file_name
 
@@ -522,20 +624,26 @@ async def _mirror_main_post_to_backup(
                 from_chat_id=main_channel_id,
                 message_ids=source_message_ids,
             )
-        if isinstance(copied, (list, tuple)):
-            copied = copied[0] if copied else None
-        backup_message_id = _as_int(
-            getattr(copied, "message_id", None) or getattr(copied, "id", None)
-        )
-        if backup_message_id is None:
+        copied_items = list(copied) if isinstance(copied, (list, tuple)) else [copied]
+        backup_message_ids = _copied_message_ids(copied_items)
+        if not backup_message_ids:
             raise RuntimeError("备用频道同步没有返回消息 ID")
-        _record_backup_post_mapping(
+
+        # ``copy_messages`` / Telethon album send returns one ID per item in
+        # source order. Persist every pair, not only the first album image.
+        # Never guess a partial pairing: a wrong mapping would make a later
+        # edit replace an unrelated backup post.
+        if len(source_message_ids) != len(backup_message_ids):
+            raise RuntimeError(
+                "主、备用频道复制消息数量不一致 "
+                f"source={len(source_message_ids)} backup={len(backup_message_ids)}"
+            )
+        _record_backup_post_mappings(
             main_channel_id,
-            main_message_id,
             backup_channel_id,
-            backup_message_id,
+            list(zip(source_message_ids, backup_message_ids)),
         )
-        return copied
+        return copied_items[0] if copied_items else None
     except Exception as exc:
         print(
             "备用频道同步失败 "
@@ -643,28 +751,43 @@ async def _sync_main_post_edit_to_backup(
         historic = _collect_cloned_history_mappings(backup_channel_id, main_channel_id)
         historic_item = historic.get((main_channel_id, main_message_id), {})
         historic_backup_message_id = _as_int(historic_item.get("target_message_id"))
-        if historic_backup_message_id is None:
-            # 没有找到备用帖映射，说明这条主帖可能是直接在频道发布的，
-            # 或者之前的备用帖映射丢失。
-            # 重新复制主帖到备用频道，并由复制函数自动记录映射。
+        resolved_backup_message_id = historic_backup_message_id
+        if resolved_backup_message_id is None:
+            legacy_album_mapping = _infer_legacy_album_backup_mapping(
+                main_channel_id,
+                main_message_id,
+                backup_channel_id,
+            )
+            resolved_backup_message_id = _as_int(
+                legacy_album_mapping.get("backup_message_id")
+            )
+
+        if resolved_backup_message_id is None:
+            if getattr(source_message, "media_group_id", None):
+                # Do not turn an edited old album item into a new standalone
+                # backup post when its old mapping is genuinely unavailable.
+                print(
+                    "备用频道相册编辑跳过：未找到对应图片映射 "
+                    f"main={main_channel_id}/{main_message_id}"
+                )
+                return False
             copied = await _mirror_main_post_to_backup(
                 context,
                 config,
                 main_channel_id,
                 main_message_id,
             )
-
             return copied is not None
-        
+
         _record_backup_post_mapping(
             main_channel_id,
             main_message_id,
             backup_channel_id,
-            historic_backup_message_id,
+            resolved_backup_message_id,
         )
         mapping = {
             "backup_channel_id": backup_channel_id,
-            "backup_message_id": historic_backup_message_id,
+            "backup_message_id": resolved_backup_message_id,
         }
     backup_message_id = int(mapping["backup_message_id"])
     try:
@@ -675,6 +798,12 @@ async def _sync_main_post_edit_to_backup(
                 backup_channel_id,
                 backup_message_id,
                 source_message,
+            )
+        elif (media := _edited_message_media(source_message)) is not None:
+            await context.bot.edit_message_media(
+                chat_id=backup_channel_id,
+                message_id=backup_message_id,
+                media=media,
             )
         elif getattr(source_message, "text", None) is not None:
             await context.bot.edit_message_text(

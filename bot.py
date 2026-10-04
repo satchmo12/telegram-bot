@@ -800,8 +800,8 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # 开始验证
         start_param = context.args[0]
-        if start_param.startswith("invite_"):
-            invite_code = start_param[len("invite_"):]
+        if start_param.startswith("ie_"):
+            invite_code = start_param[len("ie_"):]
             print("进入邀请功能:", invite_code)
             if await handle_join_start(update, context):
                 return
@@ -1542,10 +1542,10 @@ async def handle_join_start(
     start_param = context.args[0]
 
     # 只处理邀请链接
-    if not start_param.startswith("invite_"):
+    if not start_param.startswith("ie_"):
         return False
 
-    invite_code = start_param[len("invite_"):].strip()
+    invite_code = start_param[len("ie_"):].strip()
 
     if not invite_code:
         return False

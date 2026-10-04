@@ -47,6 +47,14 @@ async def send_guest_reply(
                             url="https://t.me/iwoai",
                         )
                     ]
+                ),
+                types.KeyboardButtonRow(
+                    buttons=[
+                        types.KeyboardButtonUrl(
+                            text="点击进群",
+                            url="https://t.me/iabc6",
+                        )
+                    ]
                 )
             ]
         )
@@ -126,7 +134,7 @@ async def guest_bot_handler(
     reply_text = (
         f"🤖 你好，{first_name}！\n\n"
          f"我是 {text}。\n"
-        "这里是测试数据。"
+        ""
     )
 
 

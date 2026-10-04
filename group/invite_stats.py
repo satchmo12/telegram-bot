@@ -305,7 +305,7 @@ async def create_personal_invite_link(update: Update, context: ContextTypes.DEFA
         return
 
     # 最终给用户的是机器人短链接
-    bot_link = f"https://t.me/{bot_username}?start=invite_{invite_code}"
+    bot_link = f"https://t.me/{bot_username}?start=ie_{invite_code}"
 
     msg = format_personal_bot_link_text(
         user.full_name,
@@ -830,15 +830,59 @@ async def handle_chat_member_join(update: Update, context: ContextTypes.DEFAULT_
     invite_link_obj = getattr(change, "invite_link", None)
     used_invite_link = getattr(invite_link_obj, "invite_link", None) if invite_link_obj else None
     user = getattr(change.new_chat_member, "user", None)
-    if not used_invite_link or not user or getattr(user, "is_bot", False):
+    if not user or getattr(user, "is_bot", False):
+        return
+
+    chat_id = int(change.chat.id)
+    user_id = int(user.id)
+
+    # Large supergroups may send only a ``chat_member`` update for a join.  An
+    # approved applicant enters with the one-time ``approved_invite_link``, but
+    # that link is deliberately not stored in invite_link_map (the original
+    # personal link is).  Looking up ``used_invite_link`` here therefore loses
+    # the attribution and no points are awarded.  Resolve an approved request
+    # back to its original tracked link before falling back to normal joins.
+    request = get_approval_request(chat_id, user_id)
+    if isinstance(request, dict) and request.get("status") == "approved":
+        original_invite_link = str(request.get("invite_link") or "").strip()
+        if original_invite_link:
+            await _credit_invite_join(
+                context,
+                chat_id,
+                [user_id],
+                original_invite_link,
+                {user_id: user.username} if getattr(user, "username", None) else {},
+                {user_id: user.full_name},
+            )
+        else:
+            print(
+                f"[邀请积分] 审核记录缺少原始邀请链接 "
+                f"chat={chat_id} user={user_id}"
+            )
+
+        # Keep the approval lifecycle consistent with the service-message
+        # handler.  Stats de-duplication makes this safe when Telegram later
+        # delivers both update types for the same join.
+        update_approval_request(
+            chat_id,
+            user_id,
+            {
+                "status": "joined",
+                "joined_at": int(time.time()),
+                "points_processed": True,
+            },
+        )
+        return
+
+    if not used_invite_link:
         return
     await _credit_invite_join(
         context,
-        int(change.chat.id),
-        [int(user.id)],
+        chat_id,
+        [user_id],
         used_invite_link,
-        {int(user.id): user.username} if getattr(user, "username", None) else {},
-        {int(user.id): user.full_name},
+        {user_id: user.username} if getattr(user, "username", None) else {},
+        {user_id: user.full_name},
     )
 
 

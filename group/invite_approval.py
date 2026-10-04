@@ -67,6 +67,7 @@ async def _sync_review_messages(
                 text=text,
                 parse_mode="HTML",
                 reply_markup=None,
+                disable_web_page_preview=True,
             )
 
         except TelegramError as e:
@@ -311,11 +312,15 @@ async def handle_invite_apply(
         ]
     ])
 
-    username_text = (
-        f"@{user.username}"
-        if user.username
-        else "无用户名"
-    )
+    if user.username:
+        username_text = (
+            f'<a href="https://t.me/{escape(user.username)}">'
+            f'@{escape(user.username)}</a>'
+        )
+    else:
+        username_text = (
+            f'<a href="tg://user?id={user.id}">无用户名</a>'
+        )
     
     # 获取群组名称
     chat_title = "未知群组"
@@ -365,6 +370,7 @@ async def handle_invite_apply(
                 text=message,
                 parse_mode="HTML",
                 reply_markup=keyboard,
+                disable_web_page_preview=True,
             )
 
             success_count += 1
