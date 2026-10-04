@@ -801,12 +801,24 @@ def get_points_formatter(is_silent: bool):
         name = info.get("name") or f"用户{uid}"
         points = info.get("points", 0)
 
+        if not points:
+            return ""
+
         if is_silent:
             name = escape(name)
-            return f"{i}. {name} - 🏆 {points} 积分"
         else:
-            mention = mention_html(uid, name)
-            return f"{i}. {mention} - 🏆 {points} 积分"
+            name = mention_html(uid, name)
+
+        medals = {
+            1: "🥇",
+            2: "🥈",
+            3: "🥉",
+        }
+
+        prefix = f"{i}"
+        rank = medals.get(i, "")
+
+        return f"{prefix} {name} - {rank} {points} 积分"
 
     return fmt
 

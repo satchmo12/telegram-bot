@@ -2515,11 +2515,18 @@ def _append_report_comment(submission: dict, forwarded_message) -> None:
     if report is None:
         return
     comments = report.setdefault("comments", [])
+    # Persist every public copy of the comment.  The administrator's report
+    # editor needs these exact IDs to edit the forwarding-channel copy and the
+    # replies below the main/backup channel posts in place.
     comments.append({
         "author": str(submission.get("report_author") or "用户"),
         "content": str(submission.get("report_content") or "[评论内容]"),
         "forward_channel_id": _as_int(submission.get("forward_channel_id")),
         "forward_message_id": _as_int(getattr(forwarded_message, "message_id", None)),
+        "main_discussion_chat_id": _as_int(submission.get("main_discussion_chat_id")),
+        "main_discussion_message_id": _as_int(submission.get("main_discussion_message_id")),
+        "backup_discussion_chat_id": _as_int(submission.get("backup_discussion_chat_id")),
+        "backup_discussion_message_id": _as_int(submission.get("backup_discussion_message_id")),
         "created_at": int(time.time()),
     })
     if len(comments) > 1000:
@@ -3235,6 +3242,100 @@ def _report_comment_detail_view(
     return text, InlineKeyboardMarkup(rows)
 
 
+async def _edit_report_comment_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    message_id: int,
+    content: str,
+    destination: str,
+) -> bool:
+    """Edit a copied comment, handling both text comments and media captions."""
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=content,
+            disable_web_page_preview=True,
+        )
+        return True
+    except BadRequest as text_exc:
+        detail = str(text_exc).lower()
+        if "message is not modified" in detail:
+            return True
+        # A media comment has no text body; its editable body is the caption.
+        if not any(
+            marker in detail
+            for marker in (
+                "there is no text in the message to edit",
+                "message text is empty",
+                "message can't be edited",
+            )
+        ):
+            print(
+                f"评论编辑同步失败 destination={destination} "
+                f"chat={chat_id} message={message_id}: {text_exc}"
+            )
+            return False
+    except Exception as exc:
+        print(
+            f"评论编辑同步失败 destination={destination} "
+            f"chat={chat_id} message={message_id}: {exc}"
+        )
+        return False
+
+    try:
+        await context.bot.edit_message_caption(
+            chat_id=chat_id,
+            message_id=message_id,
+            caption=content,
+        )
+        return True
+    except Exception as caption_exc:
+        if "message is not modified" not in str(caption_exc).lower():
+            print(
+                f"评论编辑同步失败 destination={destination} "
+                f"chat={chat_id} message={message_id}: {caption_exc}"
+            )
+        return False
+
+
+async def _sync_report_comment_edit(
+    context: ContextTypes.DEFAULT_TYPE,
+    comment: dict,
+    content: str,
+) -> tuple[int, int, int]:
+    """Synchronize an edited report comment to every recorded public copy.
+
+    Returns ``(synced, untracked, failed)``. Legacy records only contain the
+    forwarding-channel ID, so their old main/backup discussion copies cannot
+    be located safely and are counted as untracked instead of duplicated.
+    """
+    targets = (
+        ("转发频道", "forward_channel_id", "forward_message_id"),
+        ("主频道评论区", "main_discussion_chat_id", "main_discussion_message_id"),
+        ("备用频道评论区", "backup_discussion_chat_id", "backup_discussion_message_id"),
+    )
+    synced = untracked = failed = 0
+    seen = set()
+    for destination, chat_key, message_key in targets:
+        chat_id = _as_int(comment.get(chat_key))
+        message_id = _as_int(comment.get(message_key))
+        if chat_id is None or message_id is None:
+            untracked += 1
+            continue
+        target_key = (chat_id, message_id)
+        if target_key in seen:
+            continue
+        seen.add(target_key)
+        if await _edit_report_comment_message(
+            context, chat_id, message_id, content, destination
+        ):
+            synced += 1
+        else:
+            failed += 1
+    return synced, untracked, failed
+
+
 async def _handle_report_comment_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     stage = (context.user_data or {}).get(REPORT_COMMENT_EDIT_KEY)
     if not isinstance(stage, dict):
@@ -3297,12 +3398,17 @@ async def _handle_report_comment_edit_input(update: Update, context: ContextType
         await msg.reply_text("❗ 该评论不存在或已删除。")
         return True
 
-    # Only alter the report's saved content; author, timestamp, forwarding IDs
-    # and all other metadata remain unchanged.
+    # Alter the report's saved content first, then update every stored public
+    # copy (forwarding channel, main discussion, and backup discussion).
     comment["content"] = content
     data["reports"][resolved_id] = report
     _save_comment_reports(data)
     context.user_data.pop(REPORT_COMMENT_EDIT_KEY, None)
+    synced, untracked, failed = await _sync_report_comment_edit(
+        context,
+        comment,
+        content,
+    )
 
     try:
         detail_text, detail_markup = _report_comment_detail_view(
@@ -3322,7 +3428,12 @@ async def _handle_report_comment_edit_input(update: Update, context: ContextType
             )
     except Exception as exc:
         print(f"更新报告评论详情消息失败: {exc}")
-    await msg.reply_text("✅ 评论内容已修改。")
+    result = f"✅ 评论内容已修改，并同步到 {synced} 个位置。"
+    if untracked:
+        result += f"\n⚠️ {untracked} 个历史位置未保存消息定位，无法安全同步。"
+    if failed:
+        result += f"\n⚠️ {failed} 个位置同步失败，请检查机器人编辑消息权限。"
+    await msg.reply_text(result)
     return True
 
 
@@ -5107,13 +5218,14 @@ async def _copy_submission_to_discussion(
     discussion_chat_id: int,
     discussion_message_id: int,
     reply_markup=None,
-) -> None:
-    """Copy all album items as replies below one discussion post."""
+):
+    """Copy all album items as replies and return the first copied message."""
     message_ids = _submission_message_ids(submission)
     if not message_ids:
         raise RuntimeError("投稿缺少原始消息 ID")
+    first_copied = None
     for index, message_id in enumerate(message_ids):
-        await context.bot.copy_message(
+        copied = await context.bot.copy_message(
             chat_id=discussion_chat_id,
             from_chat_id=submission["user_chat_id"],
             message_id=message_id,
@@ -5121,6 +5233,9 @@ async def _copy_submission_to_discussion(
             # An inline keyboard can only be attached once for an album reply.
             reply_markup=reply_markup if index == 0 else None,
         )
+        if first_copied is None:
+            first_copied = copied
+    return first_copied
 
 
 async def _publish_comment_and_forward(
@@ -5165,8 +5280,9 @@ async def _publish_comment_and_forward(
         config,
         button_key="comment_buttons",
     )
+    main_comment = None
     try:
-        await _copy_submission_to_discussion(
+        main_comment = await _copy_submission_to_discussion(
             context,
             submission,
             discussion_chat_id,
@@ -5196,7 +5312,7 @@ async def _publish_comment_and_forward(
         if discussion_chat_id is None or discussion_message_id is None:
             raise RuntimeError("重新获取的评论讨论组映射无效")
         try:
-            await _copy_submission_to_discussion(
+            main_comment = await _copy_submission_to_discussion(
                 context,
                 submission,
                 discussion_chat_id,
@@ -5210,6 +5326,10 @@ async def _publish_comment_and_forward(
                     "请确认频道的讨论组未迁移、主帖仍可打开，然后重新审核。"
                 ) from retry_exc
             raise
+    submission["main_discussion_chat_id"] = discussion_chat_id
+    submission["main_discussion_message_id"] = _as_int(
+        getattr(main_comment, "message_id", None)
+    )
     submission["forward_channel_id"] = forward_channel_id
     forwarded = await _copy_submission_to_channel(
         context,
@@ -5220,7 +5340,6 @@ async def _publish_comment_and_forward(
     )
     if getattr(forwarded, "scheduled", False):
         return forwarded
-    _append_report_comment(submission, forwarded)
     await _publish_comment_to_backup_discussion(
         context,
         submission,
@@ -5228,6 +5347,9 @@ async def _publish_comment_and_forward(
         main_channel_id,
         main_message_id,
     )
+    # This must happen after the backup copy: _append_report_comment persists
+    # all three public message IDs for future administrator edits.
+    _append_report_comment(submission, forwarded)
     return forwarded
 
 

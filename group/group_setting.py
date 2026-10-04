@@ -110,7 +110,7 @@ LOTTERY_TOGGLE_FIELDS = [
     ("talk_points_enabled", "发言积分"),
     ("checkin_points_enabled", "签到积分"),
     ("invite_points_enabled", "邀请积分"),
-    ("invite_username_enabled", "邀请必须有用户名"),
+    ("invite_username_enabled", "无用户名不加积分"),
 ]
 
 TALK_LOTTERY_TOGGLE_FIELDS = [
