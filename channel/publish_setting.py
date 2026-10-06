@@ -2518,7 +2518,7 @@ def _append_report_comment(submission: dict, forwarded_message) -> None:
     # Persist every public copy of the comment.  The administrator's report
     # editor needs these exact IDs to edit the forwarding-channel copy and the
     # replies below the main/backup channel posts in place.
-    comments.append({
+    comment = {
         "author": str(submission.get("report_author") or "用户"),
         "content": str(submission.get("report_content") or "[评论内容]"),
         "forward_channel_id": _as_int(submission.get("forward_channel_id")),
@@ -2528,7 +2528,11 @@ def _append_report_comment(submission: dict, forwarded_message) -> None:
         "backup_discussion_chat_id": _as_int(submission.get("backup_discussion_chat_id")),
         "backup_discussion_message_id": _as_int(submission.get("backup_discussion_message_id")),
         "created_at": int(time.time()),
-    })
+    }
+    button_config = submission.get("comment_button_config")
+    if isinstance(button_config, dict):
+        comment["comment_button_config"] = button_config
+    comments.append(comment)
     if len(comments) > 1000:
         del comments[:-1000]
     _save_comment_reports(data)
@@ -3242,20 +3246,57 @@ def _report_comment_detail_view(
     return text, InlineKeyboardMarkup(rows)
 
 
+def _comment_button_config_snapshot(config: dict) -> dict:
+    """Store the exact comment-button setup used when a comment is published."""
+    return {
+        "bottom_comment_buttons_enabled": bool(
+            (config or {}).get("bottom_comment_buttons_enabled", False)
+        ),
+        "comment_buttons": [
+            {
+                "text": str(button.get("text") or "").strip(),
+                "url": str(button.get("url") or "").strip(),
+            }
+            for button in _publish_buttons(config or {}, "comment_buttons")
+            if str(button.get("text") or "").strip()
+            and str(button.get("url") or "").strip()
+        ],
+    }
+
+
+def _report_comment_reply_markup(comment: dict):
+    """Rebuild the keyboard attached to a comment before its body is edited.
+
+    Older report records did not save a button snapshot, so use the current
+    comment-button configuration for them. New records retain their original
+    button layout even if the configuration changes later.
+    """
+    snapshot = comment.get("comment_button_config") if isinstance(comment, dict) else None
+    config = snapshot if isinstance(snapshot, dict) else load_publish_config()
+    return publish_buttons_keyboard(config, button_key="comment_buttons")
+
+
 async def _edit_report_comment_message(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
     message_id: int,
     content: str,
     destination: str,
+    *,
+    reply_markup=None,
 ) -> bool:
-    """Edit a copied comment, handling both text comments and media captions."""
+    """Edit a copied comment while retaining its preview and inline buttons."""
     try:
         await context.bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
             text=content,
-            disable_web_page_preview=True,
+            # Edited comments should behave like newly posted comments: URLs
+            # retain Telegram's link preview instead of being silently hidden.
+            disable_web_page_preview=False,
+            # Passing the existing configured keyboard prevents Telegram from
+            # removing the buttons during the text edit.
+            reply_markup=reply_markup,
         )
         return True
     except BadRequest as text_exc:
@@ -3288,6 +3329,7 @@ async def _edit_report_comment_message(
             chat_id=chat_id,
             message_id=message_id,
             caption=content,
+            reply_markup=reply_markup,
         )
         return True
     except Exception as caption_exc:
@@ -3316,6 +3358,7 @@ async def _sync_report_comment_edit(
         ("备用频道评论区", "backup_discussion_chat_id", "backup_discussion_message_id"),
     )
     synced = untracked = failed = 0
+    reply_markup = _report_comment_reply_markup(comment)
     seen = set()
     for destination, chat_key, message_key in targets:
         chat_id = _as_int(comment.get(chat_key))
@@ -3328,7 +3371,12 @@ async def _sync_report_comment_edit(
             continue
         seen.add(target_key)
         if await _edit_report_comment_message(
-            context, chat_id, message_id, content, destination
+            context,
+            chat_id,
+            message_id,
+            content,
+            destination,
+            reply_markup=reply_markup,
         ):
             synced += 1
         else:
@@ -5276,6 +5324,9 @@ async def _publish_comment_and_forward(
     # is shown as a native comment below the original channel post.  Unlike the
     # channel post itself, a discussion reply can safely carry the configured
     # comment buttons.
+    # Keep a serializable snapshot so later administrator edits can put back
+    # the exact button layout that was attached to this comment.
+    submission["comment_button_config"] = _comment_button_config_snapshot(config)
     comment_reply_markup = publish_buttons_keyboard(
         config,
         button_key="comment_buttons",

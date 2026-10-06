@@ -1,3 +1,5 @@
+from typing import Optional
+
 from info.economy import change_points
 from utils import POINTS_REWARD_LOG_FILE, bot_now, load_json, save_json
 
@@ -99,7 +101,15 @@ def _get_user_day_log(data: dict, chat_id: str, user_id: str) -> dict:
     )
 
 
-def award_talk_points(chat_id: str, user_id: str, text: str, cfg: dict) -> int:
+def award_talk_points(
+    chat_id: str,
+    user_id: str,
+    text: str,
+    cfg: dict,
+    *,
+    name: Optional[str] = None,
+    username: Optional[str] = None,
+) -> int:
     settings = get_talk_points_config(cfg)
     if not settings["enabled"]:
         return 0
@@ -119,7 +129,14 @@ def award_talk_points(chat_id: str, user_id: str, text: str, cfg: dict) -> int:
     awarded = min(settings["amount"], remaining)
     if awarded <= 0:
         return 0
-    change_points(chat_id, user_id, awarded, reason="发言积分")
+    change_points(
+        chat_id,
+        user_id,
+        awarded,
+        reason="发言积分",
+        name=name,
+        telegram_username=username,
+    )
     day_log["talk"] = awarded_today + awarded
     _save_reward_log(data)
     return awarded

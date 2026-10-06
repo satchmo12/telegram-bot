@@ -4,8 +4,13 @@ from email.mime import application
 from html import escape
 import re
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import CommandHandler, ContextTypes
-from telegram.ext import CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 from telegram.helpers import mention_html
 
 from command_router import register_command
@@ -41,6 +46,7 @@ VALID_ATTRIBUTES = {
 
 DEFAULT_USER_DATA = {
     "name": None,
+    "username": None,
     "balance": 100,
     "points": 0,
     "stamina": 100,
@@ -72,7 +78,12 @@ def get_richest_users(chat_id: str):
     return sorted_users
 
 
-def ensure_user_exists(chat_id, user_id, username=None):
+_USERNAME_UNSET = object()
+_TELEGRAM_USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
+
+
+def ensure_user_exists(chat_id, user_id, name=None, telegram_username=_USERNAME_UNSET):
+    """Create/update an economy user while retaining its public username."""
     chat_id, user_id = str(chat_id), str(user_id)
     chat = load_group_info(chat_id)
     users = chat.setdefault("users", {})
@@ -81,16 +92,74 @@ def ensure_user_exists(chat_id, user_id, username=None):
     if user_id not in users:
         users[user_id] = DEFAULT_USER_DATA.copy()
         changed = True
-    if username and users[user_id].get("name") != username:
-        users[user_id]["name"] = username
+
+    user_data = users[user_id]
+    if name and user_data.get("name") != name:
+        user_data["name"] = name
         changed = True
 
-    if users[user_id].get("username") != str(user_id):
-        users[user_id]["username"] = str(user_id)
-        changed = True
+    # Omitted callers leave the stored username untouched. Passing None from a
+    # Telegram User clears a username that the user has removed.
+    if telegram_username is not _USERNAME_UNSET:
+        normalized_username = (
+            str(telegram_username).strip().lstrip("@")
+            if telegram_username
+            else None
+        )
+        if user_data.get("username") != normalized_username:
+            user_data["username"] = normalized_username
+            changed = True
 
     if changed:
         save_group_info(chat_id, chat)
+
+
+def _leaderboard_user_link(info: dict, *, silent: bool) -> str:
+    """Return a blue profile URL without creating an @-mention.
+
+    Only public Telegram usernames have a regular ``t.me`` URL. Old records
+    stored a numeric user ID in ``username``; reject that value and render it as
+    text rather than producing a broken link or an inline mention.
+    """
+    name = info.get("name") or "未知用户"
+    safe_name = escape(str(name))
+    username = str(info.get("username") or "").strip().lstrip("@")
+
+    if silent or not _TELEGRAM_USERNAME_RE.fullmatch(username):
+        return safe_name
+
+    return f'<a href="https://t.me/{escape(username, quote=True)}">{safe_name}</a>'
+
+
+# Avoid repeatedly reading the same group file for unchanged profiles.
+_USER_IDENTITY_CACHE = {}
+
+
+async def sync_economy_user_identity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Persist a sender's name and public username before other handlers run.
+
+    Economy records can be created by check-in, games, invitations, or message
+    rewards. This handler makes the first ordinary message from a user enough
+    to save their profile; users no longer need to run "用户信息" first.
+    """
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or user.is_bot or not chat:
+        return
+
+    chat_id = str(chat.id)
+    user_id = str(user.id)
+    identity = (user.full_name, user.username)
+    cache_key = (chat_id, user_id)
+    if _USER_IDENTITY_CACHE.get(cache_key) == identity:
+        return
+
+    ensure_user_exists(chat_id, user_id, user.full_name, user.username)
+    _USER_IDENTITY_CACHE[cache_key] = identity
+
+    # Bound the cache in long-running bots. It is only an I/O optimization.
+    if len(_USER_IDENTITY_CACHE) > 50_000:
+        _USER_IDENTITY_CACHE.clear()
 
 
 def get_user_data(chat_id, user_id):
@@ -192,8 +261,16 @@ def get_point_logs(chat_id, user_id) -> list[dict]:
     )
 
 
-def change_points(chat_id, user_id, amount, reason: str = "积分变动"):
-    """Change points and persist a transaction record with its resulting balance."""
+def change_points(
+    chat_id,
+    user_id,
+    amount,
+    reason: str = "积分变动",
+    *,
+    name=None,
+    telegram_username=_USERNAME_UNSET,
+):
+    """Change points, optionally refresh identity data, and persist a transaction."""
     chat_id, user_id = str(chat_id), str(user_id)
     requested_delta = _normalize_points(amount)
     group_data = load_group_info(chat_id)
@@ -206,6 +283,15 @@ def change_points(chat_id, user_id, amount, reason: str = "积分变动"):
     if not isinstance(user_data, dict):
         user_data = DEFAULT_USER_DATA.copy()
         users[user_id] = user_data
+
+    if name:
+        user_data["name"] = name
+    if telegram_username is not _USERNAME_UNSET:
+        user_data["username"] = (
+            str(telegram_username).strip().lstrip("@")
+            if telegram_username
+            else None
+        )
 
     old_balance = _normalize_points(user_data.get("points"))
     new_balance = max(0, min(old_balance + requested_delta, 999999))
@@ -376,12 +462,12 @@ async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 判断是否回复了其他用户
     if update.message and update.message.reply_to_message:
         target = update.message.reply_to_message.from_user
-        ensure_user_exists(chat_id, target.id, target.full_name)
+        ensure_user_exists(chat_id, target.id, target.full_name, target.username)
         info = get_user_data(chat_id, target.id)
         title = "👤 用户信息"
         name = info.get("name", target.full_name)
     else:
-        ensure_user_exists(chat_id, user.id, user.full_name)
+        ensure_user_exists(chat_id, user.id, user.full_name, user.username)
         info = get_user_data(chat_id, user.id)
         title = "👤 个人信息"
         name = info.get("name", user.full_name)
@@ -406,7 +492,7 @@ async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @register_command("我的金币", "金币")
 async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, chat_id = update.effective_user, update.effective_chat.id
-    ensure_user_exists(chat_id, user.id, user.full_name)
+    ensure_user_exists(chat_id, user.id, user.full_name, user.username)
     balance = get_balance(chat_id, user.id)
     await safe_reply(
         update, context, f"💰 {user.first_name}，你当前的金币：{balance} 枚"
@@ -445,6 +531,7 @@ async def my_points(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id,
         user.id,
         user.full_name,
+        user.username,
     )
 
     points = get_points(chat_id, user.id)
@@ -506,10 +593,12 @@ async def send_paginated_list(
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.message.edit_text(
-            text, reply_markup=markup, parse_mode="HTML"  # 🔥 这里必须加 parse_mode
+            text, reply_markup=markup, parse_mode="HTML",  # 🔥 这里必须加 parse_mode
+            disable_web_page_preview=True,
         )
     else:
-        await update.message.reply_html(text, reply_markup=markup)
+        await update.message.reply_html(text, reply_markup=markup,
+                                        disable_web_page_preview=True,)
 
 
 @register_command("财富排行")
@@ -796,33 +885,32 @@ def get_rich_formatter(is_silent: bool):
 
 def get_points_formatter(is_silent: bool):
     def fmt(i, item):
-        uid, info = item
-
-        name = info.get("name") or f"用户{uid}"
+        _uid, info = item
         points = info.get("points", 0)
 
         if not points:
             return ""
 
-        if is_silent:
-            name = escape(name)
-        else:
-            name = mention_html(uid, name)
-
+        user_link = _leaderboard_user_link(info, silent=is_silent)
         medals = {
             1: "🥇",
             2: "🥈",
             3: "🥉",
         }
-
-        prefix = f"{i}"
         rank = medals.get(i, "")
 
-        return f"{prefix} {name} - {rank} {points} 积分"
+        return f"{i} {user_link} - {rank} {points} 积分"
 
     return fmt
 
 def register_economy_handlers(app):
+
+    # Run before command/game handlers so newly created economy records include
+    # the sender's public username from their very first group message.
+    app.add_handler(
+        MessageHandler(filters.ALL, sync_economy_user_identity),
+        group=-1,
+    )
 
     app.add_handler(CommandHandler("user_info", show_profile))
     app.add_handler(CommandHandler("balance", check_balance))

@@ -20,10 +20,15 @@ async def check_and_restrict_scam_user(update: Update, context: ContextTypes.DEF
 
     display_name = user.full_name  # 你也可以用 first_name
 
-    old_name = check_name_change(user.id, display_name, current_chat_id=chat.id)
+    old_name = check_name_change(
+        user.id,
+        display_name,
+        user.username,
+        current_chat_id=chat.id,
+    )
     if old_name:
         # 自动更新名字
-        ensure_user_exists(chat.id, user.id, display_name)
+        ensure_user_exists(chat.id, user.id, display_name, user.username)
         group_cfg = get_group_whitelist(context).get(str(chat.id), {})
         if bool(group_cfg.get("name_change_notice", False)):
             await update.message.reply_text(
@@ -92,12 +97,18 @@ def check_name_change(id: int, new_name: str, new_username: str = None, current_
                 info["full_name"] = new_name
                 changed = True
 
-            # username 静默更新
+            # username 静默更新。Telegram 用户名可能被移除，此时
+            # ``new_username`` 为 None，也需要覆盖旧值，避免一直保留过期账号。
             old_username = info.get("username")
-            if new_username and new_username != old_username:
+            normalized_username = (
+                str(new_username).strip().lstrip("@") if new_username else None
+            )
+            if normalized_username != old_username:
                 if old_username:
-                    info.setdefault("username_history", []).append(old_username)
-                info["username"] = new_username
+                    history = info.setdefault("username_history", [])
+                    if old_username not in history:
+                        history.append(old_username)
+                info["username"] = normalized_username
                 changed = True
 
             if changed:

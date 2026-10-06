@@ -4,10 +4,11 @@ import re
 import time
 from html import escape
 from collections import deque
+from typing import Optional
+from typing import Optional
 
 from telegram import ChatPermissions, Update
 from telegram.ext import MessageHandler, CommandHandler, ContextTypes, filters, CallbackQueryHandler
-from telegram.helpers import mention_html
 from datetime import datetime, timedelta
 import calendar
 from command_router import register_command
@@ -46,6 +47,24 @@ FREQ_CACHE_LAST_CLEANUP_TS = 0.0
 def _is_chat_silent(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> bool:
     cfg = get_group_whitelist(context).get(str(chat_id), {})
     return bool(cfg.get("silent", False))
+
+
+def _leaderboard_user_link(
+    name: str,
+    username: Optional[str],
+    *,
+    silent: bool,
+) -> str:
+    """Format a name as a non-mention profile link when possible."""
+
+    safe_name = escape(name or "未知用户")
+
+    if silent or not username:
+        return safe_name
+
+    safe_username = escape(username.lstrip("@"), quote=True)
+
+    return f'<a href="https://t.me/{safe_username}">{safe_name}</a>'
 
 
 def _get_user_freq_queue(chat_id: str, user_id: str) -> deque:
@@ -226,10 +245,16 @@ async def count_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_talk_data(context, chat_id)
     # print(f"📊 记录发言：{chat_id} - {user.full_name}")
     if user_id not in data:
-        data[user_id] = {"name": user.full_name, "daily": {}, "monthly": {}}
+        data[user_id] = {
+            "name": user.full_name,
+            "username": user.username,
+            "daily": {},
+            "monthly": {},
+        }
 
     user_data = data[user_id]
     user_data["name"] = user.full_name  # 更新最新名字
+    user_data["username"] = user.username  # 更新最新用户名
 
     # 增加每日计数
     user_data["daily"][date_key] = user_data["daily"].get(date_key, 0) + 1
@@ -250,7 +275,14 @@ async def count_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if update.message.text:
         try:
-            award_talk_points(chat_id, user_id, update.message.text, group_config)
+            award_talk_points(
+                chat_id,
+                user_id,
+                update.message.text,
+                group_config,
+                name=user.full_name,
+                username=user.username,
+            )
         except Exception as e:
             print(f"⚠️ 发言积分发放失败: chat={chat_id} user={user_id}, {e}")
 
@@ -422,25 +454,32 @@ async def talk_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=update.effective_chat.id, text=output)
         return
 
+    week_days = None
+    if mode == "week":
+        start_of_week = now - timedelta(days=now.weekday())
+        week_days = [
+            (start_of_week + timedelta(days=i)).strftime("%Y-%m-%d")
+            for i in range(now.weekday() + 1)
+        ]
+
     counts = []
     for user_id, user_data in data.items():
         name = user_data.get("name") or "未知用户"
-        count = 0
+        username = user_data.get("username")
 
         if mode == "today":
-            count = user_data["daily"].get(today, 0)
+            count = user_data.get("daily", {}).get(today, 0)
         elif mode == "yesterday":
-            count = user_data["daily"].get(yesterday, 0)
+            count = user_data.get("daily", {}).get(yesterday, 0)
         elif mode == "month":
-            count = user_data["monthly"].get(this_month, 0)
-        elif mode == "week":
-            start_of_week = now - timedelta(days=now.weekday())
-            for i in range((now - start_of_week).days + 1):
-                day_str = (start_of_week + timedelta(days=i)).strftime("%Y-%m-%d")
-                count += user_data["daily"].get(day_str, 0)
+            count = user_data.get("monthly", {}).get(this_month, 0)
+        else:  # mode == "week"
+            daily = user_data.get("daily", {})
+            count = sum(daily.get(day, 0) for day in week_days)
 
         if count > 0:
-            counts.append((name, user_id, count))
+            # Keep this tuple order identical in the callback below.
+            counts.append((name, username, user_id, count))
 
     if not counts:
         output = "暂无发言记录。"
@@ -450,30 +489,21 @@ async def talk_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=update.effective_chat.id, text=output)
         return
 
-    counts.sort(key=lambda x: x[2], reverse=True)
+    counts.sort(key=lambda item: item[3], reverse=True)
+    CHAT_TALK_COUNTS.setdefault(chat_id, {})[mode] = counts
 
-    # 缓存排行榜，用于翻页回调
-    if chat_id not in CHAT_TALK_COUNTS:
-        CHAT_TALK_COUNTS[chat_id] = {}
-    CHAT_TALK_COUNTS[chat_id][mode] = counts
-
-    # 设置标题
     title_map = {
         "today": "📅 今日发言排行榜",
         "yesterday": "📅 昨日发言排行榜",
         "week": "📅 本周发言排行榜",
-        "month": "📅 本月发言排行榜"
+        "month": "📅 本月发言排行榜",
     }
     title = title_map.get(mode, "📅 发言排行榜")
 
-    # 构造分页列表（HTML mention + 序号）
     items = []
-    for i, (name, user_id, count) in enumerate(counts):
-        safe_name = escape(name or "未知用户")
-        if is_silent:
-            items.append(f"{i+1}. {safe_name} - {count} 条")
-        else:
-            items.append(f"{i+1}. {mention_html(user_id, name or '未知用户')} - {count} 条")
+    for i, (name, username, _user_id, count) in enumerate(counts, 1):
+        user_link = _leaderboard_user_link(name, username, silent=is_silent)
+        items.append(f"{i}. {user_link} - {count} 条")
 
     await send_paginated_list(
         update,
@@ -481,16 +511,16 @@ async def talk_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         items,
         page=1,
         prefix=f"talktop_{mode}",
-        title=title
+        title=title,
     )
+
 
 # ====== 分页回调处理 ======
 async def talk_top_pagination_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    pattern = r"^talktop_(\w+)_(\d+)$"
-    match = re.match(pattern, query.data)
+    match = re.match(r"^talktop_(\w+)_(\d+)$", query.data)
     if not match:
         return
 
@@ -504,24 +534,22 @@ async def talk_top_pagination_callback(update: Update, context: ContextTypes.DEF
         await query.message.edit_text("暂无发言记录。")
         return
 
-    # 构造分页列表（HTML mention + 序号）
     items = []
-    for i, (name, user_id, count) in enumerate(counts):
-        safe_name = escape(name or "未知用户")
-        if is_silent:
-            items.append(f"{i+1}. {safe_name} - {count} 条")
-        else:
-            items.append(f"{i+1}. {mention_html(user_id, name or '未知用户')} - {count} 条")
+    for i, (name, username, _user_id, count) in enumerate(counts, 1):
+        user_link = _leaderboard_user_link(name, username, silent=is_silent)
+        items.append(f"{i}. {user_link} - {count} 条")
 
     title_map = {
         "today": "📅 今日发言排行榜",
         "yesterday": "📅 昨日发言排行榜",
         "week": "📅 本周发言排行榜",
-        "month": "📅 本月发言排行榜"
+        "month": "📅 本月发言排行榜",
     }
     title = title_map.get(mode, "📅 发言排行榜")
 
-    await send_paginated_list(update, context, items, page=page, prefix=f"talktop_{mode}", title=title)
+    await send_paginated_list(
+        update, context, items, page=page, prefix=f"talktop_{mode}", title=title
+    )
 
 
 @register_command("发言频率", "频率")

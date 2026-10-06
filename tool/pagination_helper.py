@@ -52,11 +52,12 @@ async def send_paginated_list(
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.message.edit_text(
-            "\n".join(text_lines), reply_markup=markup, parse_mode="HTML"
+            "\n".join(text_lines), reply_markup=markup, parse_mode="HTML", 
+            disable_web_page_preview=True,
         )
     else:
         await update.message.reply_text(
-            "\n".join(text_lines), reply_markup=markup, parse_mode="HTML"
+            "\n".join(text_lines), reply_markup=markup, parse_mode="HTML",disable_web_page_preview=True,
         )
 
 

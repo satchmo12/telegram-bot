@@ -164,10 +164,11 @@ async def record_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     # username 变更历史（可选）
-    history = old.get("username_history", [])
+    history = list(old.get("username_history") or [])
+    old_username = old.get("username")
 
-    if username_changed and old.get("username"):
-        history.append(old.get("username"))
+    if username_changed and old_username and old_username not in history:
+        history.append(old_username)
 
     if should_save:
         users[uid] = {
@@ -181,7 +182,7 @@ async def record_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_users(chat.id, users)
 
     # 你原本的逻辑
-    ensure_user_exists(chat.id, user.id, new_full_name)
+    ensure_user_exists(chat.id, user.id, new_full_name, new_username)
 
     # # 日志（可删）
     # if username_changed:

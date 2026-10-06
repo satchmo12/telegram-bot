@@ -2,6 +2,8 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
 
+from telegram.error import BadRequest
+
 from channel import publish_setting
 
 
@@ -19,12 +21,19 @@ class ReportCommentEditSyncTests(IsolatedAsyncioTestCase):
             "backup_discussion_message_id": 103,
         }
 
-        synced, untracked, failed = await publish_setting._sync_report_comment_edit(
-            context,
-            comment,
-            "管理员修订后的评论",
-        )
+        keyboard = object()
+        with patch.object(
+            publish_setting,
+            "_report_comment_reply_markup",
+            return_value=keyboard,
+        ) as reply_markup:
+            synced, untracked, failed = await publish_setting._sync_report_comment_edit(
+                context,
+                comment,
+                "管理员修订后的评论",
+            )
 
+        reply_markup.assert_called_once_with(comment)
         self.assertEqual((synced, untracked, failed), (3, 0, 0))
         self.assertEqual(context.bot.edit_message_text.await_count, 3)
         self.assertEqual(
@@ -33,6 +42,48 @@ class ReportCommentEditSyncTests(IsolatedAsyncioTestCase):
                 for call in context.bot.edit_message_text.await_args_list
             },
             {(-1001, 101), (-1002, 102), (-1003, 103)},
+        )
+        self.assertTrue(
+            all(
+                call.kwargs["disable_web_page_preview"] is False
+                for call in context.bot.edit_message_text.await_args_list
+            ),
+            "同步编辑时不应关闭 URL 预览",
+        )
+        self.assertTrue(
+            all(
+                call.kwargs["reply_markup"] is keyboard
+                for call in context.bot.edit_message_text.await_args_list
+            ),
+            "同步编辑时应保留评论下方的按钮",
+        )
+
+    async def test_media_comment_edit_retains_inline_buttons(self):
+        keyboard = object()
+        context = SimpleNamespace(
+            bot=SimpleNamespace(
+                edit_message_text=AsyncMock(
+                    side_effect=BadRequest("There is no text in the message to edit")
+                ),
+                edit_message_caption=AsyncMock(),
+            )
+        )
+
+        edited = await publish_setting._edit_report_comment_message(
+            context,
+            -1001,
+            101,
+            "带链接的图片评论",
+            "主频道评论区",
+            reply_markup=keyboard,
+        )
+
+        self.assertTrue(edited)
+        context.bot.edit_message_caption.assert_awaited_once_with(
+            chat_id=-1001,
+            message_id=101,
+            caption="带链接的图片评论",
+            reply_markup=keyboard,
         )
 
     async def test_new_comment_record_keeps_all_public_message_ids(self):

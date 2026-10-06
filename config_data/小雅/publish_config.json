@@ -1,5 +1,5 @@
 {
-    "channel_id": -1003585759564,
+    "channel_id": -1003878817420,
     "review_enabled": true,
     "daily_limit": 0,
     "ads_enabled": false,
@@ -93,9 +93,9 @@
         }
     ],
     "pending_history_post_migration": {
-        "old_channel_id": -1004426822084,
-        "new_channel_id": -1003585759564,
-        "changed_at": 1789570371
+        "old_channel_id": -1003585759564,
+        "new_channel_id": -1003878817420,
+        "changed_at": 1791270117
     },
     "channel_change_history": [
         {
@@ -107,6 +107,11 @@
             "old_channel_id": -1004426822084,
             "new_channel_id": -1003585759564,
             "changed_at": 1789570371
+        },
+        {
+            "old_channel_id": -1003585759564,
+            "new_channel_id": -1003878817420,
+            "changed_at": 1791270117
         }
     ],
     "keyword_group_reply_enabled": true,
@@ -121,7 +126,7 @@
             "enabled": true
         }
     ],
-    "backup_channel_id": -1003968770671,
+    "backup_channel_id": -1004432006940,
     "keyword_post_search_display_mode": "main",
     "backup_channel_use_telethon": true,
     "backup_channel_session": "main",
@@ -143,7 +148,7 @@
         "骗子",
         "骚扰"
     ],
-    "bottom_comment_buttons_enabled": false,
+    "bottom_comment_buttons_enabled": true,
     "comment_buttons": [
         {
             "id": 1,
