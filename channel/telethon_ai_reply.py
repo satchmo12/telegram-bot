@@ -16,8 +16,8 @@ PROTOCOL_AI_REPLY_FILE = "data/protocol_ai_reply.json"
 # replying in every group until an owner enables a specific group in the panel.
 DEFAULT_SETTINGS = {
     "enabled": False,
-    "probability_percent": 100,
-    "min_interval_sec": 3,
+    "probability_percent": 50,
+    "min_interval_sec": 10,
     "max_replies_per_hour": 1000,
 }
 CONTEXT_LIMIT = 1
@@ -191,7 +191,7 @@ async def handle_protocol_group_message(bot_name: str, session_name: str, client
     text = (getattr(event, "raw_text", None) or getattr(message, "message", None) or "").strip()
     if not text or text.startswith("/") or len(text) > MAX_MESSAGE_LENGTH:
         return
-    print(f"[协议号AI][RECV] 收到群消息 session={session_name} group={chat_id}: {text!r}")
+    # print(f"[协议号AI][RECV] 收到群消息 session={session_name} group={chat_id}: {text!r}")
 
     key = _chat_key(bot_name, session_name, int(chat_id))
     sender_id = getattr(event, "sender_id", 0) or 0

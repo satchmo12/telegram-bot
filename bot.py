@@ -111,19 +111,11 @@ async def show_menu(update, context):
 
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
+        # Telegram rejects an empty message body, which prevents /start from
+        # continuing to the welcome panel and makes it look unresponsive.
         text="请选择功能：",
-        reply_markup=reply_markup
+        reply_markup=reply_markup,
     )
-
-    # 注意：ReplyKeyboard 的按钮无法“一键打开链接”，只能发送文本。
-    # 需要用 InlineKeyboard 的 url 按钮才能做到点一次直接跳转。
-    # await context.bot.send_message(
-    #     chat_id=update.effective_chat.id,
-    #     text="快捷入口：",
-    #     reply_markup=InlineKeyboardMarkup(
-    #         [[InlineKeyboardButton("招商负责人（点此跳转）", url="https://t.me/mr566")]]
-    #     ),
-    # )
 
 async def hide_menu(update, context):
     await context.bot.send_message(
@@ -643,11 +635,31 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
 
 START_WELCOME_FILE = "config_data/start_welcome.json"
 START_WELCOME_EDIT_KEY = "start_welcome_editing"
+START_REPLY_KEYBOARD_CONFIG_KEY = "show_reply_keyboard"
 
 
 def _load_start_welcome_config() -> dict:
     data = load_json(START_WELCOME_FILE)
     return data if isinstance(data, dict) else {}
+
+
+def _start_reply_keyboard_enabled() -> bool:
+    """Whether a normal private /start should send the bottom reply keyboard."""
+    return bool(_load_start_welcome_config().get(START_REPLY_KEYBOARD_CONFIG_KEY, True))
+
+
+def _set_start_reply_keyboard_enabled(enabled: bool) -> None:
+    config = _load_start_welcome_config()
+    config[START_REPLY_KEYBOARD_CONFIG_KEY] = bool(enabled)
+    save_json(START_WELCOME_FILE, config)
+
+
+def _reset_start_welcome_text() -> None:
+    """Restore only the welcome copy, leaving /start keyboard preference intact."""
+    config = _load_start_welcome_config()
+    config.pop("text", None)
+    config.pop("entities", None)
+    save_json(START_WELCOME_FILE, config)
 
 
 def _can_configure_start_welcome(context: ContextTypes.DEFAULT_TYPE, user) -> bool:
@@ -792,7 +804,10 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update, context, context.args[0]
         ):
             return
-        await show_menu(update, context)
+        # The bottom ReplyKeyboard is optional. The inline start panel below
+        # remains available regardless of this setting.
+        if _start_reply_keyboard_enabled():
+            await show_menu(update, context)
     else:
         return
 
@@ -1048,6 +1063,13 @@ def _build_start_panel_rows(
             owner_row.append(InlineKeyboardButton("👥多管理员", callback_data="adm:panel"))
         if can_config_welcome:
             owner_row.append(InlineKeyboardButton("✏️欢迎词", callback_data="welcome:edit"))
+            keyboard_status = "✅" if _start_reply_keyboard_enabled() else "🚫"
+            owner_row.append(
+                InlineKeyboardButton(
+                    f"⌨️ /start 弹出键盘：{keyboard_status}",
+                    callback_data="welcome:keyboard_toggle",
+                )
+            )
         if owner_row:
             # rows.append(owner_row)
             # 每两个按钮一行
@@ -1109,6 +1131,17 @@ async def start_welcome_callback(update: Update, context: ContextTypes.DEFAULT_T
     if not _can_configure_start_welcome(context, update.effective_user):
         return await query.answer("仅机器人所有者且订阅有效时可以配置欢迎词。", show_alert=True)
     action = query.data.split(":", 1)[1]
+    if action == "keyboard_toggle":
+        enabled = not _start_reply_keyboard_enabled()
+        _set_start_reply_keyboard_enabled(enabled)
+        await query.answer(
+            "已开启 /start 底部键盘" if enabled else "已关闭 /start 底部键盘"
+        )
+        user_id = update.effective_user.id if update.effective_user else None
+        keyboard_rows = _build_start_panel_rows(context, user_id, update.effective_user)
+        return await query.edit_message_reply_markup(
+            reply_markup=InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
+        )
     if action == "cancel":
         context.user_data.pop(START_WELCOME_EDIT_KEY, None)
         await query.answer("已取消当前欢迎词输入。")
@@ -1124,7 +1157,7 @@ async def start_welcome_callback(update: Update, context: ContextTypes.DEFAULT_T
             disable_web_page_preview=True,
         )
     if action == "reset":
-        save_json(START_WELCOME_FILE, {})
+        _reset_start_welcome_text()
         context.user_data.pop(START_WELCOME_EDIT_KEY, None)
         await query.answer("已恢复默认欢迎词。")
         bot_name = context.application.bot_data.get("name", "机器人")

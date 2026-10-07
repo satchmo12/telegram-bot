@@ -1009,7 +1009,15 @@
         "name": "Коля",
         "username": "KolyaDanilov98",
         "join_time": 1791120769,
-        "last_active": 1791199305,
+        "last_active": 1791285679,
         "blocked": false
+    },
+    "7984412340": {
+        "name": "9852892326",
+        "username": "",
+        "join_time": 1791344177,
+        "last_active": 1791344183,
+        "blocked": true,
+        "blocked_at": 1791347197
     }
 }

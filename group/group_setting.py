@@ -1136,7 +1136,7 @@ def _build_force_target_manager_keyboard(chat_id: str, targets: list[str]) -> In
     rows.append([
         InlineKeyboardButton(
             "⬅️ 返回强制关注设置",
-            callback_data=f"{CALLBACK_PREFIX}:force_subscribe_back",
+            callback_data=f"{CALLBACK_PREFIX}:force_subscribe_back:{chat_id}",
         )
     ])
     return InlineKeyboardMarkup(rows)
@@ -3334,16 +3334,21 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             )
         _set_force_channels(chat_id_str, [])
         context.user_data.pop("group_setting_stage", None)
-        context.user_data.pop("group_setting_chat_id", None)
+        context.user_data["group_setting_chat_id"] = chat_id_str
         await query.answer("✅ 已清空", show_alert=False)
         return await _open_force_target_manager(query, context, chat_id_str)
     if action == "force_subscribe_back":
         context.user_data.pop("group_setting_stage", None)
-        chat_id_str = context.user_data.pop("group_setting_chat_id", None)
+        chat_id_str = (
+            parts[2] if len(parts) >= 3 else context.user_data.get("group_setting_chat_id")
+        )
+        if not chat_id_str:
+            return await query.answer("设置已失效，请重新打开强制关注设置。", show_alert=True)
+        context.user_data.pop("group_setting_chat_id", None)
         await query.answer()
-        if chat_id_str:
-            return await _open_force_subscribe_settings_panel(query, context, chat_id_str, user_id)
-        return
+        return await _open_force_subscribe_settings_panel(
+            query, context, chat_id_str, user_id
+        )
     if action == "business_coop_back":
         context.user_data.pop("group_setting_stage", None)
         chat_id_str = context.user_data.pop("group_setting_chat_id", None)
@@ -3817,7 +3822,7 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
             data[chat_id_str] = cfg
             save_json(GROUP_LIST_FILE, data)
             context.user_data.pop("group_setting_stage", None)
-            context.user_data.pop("group_setting_chat_id", None)
+            # context.user_data.pop("group_setting_chat_id", None)
             await update.message.reply_text(
                 f"✅ 已添加强制关注目标：{saved_targets[-1]}\n\n"
                 + _force_target_manager_text(chat_id_str),

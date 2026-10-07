@@ -93,8 +93,13 @@ MEDIA_GROUP_WAIT_SECONDS = 20.0
 # A manually published main-channel album is delivered in the same way: one
 # ``channel_post`` update per item.  Delay its backup copy until all items have
 # arrived, then use copy_messages/send_album so Telegram preserves the album.
+#
+# Some larger albums deliver a later channel_post a few seconds after the
+# earlier ones.  The timer is reset for every item, so this is a quiet-period
+# delay after the main channel finishes delivering the album—not a delay per
+# item.  Keep it long enough to avoid copying a partial album as two posts.
 MAIN_CHANNEL_MEDIA_GROUP_BACKUP_BUFFER_KEY = "publish_main_channel_media_group_backups"
-MAIN_CHANNEL_MEDIA_GROUP_BACKUP_WAIT_SECONDS = 3.0
+MAIN_CHANNEL_MEDIA_GROUP_BACKUP_WAIT_SECONDS = 8.0
 
 # =========================
 # 配置读写

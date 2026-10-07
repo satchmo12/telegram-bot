@@ -578,6 +578,17 @@ def format_rich_item_plain(i, item):
 async def send_paginated_list(
     update, context, items, page=1, prefix="page", format_item=None, title="列表"
 ):
+    if title == "💰 财富排行榜":
+        items = [
+            item for item in items
+            if item[1].get("balance", 0) != 0
+        ]
+    else:
+        items = [
+            item for item in items
+            if item[1].get("points", 0) != 0
+        ]
+        
     paginator = Paginator(items)
     page = max(1, min(page, paginator.total_pages))
     page_items = paginator.get_page(page)
@@ -872,6 +883,9 @@ def get_rich_formatter(is_silent: bool):
 
         name = info.get("name") or f"用户{uid}"
         balance = info.get("balance", 0)
+        
+        if not balance:
+            return ""
 
         if is_silent:
             name = escape(name)

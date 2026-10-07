@@ -96,6 +96,8 @@ async def guest_bot_handler(
     guest_message = (
         update.api_kwargs or {}
     ).get("guest_message")
+    
+    print(update)
 
     if not guest_message:
         print("ℹ️ 不是 Guest Message，忽略", flush=True)

@@ -57,7 +57,7 @@
         }
     ],
     "submission_enabled": true,
-    "random_view_enabled": true,
+    "random_view_enabled": false,
     "bottom_buttons_enabled": false,
     "proof_required": true,
     "reject_reason_required": true,
