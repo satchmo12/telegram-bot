@@ -39,6 +39,7 @@ from utils import (
     _can_manage,
     is_shared_session_name,
     is_super_admin,
+    get_runtime_bot_name,
     load_json,
     refresh_json_cache_if_changed,
     safe_reply,
@@ -83,6 +84,8 @@ TEMPLATE_FLOW_KEY = "publish_template_flow"
 USER_MARK_SETTING_KEY = "publish_user_mark_setting"
 USER_MARK_SELECTION_KEY = "publish_user_mark_selection"
 USER_MARK_COMMAND = "帅哥"
+MASTER_BOT_NAME = str(os.getenv("MASTER_BOT_NAME", "")).strip()
+COLLECTION_DISPLAY_SETTING_KEY = "publish_collection_display_setting_field"
 TEMPLATE_KEY_PATTERN = re.compile(r"\{([\w\-一-鿿]+)\}")
 
 # Telegram will send each item of a selected photo/video album as an individual
@@ -171,11 +174,20 @@ def load_publish_config():
         "checkin_duration_hours": 8,
         "checkin_user_label": "联系",
         "checkin_display_label": "艺名",
+        # Online roster grouping is displayed as: primary -> secondary -> users.
         "checkin_group_label": "",
+        "checkin_subgroup_label": "",
         "checkin_command_text": "打卡",
         "checkin_cancel_command_text": "取消打卡",
         "checkin_online_command_text": "在线宝宝",
         "checkin_online_text": "在线宝宝",
+        # Master-bot-only roster built from collected channel posts.
+        "collection_display_enabled": False,
+        "collection_display_command_text": "老师",
+        "collection_display_text": "收录老师",
+        "collection_display_label": "艺名",
+        "collection_display_group_label": "",
+        "collection_display_subgroup_label": "",
         # Reply to a user's group message with the fixed command “标记” to
         # query and optionally add configured user-mark labels.
         "user_mark_enabled": False,
@@ -1461,13 +1473,14 @@ def _checkin_display_value(
     return "在线用户"
 
 
-def _checkin_group_value(
+def _checkin_group_value_for_label(
     post: dict,
-    config: dict,
+    label: str,
     *,
     recover_from_keyword_index: bool = True,
 ) -> str:
-    label = str(config.get("checkin_group_label") or "").strip()
+    """Read one configured roster grouping value from a post."""
+    label = str(label or "").strip()
     if not label:
         return ""
     values = _checkin_field_values(
@@ -1478,6 +1491,236 @@ def _checkin_group_value(
     if values:
         return "、".join(_clean_keyword_value(item) for item in values)[:100]
     return "未分类"
+
+
+def _checkin_group_value(
+    post: dict,
+    config: dict,
+    *,
+    recover_from_keyword_index: bool = True,
+) -> str:
+    return _checkin_group_value_for_label(
+        post,
+        str(config.get("checkin_group_label") or ""),
+        recover_from_keyword_index=recover_from_keyword_index,
+    )
+
+
+def _checkin_subgroup_value(
+    post: dict,
+    config: dict,
+    *,
+    recover_from_keyword_index: bool = True,
+) -> str:
+    return _checkin_group_value_for_label(
+        post,
+        str(config.get("checkin_subgroup_label") or ""),
+        recover_from_keyword_index=recover_from_keyword_index,
+    )
+
+
+def _group_online_checkin_posts(
+    posts: list[dict],
+    config: dict,
+    *,
+    recover_from_keyword_index: bool = True,
+) -> dict[str, dict[str, list[dict]]]:
+    """Group active check-in posts in primary -> secondary display order."""
+    grouped: dict[str, dict[str, list[dict]]] = {}
+    for post in posts:
+        primary = _checkin_group_value(
+            post,
+            config,
+            recover_from_keyword_index=recover_from_keyword_index,
+        )
+        secondary = _checkin_subgroup_value(
+            post,
+            config,
+            recover_from_keyword_index=recover_from_keyword_index,
+        )
+        grouped.setdefault(primary, {}).setdefault(secondary, []).append(post)
+    return grouped
+
+
+def _collection_display_labels(config: dict) -> list[str]:
+    """Parse configured fields used for each collected-post roster item."""
+    raw = str((config or {}).get("collection_display_label") or "艺名")
+    labels = []
+    for label in re.split(r"[+＋,，、\n]+", raw):
+        label = label.strip()[:30]
+        if label and label not in labels:
+            labels.append(label)
+    return labels or ["艺名"]
+
+
+def _collection_display_value(post: dict, config: dict) -> str:
+    parts = []
+    for label in _collection_display_labels(config):
+        values = _checkin_field_values(post, label, recover_from_keyword_index=False)
+        if values:
+            parts.append("、".join(_clean_keyword_value(item) for item in values))
+    if parts:
+        return "".join(parts)[:100]
+    return "收录帖子"
+
+
+def _collection_post_username(post: dict) -> str:
+    """Find a Telegram username in any collected field, label-independent."""
+    fields = post.get("fields", {}) if isinstance(post, dict) else {}
+    if not isinstance(fields, dict):
+        return ""
+    for values in fields.values():
+        for value in values if isinstance(values, list) else []:
+            match = re.search(r"@([A-Za-z0-9_]{5,32})", str(value or ""))
+            if match:
+                return match.group(1).lower()
+    return ""
+
+
+def _load_collection_display_posts(config: dict) -> list[dict]:
+    """Rebuild the latest structured record for each indexed channel identity.
+
+    Posts sharing the same Telegram username are intentionally represented by
+    their newest post only. The username may appear under any configured label,
+    not only a field named “联系”.
+    """
+    target_channel_id = _as_int((config or {}).get("channel_id"))
+    posts: dict[tuple[int, int], dict] = {}
+    for records in _load_keyword_map().values():
+        for record in records if isinstance(records, list) else []:
+            if not isinstance(record, dict):
+                continue
+            channel_id = _as_int(record.get("channel_id"))
+            message_id = _as_int(record.get("channel_message_id"))
+            if channel_id is None or message_id is None or message_id <= 0:
+                continue
+            if target_channel_id is not None and channel_id != target_channel_id:
+                continue
+            key = (channel_id, message_id)
+            post = posts.setdefault(
+                key,
+                {
+                    "channel_id": channel_id,
+                    "message_id": message_id,
+                    "created_at": 0,
+                    "fields": {},
+                },
+            )
+            label = str(record.get("label") or "").strip()
+            value = str(record.get("raw") or record.get("key") or "").strip()
+            if label and value:
+                values = post["fields"].setdefault(label, [])
+                if value not in values:
+                    values.append(value)
+            try:
+                post["created_at"] = max(
+                    int(post.get("created_at", 0) or 0),
+                    int(record.get("created_at", 0) or 0),
+                )
+            except (TypeError, ValueError):
+                pass
+    ordered_posts = sorted(
+        posts.values(),
+        key=lambda post: (
+            int(post.get("created_at", 0) or 0),
+            int(post.get("message_id", 0) or 0),
+        ),
+        reverse=True,
+    )
+    latest_posts = []
+    seen_usernames = set()
+    for post in ordered_posts:
+        username = _collection_post_username(post)
+        if username:
+            if username in seen_usernames:
+                continue
+            seen_usernames.add(username)
+        latest_posts.append(post)
+    return latest_posts
+
+
+def _group_collection_display_posts(posts: list[dict], config: dict) -> dict[str, dict[str, list[dict]]]:
+    """Group collected posts by the configured primary and secondary fields."""
+    primary_label = str((config or {}).get("collection_display_group_label") or "")
+    secondary_label = str((config or {}).get("collection_display_subgroup_label") or "")
+    grouped: dict[str, dict[str, list[dict]]] = {}
+    for post in posts:
+        primary = _checkin_group_value_for_label(
+            post, primary_label, recover_from_keyword_index=False
+        )
+        secondary = _checkin_group_value_for_label(
+            post, secondary_label, recover_from_keyword_index=False
+        )
+        grouped.setdefault(primary, {}).setdefault(secondary, []).append(post)
+    return grouped
+
+
+def _is_master_runtime_bot() -> bool:
+    return bool(MASTER_BOT_NAME) and get_runtime_bot_name() == MASTER_BOT_NAME
+
+
+def _is_master_bot_context(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    try:
+        bot_name = str(context.application.bot_data.get("name", "")).strip()
+    except Exception:
+        bot_name = ""
+    return bool(MASTER_BOT_NAME) and bot_name == MASTER_BOT_NAME
+
+
+def _collection_display_command_text(config: dict) -> str:
+    return _checkin_command_text(config, "collection_display_command_text", "老师")
+
+
+async def _reply_collection_display(message, context: ContextTypes.DEFAULT_TYPE, config: dict) -> None:
+    posts = _load_collection_display_posts(config)
+    if not posts:
+        await message.reply_text("当前暂无收录内容。")
+        return
+
+    grouped = _group_collection_display_posts(posts, config)
+    title = _checkin_command_text(config, "collection_display_text", "收录老师")
+    lines = [f"📚 {title}"]
+    link_items = []
+
+    for primary, subgrouped_posts in grouped.items():
+        if primary:
+            lines.extend(["", f"【{primary}】"])
+        for secondary, group_posts in subgrouped_posts.items():
+            if secondary:
+                lines.append(f"〔{secondary}〕")
+            names = []
+            for post in group_posts:
+                name_text = _collection_display_value(post, config)
+                names.append(name_text)
+                link = _fallback_channel_message_link(
+                    _as_int(post.get("channel_id")), _as_int(post.get("message_id"))
+                )
+                if link:
+                    link_items.append((name_text, link))
+            if names:
+                lines.append("  ".join(names))
+
+    result_text = "\n".join(lines)
+    entities = []
+    search_start = 0
+    for name_text, link in link_items:
+        offset = result_text.find(name_text, search_start)
+        if offset >= 0:
+            entities.append(
+                MessageEntity(
+                    type=MessageEntity.TEXT_LINK,
+                    offset=offset,
+                    length=len(name_text),
+                    url=link,
+                )
+            )
+            search_start = offset + len(name_text)
+    entities = MessageEntity.adjust_message_entities_to_utf_16(result_text, entities)
+    await message.reply_text(
+        result_text,
+        entities=entities or None,
+        disable_web_page_preview=True,
+    )
 
 
 async def _handle_checkin_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -1493,7 +1736,16 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
     cancel_command = _checkin_command_text(config, "checkin_cancel_command_text", "取消打卡")
     online_command = _checkin_command_text(config, "checkin_online_command_text", "在线宝宝")
     online_text = _checkin_command_text(config, "checkin_online_text", "在线宝宝")
-     
+    collection_command = _collection_display_command_text(config)
+
+    if command == collection_command:
+        if not _is_master_bot_context(context) or not bool(
+            config.get("collection_display_enabled", False)
+        ):
+            return False
+        await _reply_collection_display(msg, context, config)
+        return True
+
     if command not in {checkin_command, cancel_command, online_command}:
         return False
     if not bool(config.get("checkin_enabled", False)):
@@ -1594,23 +1846,20 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
     # Newly registered posts already persist their fields; old incomplete posts
     # use the lightweight “在线用户” fallback in this fast display path.
 
-    grouped: dict[str, list[dict]] = {}
-
+    valid_online_posts = []
     for post in online_posts:
         try:
             message_id = int(post.get("message_id", 0) or 0)
         except (TypeError, ValueError):
             message_id = 0
+        if message_id > 0:
+            valid_online_posts.append(post)
 
-        if message_id <= 0:
-            continue
-
-        group = _checkin_group_value(
-            post,
-            config,
-            recover_from_keyword_index=False,
-        )
-        grouped.setdefault(group, []).append(post)
+    grouped = _group_online_checkin_posts(
+        valid_online_posts,
+        config,
+        recover_from_keyword_index=False,
+    )
 
     lines = [f"🟢 {online_text}"]
     link_items = []
@@ -1625,27 +1874,28 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
         source_channels.add(channel_id)
         return _fallback_channel_message_link(channel_id, message_id)
 
-    for group, group_posts in grouped.items():
+    for group, subgrouped_posts in grouped.items():
         if group:
             lines.extend(["", f"【{group}】"])
 
-        names = []
+        for subgroup, group_posts in subgrouped_posts.items():
+            if subgroup:
+                lines.append(f"〔{subgroup}〕")
 
-        for post in group_posts:
-            link = checkin_post_link(post)
-            name_text = _checkin_display_value(
-                post,
-                config,
-                recover_from_keyword_index=False,
-            )
+            names = []
+            for post in group_posts:
+                link = checkin_post_link(post)
+                name_text = _checkin_display_value(
+                    post,
+                    config,
+                    recover_from_keyword_index=False,
+                )
+                names.append(name_text)
+                if link:
+                    link_items.append((name_text, link))
 
-            names.append(name_text)
-
-            if link:
-                link_items.append((name_text, link))
-
-        if names:
-            lines.append("  ".join(names))
+            if names:
+                lines.append("  ".join(names))
 
     result_text = "\n".join(lines)
 
@@ -1695,6 +1945,7 @@ async def _checkin_group_interceptor(update: Update, context: ContextTypes.DEFAU
 
 def _checkin_settings_text(config: dict) -> str:
     group_label = str(config.get("checkin_group_label") or "").strip() or "不分组"
+    subgroup_label = str(config.get("checkin_subgroup_label") or "").strip() or "不分组"
     return "\n".join([
         "🟢 在线打卡设置",
         "",
@@ -1702,7 +1953,8 @@ def _checkin_settings_text(config: dict) -> str:
         f"有效时间：{_checkin_duration_seconds(config) // 3600} 小时",
         f"打卡用户名字段：{config.get('checkin_user_label') or '联系'}",
         f"展示文字字段：{config.get('checkin_display_label') or '艺名'}",
-        f"展示分组字段：{group_label}",
+        f"一级分组字段：{group_label}",
+        f"二级分组字段：{subgroup_label}",
         f"打卡文案：{_checkin_command_text(config, 'checkin_command_text', '打卡')}",
         f"取消文案：{_checkin_command_text(config, 'checkin_cancel_command_text', '取消打卡')}",
         f"在线展示文案：{_checkin_command_text(config, 'checkin_online_command_text', '在线宝宝')}",
@@ -1715,6 +1967,7 @@ def _checkin_settings_text(config: dict) -> str:
 def _checkin_settings_keyboard(config: dict) -> InlineKeyboardMarkup:
     enabled = bool(config.get("checkin_enabled", False))
     group_label = str(config.get("checkin_group_label") or "").strip() or "不分组"
+    subgroup_label = str(config.get("checkin_subgroup_label") or "").strip() or "不分组"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(
             f"{'✅' if enabled else '🚫'} 在线打卡",
@@ -1734,10 +1987,16 @@ def _checkin_settings_keyboard(config: dict) -> InlineKeyboardMarkup:
                 callback_data="publish:checkin_display_label",
             ),
         ],
-        [InlineKeyboardButton(
-            f"🗂 分组字段：{group_label}",
-            callback_data="publish:checkin_group_label",
-        )],
+        [
+            InlineKeyboardButton(
+                f"🗂 一级分组：{group_label}",
+                callback_data="publish:checkin_group_label",
+            ),
+            InlineKeyboardButton(
+                f"🗃 二级分组：{subgroup_label}",
+                callback_data="publish:checkin_subgroup_label",
+            ),
+        ],
         [
             InlineKeyboardButton(
                 f"✅ 打卡文案：{_checkin_command_text(config, 'checkin_command_text', '打卡')}",
@@ -1758,6 +2017,60 @@ def _checkin_settings_keyboard(config: dict) -> InlineKeyboardMarkup:
             )
         ],
         [InlineKeyboardButton("⬅️ 返回", callback_data="publish:back")],
+    ])
+
+
+def _collection_display_settings_text(config: dict) -> str:
+    group_label = str(config.get("collection_display_group_label") or "").strip() or "不分组"
+    subgroup_label = str(config.get("collection_display_subgroup_label") or "").strip() or "不分组"
+    return "\n".join([
+        "📚 收录展示设置（主机器人）",
+        "",
+        f"状态：{'✅ 开启' if config.get('collection_display_enabled', False) else '🚫 关闭'}",
+        f"触发文案：{_collection_display_command_text(config)}",
+        f"展示标题：{_checkin_command_text(config, 'collection_display_text', '收录老师')}",
+        f"展示字段：{config.get('collection_display_label') or '艺名'}",
+        f"一级分组字段：{group_label}",
+        f"二级分组字段：{subgroup_label}",
+        "",
+        "在群内发送触发文案（例如“老师”）即可按已收录频道帖子展示。",
+    ])
+
+
+def _collection_display_settings_keyboard(config: dict) -> InlineKeyboardMarkup:
+    enabled = bool(config.get("collection_display_enabled", False))
+    group_label = str(config.get("collection_display_group_label") or "").strip() or "不分组"
+    subgroup_label = str(config.get("collection_display_subgroup_label") or "").strip() or "不分组"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"{'✅' if enabled else '🚫'} 收录展示",
+            callback_data="publish:toggle_collection_display",
+        )],
+        [
+            InlineKeyboardButton(
+                f"💬 触发文案：{_collection_display_command_text(config)}",
+                callback_data="publish:collection_display_command_text",
+            ),
+            InlineKeyboardButton(
+                f"📌 展示标题：{_checkin_command_text(config, 'collection_display_text', '收录老师')}",
+                callback_data="publish:collection_display_text",
+            ),
+        ],
+        [InlineKeyboardButton(
+            f"📝 展示字段：{config.get('collection_display_label') or '艺名'}",
+            callback_data="publish:collection_display_label",
+        )],
+        [
+            InlineKeyboardButton(
+                f"🗂 一级分组：{group_label}",
+                callback_data="publish:collection_display_group_label",
+            ),
+            InlineKeyboardButton(
+                f"🗃 二级分组：{subgroup_label}",
+                callback_data="publish:collection_display_subgroup_label",
+            ),
+        ],
+        [InlineKeyboardButton("⬅️ 返回发布设置", callback_data="publish:back")],
     ])
 
 
@@ -6156,7 +6469,7 @@ def publish_setting_keyboard(config: dict):
     continuous_submission_enabled = bool(config.get("continuous_submission_enabled", True))
     report_link_enabled = bool(config.get("report_link_enabled", False))
     template_publish_enabled = bool(config.get("template_publish_enabled", False))
-    return InlineKeyboardMarkup([
+    rows = [
         [
             InlineKeyboardButton("📢 发布频道", callback_data="publish:channel"),
             InlineKeyboardButton("📝 审核设置", callback_data="publish:review"),
@@ -6249,7 +6562,14 @@ def publish_setting_keyboard(config: dict):
             InlineKeyboardButton("🧩 模板配置", callback_data="publish:template_settings"),
         ],
         [InlineKeyboardButton("⬅️ 返回", callback_data="start:back")]
-    ])
+    ]
+    if _is_master_runtime_bot():
+        # This management entry is deliberately visible only in the master bot.
+        rows.insert(
+            5,
+            [InlineKeyboardButton("📚 收录展示设置", callback_data="publish:collection_display_settings")],
+        )
+    return InlineKeyboardMarkup(rows)
 
 
 def publish_channel_keyboard(config: dict):
@@ -7315,6 +7635,60 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=_user_mark_settings_keyboard(config),
         )
 
+    if action in {
+        "collection_display_settings",
+        "toggle_collection_display",
+        "collection_display_command_text",
+        "collection_display_text",
+        "collection_display_label",
+        "collection_display_group_label",
+        "collection_display_subgroup_label",
+    }:
+        if not _is_master_bot_context(context):
+            return await query.answer("该设置仅主机器人可用。", show_alert=True)
+        if not has_admin_permission(context, query.from_user.id, "submission_config"):
+            return await query.answer("你没有收录展示配置权限。", show_alert=True)
+
+        if action == "collection_display_settings":
+            return await query.edit_message_text(
+                _collection_display_settings_text(config),
+                reply_markup=_collection_display_settings_keyboard(config),
+            )
+        if action == "toggle_collection_display":
+            config["collection_display_enabled"] = not bool(
+                config.get("collection_display_enabled", False)
+            )
+            save_publish_config(config)
+            return await query.edit_message_text(
+                _collection_display_settings_text(config),
+                reply_markup=_collection_display_settings_keyboard(config),
+            )
+
+        field_map = {
+            "collection_display_command_text": "collection_display_command_text",
+            "collection_display_text": "collection_display_text",
+            "collection_display_label": "collection_display_label",
+            "collection_display_group_label": "collection_display_group_label",
+            "collection_display_subgroup_label": "collection_display_subgroup_label",
+        }
+        prompt_map = {
+            "collection_display_command_text": "请输入群内触发展示的文案，例如：老师。",
+            "collection_display_text": "请输入展示标题，例如：收录老师。",
+            "collection_display_label": (
+                "请输入每条收录的展示字段，多个字段用 + 分隔。\n"
+                "例如：艺名+课费，展示效果：雪500p。"
+            ),
+            "collection_display_group_label": "请输入一级分组字段，例如：城市。发送“无”表示不分组。",
+            "collection_display_subgroup_label": "请输入二级分组字段，例如：区域。可留空；发送“无”表示不使用二级分组。",
+        }
+        context.user_data[COLLECTION_DISPLAY_SETTING_KEY] = field_map[action]
+        return await query.edit_message_text(
+            prompt_map[action],
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ 返回收录展示设置", callback_data="publish:collection_display_settings")
+            ]]),
+        )
+
     if action == "checkin_settings":
         return await query.edit_message_text(
             _checkin_settings_text(config),
@@ -7329,12 +7703,13 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=_checkin_settings_keyboard(config),
         )
 
-    if action in {"checkin_duration", "checkin_user_label", "checkin_display_label", "checkin_group_label", "checkin_command_text", "checkin_cancel_command_text", "checkin_online_command_text", "checkin_online_text"}:
+    if action in {"checkin_duration", "checkin_user_label", "checkin_display_label", "checkin_group_label", "checkin_subgroup_label", "checkin_command_text", "checkin_cancel_command_text", "checkin_online_command_text", "checkin_online_text"}:
         field_map = {
             "checkin_duration": "checkin_duration_hours",
             "checkin_user_label": "checkin_user_label",
             "checkin_display_label": "checkin_display_label",
             "checkin_group_label": "checkin_group_label",
+            "checkin_subgroup_label": "checkin_subgroup_label",
             "checkin_command_text": "checkin_command_text",
             "checkin_cancel_command_text": "checkin_cancel_command_text",
             "checkin_online_command_text": "checkin_online_command_text",
@@ -7347,7 +7722,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "请输入“在线宝宝”展示字段，多个字段用 + 分隔。\n"
                 "例如：艺名+课费，展示效果：雪500p。"
             ),
-            "checkin_group_label": "请输入“在线宝宝”分组字段，例如：区域 或 标签。发送“无”表示不分组。",
+            "checkin_group_label": "请输入“在线宝宝”一级分组字段，例如：城市。发送“无”表示不分组。",
+            "checkin_subgroup_label": "请输入“在线宝宝”二级分组字段，例如：区域。可留空；发送“无”表示不使用二级分组。",
             "checkin_command_text": "请输入用户打卡时发送的文案，例如：打卡。",
             "checkin_cancel_command_text": "请输入用户取消打卡时发送的文案，例如：取消打卡。",
             "checkin_online_command_text": "请输入展示在线帖子时发送的文案，例如：在线宝宝。",
@@ -8931,6 +9307,8 @@ async def _keyword_search_interceptor(update: Update, context: ContextTypes.DEFA
     """
     if await _handle_user_mark_settings_input(update, context):
         raise ApplicationHandlerStop
+    if await _handle_collection_display_settings_input(update, context):
+        raise ApplicationHandlerStop
     if await _handle_checkin_settings_input(update, context):
         raise ApplicationHandlerStop
     if await _handle_report_comment_edit_input(update, context):
@@ -8947,6 +9325,67 @@ async def _keyword_search_interceptor(update: Update, context: ContextTypes.DEFA
         raise ApplicationHandlerStop
     if await _handle_username_report_lookup(update, context):
         raise ApplicationHandlerStop
+
+
+async def _handle_collection_display_settings_input(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    field = context.user_data.get(COLLECTION_DISPLAY_SETTING_KEY)
+    if not field:
+        return False
+    if not update.message or not update.message.text or not update.effective_user:
+        return True
+    if not _is_master_bot_context(context) or not has_admin_permission(
+        context, update.effective_user.id, "submission_config"
+    ):
+        context.user_data.pop(COLLECTION_DISPLAY_SETTING_KEY, None)
+        return False
+
+    value = update.message.text.strip()
+    config = load_publish_config()
+    if value in {"取消", "返回"}:
+        context.user_data.pop(COLLECTION_DISPLAY_SETTING_KEY, None)
+        await update.message.reply_text(
+            "已取消收录展示设置修改。",
+            reply_markup=_collection_display_settings_keyboard(config),
+        )
+        return True
+
+    if field in {"collection_display_command_text", "collection_display_text"}:
+        if not value or len(value) > 30:
+            await update.message.reply_text("❗ 文案不能为空且不能超过 30 个字符。")
+            return True
+        if field == "collection_display_command_text":
+            reserved = {
+                _checkin_command_text(config, "checkin_command_text", "打卡"),
+                _checkin_command_text(config, "checkin_cancel_command_text", "取消打卡"),
+                _checkin_command_text(config, "checkin_online_command_text", "在线宝宝"),
+            }
+            if value in reserved:
+                await update.message.reply_text("❗ 触发文案不能与在线打卡文案重复，请换一个。")
+                return True
+        config[field] = value
+    elif field == "collection_display_label":
+        labels = _collection_display_labels({"collection_display_label": value})
+        if not value or not labels or len("+".join(labels)) > 30:
+            await update.message.reply_text(
+                "❗ 展示字段不能为空且不能超过 30 个字符。多个字段请用 + 分隔。"
+            )
+            return True
+        config[field] = "+".join(labels)
+    elif field in {"collection_display_group_label", "collection_display_subgroup_label"}:
+        config[field] = "" if value in {"无", "-"} else value[:30]
+    else:
+        context.user_data.pop(COLLECTION_DISPLAY_SETTING_KEY, None)
+        return False
+
+    save_publish_config(config)
+    context.user_data.pop(COLLECTION_DISPLAY_SETTING_KEY, None)
+    await update.message.reply_text(
+        "✅ 已保存收录展示设置。\n\n" + _collection_display_settings_text(config),
+        reply_markup=_collection_display_settings_keyboard(config),
+    )
+    return True
 
 
 async def _handle_checkin_settings_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -8980,7 +9419,7 @@ async def _handle_checkin_settings_input(update: Update, context: ContextTypes.D
                     "❗ 展示字段不能为空且不能超过 30 个字符。多个字段请用 + 分隔。"
                 )
             config[field] = "+".join(labels)
-        elif field == "checkin_group_label":
+        elif field in {"checkin_group_label", "checkin_subgroup_label"}:
             config[field] = "" if value in {"无", "-"} else value[:30]
         elif field in {"checkin_command_text", "checkin_cancel_command_text", "checkin_online_command_text", "checkin_online_text"}:
             if not value or len(value) > 30:
@@ -8990,6 +9429,7 @@ async def _handle_checkin_settings_input(update: Update, context: ContextTypes.D
                 _checkin_command_text(config, "checkin_cancel_command_text", "取消打卡"),
                 _checkin_command_text(config, "checkin_online_command_text", "在线宝宝"),
                 _checkin_command_text(config, "checkin_online_text", "在线宝宝"),
+                _collection_display_command_text(config),
             }
             other_values.discard(_checkin_command_text(config, field, ""))
             if value in other_values:
@@ -9079,6 +9519,8 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if await _handle_submission_reward_settings_input(update, context):
         raise ApplicationHandlerStop
     if await _handle_user_mark_settings_input(update, context):
+        raise ApplicationHandlerStop
+    if await _handle_collection_display_settings_input(update, context):
         raise ApplicationHandlerStop
     if await _handle_checkin_settings_input(update, context):
         raise ApplicationHandlerStop

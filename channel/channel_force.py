@@ -1,8 +1,10 @@
 import json
 import os
+import re
 import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.constants import ChatMemberStatus
+from telegram.error import BadRequest, Forbidden
 from telegram.ext import (
     CommandHandler,
     MessageHandler,
@@ -28,18 +30,25 @@ user_warn_cooldown = {}
 # A button click is an immediate manual check. These two fallbacks also release
 # members who follow the required channel but never click that button.
 FORCE_SUBSCRIBE_SWEEP_INTERVAL_SECONDS = 60
+# Do not emit the same unusable-target warning for every group message/sweep.
+FORCE_SUBSCRIBE_TARGET_ERROR_LOG_INTERVAL_SECONDS = 10 * 60
+_target_error_logged_at: dict[str, float] = {}
+_TARGET_USERNAME_RE = re.compile(r"^@[A-Za-z0-9_]{5,32}$")
 
 
 def _normalize_target(value: str) -> str:
     target = str(value or "").strip()
-    if target.startswith("https://t.me/"):
-        target = "@" + target.rsplit("/", 1)[-1].strip()
-    elif target.startswith("t.me/"):
-        target = "@" + target.rsplit("/", 1)[-1].strip()
-    if target and not target.startswith("@"):
-        target = f"@{target.lstrip('@')}"
-    # Public @usernames are required so Telegram can render a join button.
-    return target if len(target) > 1 else ""
+    # Accept a pasted @https://t.me/name as well as normal URLs/usernames.
+    candidate = target[1:].strip() if target.startswith("@") else target
+    if candidate.startswith(("https://t.me/", "http://t.me/", "t.me/")):
+        candidate = candidate.rsplit("/", 1)[-1].strip()
+    candidate = candidate.split("?", 1)[0].strip().lstrip("@")
+    if not candidate:
+        return ""
+    target = f"@{candidate}"
+    # Public @usernames are required so Telegram can render a join button and
+    # Telegram can resolve the target through getChatMember.
+    return target if _TARGET_USERNAME_RE.fullmatch(target) else ""
 
 
 def parse_force_subscribe_targets(value) -> list[str]:
@@ -170,15 +179,56 @@ async def _target_display_name(context: ContextTypes.DEFAULT_TYPE, target: str) 
         return target
 
 
+def _is_unverifiable_force_subscribe_target_error(exc: Exception) -> bool:
+    """Whether an API error means this configured target cannot be checked."""
+    detail = str(exc).lower()
+    markers = (
+        "participant_id_invalid",
+        "chat not found",
+        "username not found",
+        "bot is not a member",
+        "bot was kicked",
+        "forbidden",
+    )
+    return isinstance(exc, (BadRequest, Forbidden)) and any(
+        marker in detail for marker in markers
+    )
+
+
+def _log_force_subscribe_target_error(target: str, exc: Exception) -> None:
+    """Log unusable target configuration at most once per cooldown period."""
+    now = time.monotonic()
+    last_logged = _target_error_logged_at.get(target)
+    if (
+        last_logged is not None
+        and now - last_logged < FORCE_SUBSCRIBE_TARGET_ERROR_LOG_INTERVAL_SECONDS
+    ):
+        return
+    _target_error_logged_at[target] = now
+    print(
+        "强制关注目标不可验证（本次已跳过） "
+        f"target={target}: {exc}。请确认目标存在，且机器人已加入并具有查询成员权限。"
+    )
+
+
 async def _missing_force_subscribe_targets(
     context: ContextTypes.DEFAULT_TYPE, user_id: int, targets: list[str]
 ):
-    """Return missing targets, or None if Telegram could not verify a target."""
+    """Return valid required targets the user has not joined.
+
+    Explicit target-configuration errors (for example ``Participant_id_invalid``)
+    are skipped instead of repeatedly logging and keeping users muted forever.
+    Transient API failures still return ``None`` so no membership decision is
+    made from incomplete information.
+    """
     missing = []
     for target in targets:
         try:
             member = await context.bot.get_chat_member(target, user_id)
         except Exception as exc:
+            if _is_unverifiable_force_subscribe_target_error(exc):
+                _log_force_subscribe_target_error(target, exc)
+                continue
             print(f"强制关注检测失败 target={target}: {exc}")
             return None
         if member.status in {"left", "kicked"}:
@@ -209,6 +259,13 @@ async def _force_subscribe_keyboard(
 
 async def check_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_user or not update.effective_chat:
+        return
+
+    # A linked channel (or an admin sending as that channel) is not a normal
+    # group member and cannot complete a follow requirement. Never delete those
+    # channel-originated posts through the group force-subscribe flow.
+    sender_chat = getattr(update.message, "sender_chat", None)
+    if getattr(sender_chat, "type", "") == "channel":
         return
 
     chat_id = str(update.effective_chat.id)
@@ -251,13 +308,20 @@ async def check_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_id,
             permissions=ChatPermissions(can_send_messages=False),
         )
-        _record_mute(chat_id, user_id, targets)
-        name = group_member.user.full_name if group_member and group_member.user else ""
-        add_mute(chat_id, user_id, name, source="force_subscribe")
     except Exception as exc:
-        print("禁言失败：", exc)
+        # Do not warn or delete a message unless the restriction actually took
+        # effect. This protects channel owners/admins and any other protected
+        # member Telegram refuses to restrict.
+        print("禁言失败，跳过撤回消息：", exc)
+        return
 
-    reply_markup = await _force_subscribe_keyboard(context, targets, chat_id, user_id)
+    _record_mute(chat_id, user_id, missing_targets)
+    name = group_member.user.full_name if group_member and group_member.user else ""
+    add_mute(chat_id, user_id, name, source="force_subscribe")
+
+    reply_markup = await _force_subscribe_keyboard(
+        context, missing_targets, chat_id, user_id
+    )
     try:
         user = update.effective_user
         mention = user.full_name if user else "该用户"

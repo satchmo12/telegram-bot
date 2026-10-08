@@ -68,7 +68,8 @@
         "艺名",
         "联系",
         "区域",
-        "课费"
+        "课费",
+        "城市"
     ],
     "continuous_submission_enabled": false,
     "custom_bot_button_visible": true,
@@ -160,5 +161,12 @@
     "submission_reward_anonymous_points": 50,
     "submission_reward_real_points": 100,
     "submission_reward_group_id": -1003861180330,
-    "submission_reward_group_title": "卖白面"
+    "submission_reward_group_title": "卖白面",
+    "checkin_subgroup_label": "",
+    "collection_display_enabled": true,
+    "collection_display_command_text": "老师",
+    "collection_display_text": "收录老师",
+    "collection_display_label": "艺名+课费",
+    "collection_display_group_label": "城市",
+    "collection_display_subgroup_label": "区域"
 }
