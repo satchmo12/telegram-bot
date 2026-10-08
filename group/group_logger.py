@@ -1,8 +1,11 @@
 # group_logger.py
 
-from telegram import Update
-from telegram.ext import ChatMemberHandler, ContextTypes
+import asyncio
 import time
+
+from telegram import Update
+from telegram.error import BadRequest, Forbidden, TelegramError
+from telegram.ext import ChatMemberHandler, ContextTypes
 from utils import (
     INVITE_BOT_USERS_FILE,
     load_json,
@@ -129,9 +132,12 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if group.get("username", "") != username:
             group["username"] = username
             changed = True
-        if group.get("bot_in_group", True) is not True:
-            group["bot_in_group"] = True
-            changed = True
+        # Do not infer current membership from an ordinary message. Telegram may
+        # deliver a message queued before a leave/kick after the newer
+        # ``my_chat_member`` update, and flipping this back to True would make a
+        # departed group reappear in the configuration list. Membership is
+        # maintained exclusively by track_bot_group_membership (or the manual
+        # refresh action).
         if "bot_muted" not in group:
             group["bot_muted"] = False
             changed = True
@@ -214,7 +220,121 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _is_bot_in_group_status(status: str) -> bool:
-    return status in {"member", "administrator", "creator", "restricted"}
+    return str(status).lower() in {
+        "member",
+        "administrator",
+        "creator",
+        "owner",
+        "restricted",
+    }
+
+
+def _set_group_membership_state(cfg: dict, *, in_group: bool, bot_muted: bool) -> bool:
+    """Update a stored membership state and report whether it changed."""
+    changed = False
+    if cfg.get("bot_in_group") is not bool(in_group):
+        cfg["bot_in_group"] = bool(in_group)
+        changed = True
+    if cfg.get("bot_muted") is not bool(bot_muted):
+        cfg["bot_muted"] = bool(bot_muted)
+        changed = True
+    return changed
+
+
+def _bad_request_means_bot_is_absent(error: BadRequest) -> bool:
+    """Return whether Telegram's BadRequest confirms the bot cannot access a chat."""
+    detail = str(error).lower()
+    absent_markers = (
+        "chat not found",
+        "member not found",
+        "participant_id_invalid",
+        "user not found",
+        "bot was kicked",
+        "bot is not a member",
+    )
+    return any(marker in detail for marker in absent_markers)
+
+
+async def refresh_tracked_group_memberships(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    request_interval: float = 0.05,
+) -> dict[str, int]:
+    """Reconcile stored group membership against Telegram for the current bot.
+
+    This is an on-demand repair for historical records created while a
+    ``my_chat_member`` update was missed.  We deliberately retain the group
+    configuration; departed groups are marked with ``bot_in_group=false`` so
+    they disappear from the picker but can retain their settings if the bot is
+    invited back later.
+    """
+    groups = load_json(GROUPS_FILE)
+    if not isinstance(groups, dict):
+        groups = {}
+
+    summary = {"checked": 0, "active": 0, "departed": 0, "changed": 0, "failed": 0}
+    bot_id = getattr(context.bot, "id", None)
+    if not bot_id:
+        summary["failed"] = len(groups)
+        return summary
+
+    for chat_id_str, cfg in groups.items():
+        if not isinstance(cfg, dict):
+            continue
+        try:
+            chat_id = int(chat_id_str)
+        except (TypeError, ValueError):
+            continue
+        if chat_id >= 0:
+            continue
+
+        summary["checked"] += 1
+        in_group = False
+        bot_muted = False
+        confirmed = False
+        try:
+            member = await context.bot.get_chat_member(chat_id, bot_id)
+            status = str(getattr(member, "status", "")).lower()
+            in_group = _is_bot_in_group_status(status)
+            if status == "restricted":
+                bot_muted = not bool(getattr(member, "can_send_messages", False))
+                # Keep the existing membership-event behaviour: a bot that
+                # cannot speak is excluded from actionable group operations.
+                if bot_muted:
+                    in_group = False
+            confirmed = True
+        except Forbidden:
+            # Telegram only returns Forbidden once the bot can no longer
+            # access this chat, which confirms a leave/kick state.
+            confirmed = True
+        except BadRequest as error:
+            if _bad_request_means_bot_is_absent(error):
+                confirmed = True
+            else:
+                summary["failed"] += 1
+        except TelegramError:
+            summary["failed"] += 1
+
+        if not confirmed:
+            if request_interval:
+                await asyncio.sleep(request_interval)
+            continue
+
+        if in_group:
+            summary["active"] += 1
+        else:
+            summary["departed"] += 1
+        if _set_group_membership_state(
+            cfg, in_group=in_group, bot_muted=bot_muted
+        ):
+            summary["changed"] += 1
+
+        if request_interval:
+            await asyncio.sleep(request_interval)
+
+    if summary["changed"]:
+        save_json(GROUPS_FILE, groups)
+    return summary
 
 
 def _load_invite_bot_users() -> dict:

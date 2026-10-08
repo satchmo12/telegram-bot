@@ -7,13 +7,14 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
+    ChatMemberHandler,
     ContextTypes,
     filters,
 )
 
 from command_router import register_command
 from typing import Optional
-from utils import get_group_whitelist, load_json, save_json
+from utils import get_group_whitelist, load_json, safe_reply, save_json
 from group.grouplist import get_user_join_time
 from group.mute_registry import add_mute, remove_mute
 
@@ -23,6 +24,10 @@ MUTE_FILE = "data/force_subscribe_mute.json"
 
 # 用户提醒冷却
 user_warn_cooldown = {}
+
+# A button click is an immediate manual check. These two fallbacks also release
+# members who follow the required channel but never click that button.
+FORCE_SUBSCRIBE_SWEEP_INTERVAL_SECONDS = 60
 
 
 def _normalize_target(value: str) -> str:
@@ -256,11 +261,21 @@ async def check_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user = update.effective_user
         mention = user.full_name if user else "该用户"
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"⚠️ {mention} 请先关注下方全部频道或群组后再发言！关注后点击下方按钮解除禁言。",
-            reply_markup=reply_markup,
+        
+   
+        
+        await safe_reply(
+                update, 
+                context, 
+                text=f"⚠️ {mention} 请先关注下方全部频道或群组后再发言！关注后点击下方按钮解除禁言。",             
+                reply_markup=reply_markup,
         )
+        
+        # await context.bot.send_message(
+        #     chat_id=update.effective_chat.id,
+        #     text=f"⚠️ {mention} 请先关注下方全部频道或群组后再发言！关注后点击下方按钮解除禁言。",
+        #     reply_markup=reply_markup,
+        # )
     except Exception as exc:
         print("发送提示失败：", exc)
 
@@ -330,23 +345,71 @@ async def force_subscribe_callback(update: Update, context: ContextTypes.DEFAULT
     if ok:
         _remove_mute_record(str(chat_id), target_user_id)
         remove_mute(str(chat_id), target_user_id)
-        try:
-            if query.message:
-                # The warning is no longer useful after the user has followed
-                # every required target and been unmuted, so remove it too.
-                await query.message.delete()
-        except Exception as exc:
-            # Deletion can fail in old messages or where Telegram denies it;
-            # at least remove the now-stale action button in that case.
-            print("删除强制关注提示失败：", exc)
-            try:
-                if query.message:
-                    await query.message.edit_reply_markup(reply_markup=None)
-            except Exception as markup_exc:
-                print("移除按钮失败：", markup_exc)
+        # try:
+        #     if query.message:
+        #         # The warning is no longer useful after the user has followed
+        #         # every required target and been unmuted, so remove it too.
+        #         await query.message.delete()
+        # except Exception as exc:
+        #     # Deletion can fail in old messages or where Telegram denies it;
+        #     # at least remove the now-stale action button in that case.
+        #     print("删除强制关注提示失败：", exc)
+        #     try:
+        #         if query.message:
+        #             await query.message.edit_reply_markup(reply_markup=None)
+        #     except Exception as markup_exc:
+        #         print("移除按钮失败：", markup_exc)
         await query.answer("✅ 已解除禁言", show_alert=True)
     else:
         await query.answer("⚠️ 检测到仍未关注全部频道或群组，请完成关注后再试。", show_alert=True)
+
+
+async def force_subscribe_membership_update(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    """Immediately recheck muted users when they join a required target.
+
+    A user can subscribe from the channel link without returning to press
+    “我已关注”. When Telegram delivers that target's ``chat_member`` update,
+    verify all required targets and automatically lift the restriction.
+    """
+    member_update = getattr(update, "chat_member", None)
+    if not member_update:
+        return
+
+    target = _normalize_target(getattr(getattr(member_update, "chat", None), "username", ""))
+    if not target:
+        # Force-subscribe targets are public @usernames, so an update without a
+        # username cannot match a configured target.
+        return
+
+    new_member = getattr(member_update, "new_chat_member", None)
+    user = getattr(new_member, "user", None)
+    user_id = getattr(user, "id", None)
+    status = str(getattr(new_member, "status", "") or "").lower()
+    if not user_id or status in {"left", "kicked"}:
+        return
+
+    mute_data = _load_mute_data()
+    for group_chat_id_str, users in list(mute_data.items()):
+        if not isinstance(users, dict):
+            continue
+        record = users.get(str(user_id))
+        targets = _record_targets(record)
+        if not targets or target.lower() not in {item.lower() for item in targets}:
+            continue
+        try:
+            group_chat_id = int(group_chat_id_str)
+        except (TypeError, ValueError):
+            continue
+
+        if await _try_unmute_if_followed(context, group_chat_id, user_id, targets):
+            _remove_mute_record(group_chat_id_str, user_id)
+            remove_mute(group_chat_id_str, user_id)
+            print(
+                "强制关注自动解除禁言 "
+                f"group={group_chat_id} user={user_id} target={target}"
+            )
 
 
 async def force_subscribe_sweep(context: ContextTypes.DEFAULT_TYPE):
@@ -357,7 +420,10 @@ async def force_subscribe_sweep(context: ContextTypes.DEFAULT_TYPE):
     for chat_id_str, users in list(data.items()):
         if not isinstance(users, dict):
             continue
-        chat_id = int(chat_id_str)
+        try:
+            chat_id = int(chat_id_str)
+        except (TypeError, ValueError):
+            continue
         group_cfg = group_cfg_map.get(chat_id_str, {})
         force_on = bool(group_cfg.get("force_subscribe", False)) if isinstance(group_cfg, dict) else False
         configured_targets = get_force_subscribe_targets(chat_id_str)
@@ -406,10 +472,24 @@ def register_handle_force_handlers(app):
     app.add_handler(CommandHandler("setchannel", set_channel))
     app.add_handler(CommandHandler("clearchannel", clear_channel))
     app.add_handler(CallbackQueryHandler(force_subscribe_callback, pattern=r"^force_subscribe_check\|"))
+    # Required channels/groups send a chat_member update when a muted user
+    # joins. Use it for immediate unmute; the periodic sweep remains a fallback.
+    app.add_handler(
+        ChatMemberHandler(
+            force_subscribe_membership_update,
+            chat_member_types=ChatMemberHandler.CHAT_MEMBER,
+        ),
+        group=13,
+    )
     # 置于更前的 group，避免被同组 handler 阻断
     app.add_handler(
         MessageHandler(filters.ALL & (~filters.COMMAND), check_message),
         group=-10,
     )
-    # 10 分钟扫一次，自动解除已关注用户
-    app.job_queue.run_repeating(force_subscribe_sweep, interval=600, first=600)
+    # Fallback for membership updates Telegram did not deliver: check once per
+    # minute so users who already followed do not remain muted for 10 minutes.
+    app.job_queue.run_repeating(
+        force_subscribe_sweep,
+        interval=FORCE_SUBSCRIBE_SWEEP_INTERVAL_SECONDS,
+        first=FORCE_SUBSCRIBE_SWEEP_INTERVAL_SECONDS,
+    )

@@ -1035,7 +1035,7 @@ def _build_start_panel_rows(
         return is_bot_admin_viewer or bool(custom_menu_buttons.get(key, True))
 
     rows: list[list[InlineKeyboardButton]] = []
-    if bot_name == MASTER_BOT_NAME:
+    if is_bot_admin_viewer and bot_name == MASTER_BOT_NAME:
         rows.append(
             [
                 InlineKeyboardButton("🧬克隆机器人", callback_data=f"mbot:clone:{MASTER_BOT_NAME}"),

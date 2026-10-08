@@ -49,6 +49,7 @@ from group.ai_group_reply import (
     save_global_ai_reply_config,
 )
 from group.event_lottery import open_lottery_creator
+from group.group_logger import refresh_tracked_group_memberships
 from group.talk_lottery_settings import (
     STAGE_TRIGGER_RATE,
     handle_callback as _handle_talk_lottery_callback,
@@ -172,6 +173,22 @@ def _add_group_url(context: ContextTypes.DEFAULT_TYPE) -> str:
 def _group_title(chat_id: str, cfg: dict) -> str:
     title = (cfg or {}).get("title", "") or (cfg or {}).get("username", "")
     return title or f"群 {chat_id}"
+
+
+def _bot_is_still_in_group(cfg: dict) -> bool:
+    """Return whether a persisted group belongs to the current bot.
+
+    ``bot_in_group`` is written as a boolean by the membership handler.  Treat a
+    missing value, or legacy string values such as ``"false"``, as not present:
+    showing a stale group is worse than hiding a group until Telegram confirms a
+    new join event.
+    """
+    if not isinstance(cfg, dict):
+        return False
+    value = cfg.get("bot_in_group", False)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return value is True or value == 1
 
 
 def _get_force_channels(chat_id: str) -> list[str]:
@@ -840,8 +857,7 @@ def _active_global_ad_groups(groups: dict) -> list[tuple[str, dict]]:
     return [
         (str(chat_id), group_cfg)
         for chat_id, group_cfg in (groups or {}).items()
-        if isinstance(group_cfg, dict)
-        and bool(group_cfg.get("bot_in_group", False))
+        if _bot_is_still_in_group(group_cfg)
         and bool(group_cfg.get("enabled", True))
         and bool(group_cfg.get("bot_enabled", True))
     ]
@@ -1246,14 +1262,18 @@ def _build_group_list_keyboard(
     add_group_url: str = "",
     include_global_ad: bool = False,
     include_global_ai_reply: bool = False,
+    include_presence_refresh: bool = False,
     global_ai_reply_enabled: bool = False,
 ) -> InlineKeyboardMarkup:
+    # Filter here as well as in the permission layer.  This keeps every caller
+    # (including a stale inline keyboard refresh) from displaying groups after
+    # the bot has left or has been kicked from them.
     items = [
         (chat_id, cfg)
         for chat_id, cfg in sorted(
             data.items(), key=lambda item: _group_title(item[0], item[1]).lower()
         )
-        if isinstance(cfg, dict)
+        if _bot_is_still_in_group(cfg)
     ]
     total = len(items)
     total_pages = max(1, (total + GROUP_LIST_PAGE_SIZE - 1) // GROUP_LIST_PAGE_SIZE)
@@ -1267,6 +1287,13 @@ def _build_group_list_keyboard(
             InlineKeyboardButton(
                 f"{'✅' if global_ai_reply_enabled else '🚫'} AI 自动回复总开关",
                 callback_data=f"{CALLBACK_PREFIX}:ai_reply_global_menu",
+            )
+        ])
+    if include_presence_refresh:
+        rows.append([
+            InlineKeyboardButton(
+                "🔄 刷新群状态",
+                callback_data=f"{CALLBACK_PREFIX}:refresh_presence",
             )
         ])
     # if include_global_ad:
@@ -1311,7 +1338,7 @@ def _build_group_list_keyboard(
 
 
 def _group_list_text(data: dict, page: int = 1) -> str:
-    total = sum(1 for _, cfg in data.items() if isinstance(cfg, dict))
+    total = sum(1 for _, cfg in data.items() if _bot_is_still_in_group(cfg))
     total_pages = max(1, (total + GROUP_LIST_PAGE_SIZE - 1) // GROUP_LIST_PAGE_SIZE)
     page = max(1, min(page, total_pages))
     return f"请选择要配置的群：\n第 {page}/{total_pages} 页"
@@ -1495,6 +1522,13 @@ def _build_group_panel_text(
 
 def _can_leave_group(user_id: int) -> bool:
     return is_super_admin(user_id) or is_bot_owner(user_id)
+
+
+def _can_refresh_group_presence(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int
+) -> bool:
+    """Only trusted operators may run an API scan across every saved group."""
+    return _is_current_bot_owner(context, user_id) or is_super_admin(user_id)
 
 
 def _build_group_panel_keyboard(
@@ -1700,7 +1734,7 @@ async def _visible_group_data_for_user(
     active_data = {
         chat_id: cfg
         for chat_id, cfg in data.items()
-        if isinstance(cfg, dict) and bool(cfg.get("bot_in_group", False))
+        if _bot_is_still_in_group(cfg)
     }
 
     if is_super_admin(user_id):
@@ -1731,7 +1765,8 @@ async def _show_group_picker(update: Update, context: ContextTypes.DEFAULT_TYPE)
     data = await _visible_group_data_for_user(context, user_id, data)
     include_global_ad = has_admin_permission(context, user_id, "global_ad_config")
     include_global_ai_reply = _can_manage_global_ai_reply(context, user_id)
-    if not data and not include_global_ad and not include_global_ai_reply:
+    include_presence_refresh = _can_refresh_group_presence(context, user_id)
+    if not data and not include_global_ad and not include_global_ai_reply and not include_presence_refresh:
         return await safe_reply(update, context, "暂无可配置的群记录。")
     page = 1
     context.user_data["group_setting_list_page"] = page
@@ -1740,6 +1775,7 @@ async def _show_group_picker(update: Update, context: ContextTypes.DEFAULT_TYPE)
         page,
         include_global_ad=include_global_ad,
         include_global_ai_reply=include_global_ai_reply,
+        include_presence_refresh=include_presence_refresh,
         global_ai_reply_enabled=bool(get_global_ai_reply_config().get("enabled", False)),
     )
     text = _group_list_text(data, page)
@@ -1779,13 +1815,16 @@ async def _open_group_panel(
     if chat_id is None:
         return await query.answer("群ID无效", show_alert=True)
 
+    data = get_group_whitelist(context)
+    cfg = data.get(chat_id_str, {})
+    if not _bot_is_still_in_group(cfg):
+        # A button can remain in a user's Telegram client after the membership
+        # update arrives.  Do not let that stale button reopen a departed group.
+        return await query.answer("机器人已不在该群，无法配置。", show_alert=True)
+
     if not await _can_manage_group(context, user_id, chat_id):
         return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
 
-    data = get_group_whitelist(context)
-    cfg = data.get(chat_id_str, {})
-    if not isinstance(cfg, dict):
-        cfg = {}
     bot_is_admin = await _is_bot_group_admin(context, chat_id)
 
     await query.answer()
@@ -2382,6 +2421,36 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
 
         return await query.answer("未知广告操作。", show_alert=True)
 
+    if action == "refresh_presence":
+        if not _can_refresh_group_presence(context, user_id):
+            return await query.answer("仅机器人所有者或高级管理员可刷新群状态。", show_alert=True)
+
+        await query.answer("正在向 Telegram 核对群状态…")
+        summary = await refresh_tracked_group_memberships(context)
+        data = get_group_whitelist(context)
+        visible_data = await _visible_group_data_for_user(context, user_id, data)
+        page = int(context.user_data.get("group_setting_list_page", 1) or 1)
+        keyboard = _build_group_list_keyboard(
+            visible_data,
+            page,
+            add_group_url=_add_group_url(context),
+            include_global_ad=has_admin_permission(context, user_id, "global_ad_config"),
+            include_global_ai_reply=_can_manage_global_ai_reply(context, user_id),
+            include_presence_refresh=_can_refresh_group_presence(context, user_id),
+            global_ai_reply_enabled=bool(get_global_ai_reply_config().get("enabled", False)),
+        )
+        summary_text = (
+            f"✅ 群状态已刷新：核对 {summary['checked']} 个，"
+            f"仍在群 {summary['active']} 个，离群 {summary['departed']} 个，"
+            f"更新 {summary['changed']} 个"
+        )
+        if summary["failed"]:
+            summary_text += f"，失败 {summary['failed']} 个"
+        return await query.edit_message_text(
+            f"{summary_text}。\n\n{_group_list_text(visible_data, page)}",
+            reply_markup=keyboard,
+        )
+
     if action == "list":
         visible_data = await _visible_group_data_for_user(context, user_id, data)
         page = 1
@@ -2398,6 +2467,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             add_group_url=_add_group_url(context),
             include_global_ad=has_admin_permission(context, user_id, "global_ad_config"),
             include_global_ai_reply=_can_manage_global_ai_reply(context, user_id),
+            include_presence_refresh=_can_refresh_group_presence(context, user_id),
             global_ai_reply_enabled=bool(get_global_ai_reply_config().get("enabled", False)),
         )
         if not keyboard.inline_keyboard:
@@ -2449,6 +2519,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             add_group_url=_add_group_url(context),
             include_global_ad=has_admin_permission(context, user_id, "global_ad_config"),
             include_global_ai_reply=_can_manage_global_ai_reply(context, user_id),
+            include_presence_refresh=_can_refresh_group_presence(context, user_id),
             global_ai_reply_enabled=bool(get_global_ai_reply_config().get("enabled", False)),
         )
         if not keyboard.inline_keyboard:
