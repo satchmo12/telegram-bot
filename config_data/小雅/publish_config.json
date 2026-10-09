@@ -62,7 +62,7 @@
     "proof_required": true,
     "reject_reason_required": true,
     "comment_forward_enabled": true,
-    "forward_channel_id": -1004428338952,
+    "forward_channel_id": -1003585759564,
     "keyword_extract_labels": [
         "标签",
         "艺名",
@@ -94,9 +94,9 @@
         }
     ],
     "pending_history_post_migration": {
-        "old_channel_id": -1003585759564,
+        "old_channel_id": -1003968770671,
         "new_channel_id": -1003878817420,
-        "changed_at": 1791270117
+        "changed_at": 1791473854
     },
     "channel_change_history": [
         {
@@ -113,6 +113,26 @@
             "old_channel_id": -1003585759564,
             "new_channel_id": -1003878817420,
             "changed_at": 1791270117
+        },
+        {
+            "old_channel_id": -1004432006940,
+            "new_channel_id": -1003878817420,
+            "changed_at": 1791469188
+        },
+        {
+            "old_channel_id": -1003878817420,
+            "new_channel_id": -1004432006940,
+            "changed_at": 1791470209
+        },
+        {
+            "old_channel_id": -1004432006940,
+            "new_channel_id": -1003968770671,
+            "changed_at": 1791471405
+        },
+        {
+            "old_channel_id": -1003968770671,
+            "new_channel_id": -1003878817420,
+            "changed_at": 1791473854
         }
     ],
     "keyword_group_reply_enabled": true,
@@ -127,12 +147,12 @@
             "enabled": true
         }
     ],
-    "backup_channel_id": -1004432006940,
+    "backup_channel_id": null,
     "keyword_post_search_display_mode": "main",
-    "backup_channel_use_telethon": true,
-    "backup_channel_session": "main",
+    "backup_channel_use_telethon": false,
+    "backup_channel_session": "",
     "backup_channel_listen_session": "",
-    "backup_channel_forward_session": "main",
+    "backup_channel_forward_session": "",
     "checkin_enabled": true,
     "checkin_duration_hours": 12,
     "checkin_user_label": "联系",

@@ -1,14 +1,14 @@
 {
-    "channel_id": -1002750050910,
-    "backup_channel_id": -1001951594315,
+    "channel_id": -1001951594315,
+    "backup_channel_id": -1002667629429,
     "backup_channel_use_telethon": true,
     "backup_channel_session": "+13218329173",
     "backup_channel_listen_session": "+13218329173",
     "backup_channel_forward_session": "+13218329173",
     "pending_history_post_migration": {
-        "old_channel_id": -1002934622997,
-        "new_channel_id": -1002750050910,
-        "changed_at": 1790329098
+        "old_channel_id": -1002750050910,
+        "new_channel_id": -1001951594315,
+        "changed_at": 1791467480
     },
     "channel_change_history": [
         {
@@ -20,6 +20,11 @@
             "old_channel_id": -1002934622997,
             "new_channel_id": -1002750050910,
             "changed_at": 1790329098
+        },
+        {
+            "old_channel_id": -1002750050910,
+            "new_channel_id": -1001951594315,
+            "changed_at": 1791467480
         }
     ],
     "review_enabled": true,

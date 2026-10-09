@@ -52,5 +52,12 @@
     "submission_reward_anonymous_points": 0,
     "submission_reward_real_points": 0,
     "submission_reward_group_id": null,
-    "submission_reward_group_title": ""
+    "submission_reward_group_title": "",
+    "checkin_subgroup_label": "",
+    "collection_display_enabled": false,
+    "collection_display_command_text": "老师",
+    "collection_display_text": "收录老师",
+    "collection_display_label": "艺名",
+    "collection_display_group_label": "",
+    "collection_display_subgroup_label": ""
 }

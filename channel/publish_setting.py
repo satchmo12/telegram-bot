@@ -77,6 +77,7 @@ KEYWORD_POST_SEARCH_INPUT_KEY = "publish_keyword_post_search"
 KEYWORD_LABEL_INPUT_KEY = "publish_keyword_label_input"
 GROUP_KEYWORD_REPLY_STAGE_KEY = "publish_group_keyword_reply_stage"
 REPORT_PAGE_SIZE = 6
+MAX_COMMENT_REPORTS = 10000000
 REPORT_USERNAME_MIGRATION_KEY = "publish_report_username_migration"
 REPORT_COMMENT_EDIT_KEY = "publish_report_comment_edit"
 TEMPLATE_DRAFT_KEY = "publish_template_draft"
@@ -1260,6 +1261,85 @@ def _cleanup_expired_checkin_posts(data: dict, now_ts: int = None) -> bool:
     return changed
 
 
+def _has_active_checkin(post: dict, now_ts: int) -> bool:
+    """Return whether a registered post has at least one unexpired check-in."""
+    checkins = post.get("checkins") if isinstance(post, dict) else None
+    if not isinstance(checkins, dict):
+        return False
+    return any(
+        isinstance(checkin, dict)
+        and (
+            not int(checkin.get("expires_at", 0) or 0)
+            or int(checkin.get("expires_at", 0) or 0) > now_ts
+        )
+        for checkin in checkins.values()
+    )
+
+
+def _checkin_contact_keys(post: dict, config: dict) -> set[str]:
+    """Return normalized Telegram contacts used to de-duplicate online posts."""
+    usernames = {
+        str(username or "").strip().lstrip("@").lower()
+        for username in (post.get("eligible_usernames") or [])
+    }
+    usernames.discard("")
+    if usernames:
+        return usernames
+
+    fields = post.get("fields", {}) if isinstance(post, dict) else {}
+    if not isinstance(fields, dict):
+        return set()
+    configured_label = str(config.get("checkin_user_label") or "联系").strip()
+    labels = [configured_label]
+    for label in ("联系", "联系方式"):
+        if label not in labels:
+            labels.append(label)
+    for label in labels:
+        for value in fields.get(label, []) if isinstance(fields.get(label), list) else []:
+            usernames.update(
+                username.lower()
+                for username in re.findall(r"@([A-Za-z0-9_]{5,32})", str(value or ""))
+            )
+    return usernames
+
+
+def _current_main_online_checkin_posts(
+    posts: list[dict], config: dict, now_ts: int,
+) -> list[dict]:
+    """Keep only current-main online posts, one newest post per contact."""
+    main_channel_id = _as_int(config.get("channel_id"))
+    if main_channel_id is None:
+        return []
+    candidates = [
+        post for post in posts
+        if (
+            isinstance(post, dict)
+            and _as_int(post.get("channel_id")) == main_channel_id
+            and _as_int(post.get("message_id")) is not None
+            and _as_int(post.get("message_id")) > 0
+            and _has_active_checkin(post, now_ts)
+        )
+    ]
+    # If a contact has been reposted, show the newest current-main post only.
+    # Stable ordering also keeps the generated text/link order predictable.
+    candidates.sort(
+        key=lambda post: (
+            int(post.get("created_at", 0) or 0),
+            int(post.get("message_id", 0) or 0),
+        ),
+        reverse=True,
+    )
+    selected = []
+    seen_contacts = set()
+    for post in candidates:
+        contacts = _checkin_contact_keys(post, config)
+        if contacts and contacts.intersection(seen_contacts):
+            continue
+        selected.append(post)
+        seen_contacts.update(contacts)
+    return selected
+
+
 def _register_checkin_post(
     config: dict,
     channel_id: int,
@@ -1564,25 +1644,12 @@ def _collection_display_value(post: dict, config: dict) -> str:
     return "收录帖子"
 
 
-def _collection_post_username(post: dict) -> str:
-    """Find a Telegram username in any collected field, label-independent."""
-    fields = post.get("fields", {}) if isinstance(post, dict) else {}
-    if not isinstance(fields, dict):
-        return ""
-    for values in fields.values():
-        for value in values if isinstance(values, list) else []:
-            match = re.search(r"@([A-Za-z0-9_]{5,32})", str(value or ""))
-            if match:
-                return match.group(1).lower()
-    return ""
-
-
 def _load_collection_display_posts(config: dict) -> list[dict]:
-    """Rebuild the latest structured record for each indexed channel identity.
+    """Rebuild one structured record for every indexed current-channel post.
 
-    Posts sharing the same Telegram username are intentionally represented by
-    their newest post only. The username may appear under any configured label,
-    not only a field named “联系”.
+    Keep every matching post, including posts with the same Telegram username.
+    Historical entries must remain visible in the collection display instead of
+    being hidden behind the latest repost for that username.
     """
     target_channel_id = _as_int((config or {}).get("channel_id"))
     posts: dict[tuple[int, int], dict] = {}
@@ -1619,7 +1686,7 @@ def _load_collection_display_posts(config: dict) -> list[dict]:
                 )
             except (TypeError, ValueError):
                 pass
-    ordered_posts = sorted(
+    return sorted(
         posts.values(),
         key=lambda post: (
             int(post.get("created_at", 0) or 0),
@@ -1627,16 +1694,6 @@ def _load_collection_display_posts(config: dict) -> list[dict]:
         ),
         reverse=True,
     )
-    latest_posts = []
-    seen_usernames = set()
-    for post in ordered_posts:
-        username = _collection_post_username(post)
-        if username:
-            if username in seen_usernames:
-                continue
-            seen_usernames.add(username)
-        latest_posts.append(post)
-    return latest_posts
 
 
 def _group_collection_display_posts(posts: list[dict], config: dict) -> dict[str, dict[str, list[dict]]]:
@@ -1774,9 +1831,14 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
         if not username:
             # await msg.reply_text("❗ 打卡需要先设置 Telegram 用户名（@username）。")
             return True
+        current_main_channel_id = _as_int(config.get("channel_id"))
         matched = [
             post for post in posts.values()
-            if isinstance(post, dict) and username in (post.get("eligible_usernames") or [])
+            if (
+                isinstance(post, dict)
+                and _as_int(post.get("channel_id")) == current_main_channel_id
+                and username in (post.get("eligible_usernames") or [])
+            )
         ]
         if not matched:
             # await msg.reply_text("❗ 当前没有包含你用户名的有效帖子，无法打卡。")
@@ -1822,21 +1884,12 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
         return True
 
     now_ts = int(time.time())
-    online_posts = [
-        post for post in posts.values()
-        if (
-            isinstance(post, dict)
-            and isinstance(post.get("checkins"), dict)
-            and any(
-                isinstance(checkin, dict)
-                and (
-                    not int(checkin.get("expires_at", 0) or 0)
-                    or int(checkin.get("expires_at", 0) or 0) > now_ts
-                )
-                for checkin in post.get("checkins", {}).values()
-            )
-        )
-    ]
+    online_posts = _current_main_online_checkin_posts(
+        list(posts.values()),
+        config,
+        now_ts,
+    )
+
     if not online_posts:
         await msg.reply_text("当前暂无在线宝宝。")
         return True
@@ -1846,17 +1899,8 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
     # Newly registered posts already persist their fields; old incomplete posts
     # use the lightweight “在线用户” fallback in this fast display path.
 
-    valid_online_posts = []
-    for post in online_posts:
-        try:
-            message_id = int(post.get("message_id", 0) or 0)
-        except (TypeError, ValueError):
-            message_id = 0
-        if message_id > 0:
-            valid_online_posts.append(post)
-
     grouped = _group_online_checkin_posts(
-        valid_online_posts,
+        online_posts,
         config,
         recover_from_keyword_index=False,
     )
@@ -2178,6 +2222,229 @@ def _record_publish_channel_change(config: dict, old_channel_id, new_channel_id)
     config["pending_history_post_migration"] = record
 
 
+def _promotable_backup_post_pairs(old_channel_id: int, backup_channel_id: int) -> list[tuple[int, int]]:
+    """Return the recorded old-main → backup message pairs for a failover.
+
+    A backup channel is populated by the normal mirror flow, which stores an
+    exact message-ID pair for every copied post (including every item of an
+    album).  Those pairs let us move local indexes without reading the old,
+    potentially inaccessible channel.
+    """
+    pairs = []
+    mappings = _load_backup_post_map().get("mappings", {})
+    if not isinstance(mappings, dict):
+        return pairs
+    for raw_key, mapping in mappings.items():
+        if not isinstance(mapping, dict):
+            continue
+        try:
+            source_channel_text, source_message_text = str(raw_key).rsplit(":", 1)
+        except ValueError:
+            continue
+        source_channel_id = _as_int(source_channel_text)
+        source_message_id = _as_int(source_message_text)
+        target_channel_id = _as_int(mapping.get("backup_channel_id"))
+        target_message_id = _as_int(mapping.get("backup_message_id"))
+        if (
+            source_channel_id == old_channel_id
+            and target_channel_id == backup_channel_id
+            and source_message_id is not None
+            and source_message_id > 0
+            and target_message_id is not None
+            and target_message_id > 0
+        ):
+            pairs.append((source_message_id, target_message_id))
+    return sorted(set(pairs))
+
+
+def _clear_or_apply_promoted_discussion_mapping(
+    keyword_data: dict,
+    comment_map: dict,
+    channel_id: int,
+    message_id: int,
+) -> bool:
+    """Do not retain the old channel's discussion ID after a failover.
+
+    If we already know the promoted backup post's own linked-discussion
+    message, apply it.  Otherwise clear the stale source mapping so a new
+    comment is never posted under the sealed channel's discussion thread.
+    """
+    mapping = comment_map.get(_comment_map_key(channel_id, message_id))
+    discussion_chat_id = _as_int(mapping.get("discussion_chat_id")) if isinstance(mapping, dict) else None
+    discussion_message_id = _as_int(mapping.get("discussion_message_id")) if isinstance(mapping, dict) else None
+    changed = False
+    for records in keyword_data.values():
+        for record in records if isinstance(records, list) else []:
+            if not isinstance(record, dict):
+                continue
+            if (
+                _as_int(record.get("channel_id")) != channel_id
+                or _as_int(record.get("channel_message_id")) != message_id
+            ):
+                continue
+            if discussion_chat_id is not None and discussion_message_id is not None:
+                if (
+                    _as_int(record.get("discussion_chat_id")) != discussion_chat_id
+                    or _as_int(record.get("discussion_message_id")) != discussion_message_id
+                ):
+                    record["discussion_chat_id"] = discussion_chat_id
+                    record["discussion_message_id"] = discussion_message_id
+                    changed = True
+            else:
+                for field in ("discussion_chat_id", "discussion_message_id"):
+                    if field in record:
+                        record.pop(field, None)
+                        changed = True
+    return changed
+
+
+def _relocate_checkin_posts(
+    source_channel_id: int,
+    target_channel_id: int,
+    message_pairs: list[tuple[int, int]],
+) -> int:
+    """Move online-roster records to their mirrored or reposted channel posts."""
+    data = _load_checkin_posts()
+    posts = data["posts"]
+    moved = 0
+    for source_message_id, target_message_id in message_pairs:
+        old_key = _checkin_post_key(source_channel_id, source_message_id)
+        new_key = _checkin_post_key(target_channel_id, target_message_id)
+        record = posts.pop(old_key, None)
+        if not isinstance(record, dict):
+            continue
+        record["channel_id"] = target_channel_id
+        record["message_id"] = target_message_id
+        # A collision is unusual, but retaining all active check-ins is safer
+        # than replacing a record if this backup was promoted more than once.
+        existing = posts.get(new_key)
+        if isinstance(existing, dict):
+            checkins = existing.setdefault("checkins", {})
+            if isinstance(checkins, dict):
+                checkins.update(record.get("checkins", {}) if isinstance(record.get("checkins"), dict) else {})
+            existing_users = existing.setdefault("eligible_usernames", [])
+            if isinstance(existing_users, list):
+                for username in record.get("eligible_usernames", []):
+                    if username not in existing_users:
+                        existing_users.append(username)
+            existing_fields = existing.setdefault("fields", {})
+            if isinstance(existing_fields, dict):
+                for label, values in (record.get("fields", {}) or {}).items():
+                    target_values = existing_fields.setdefault(label, [])
+                    if isinstance(target_values, list):
+                        for value in values if isinstance(values, list) else []:
+                            if value not in target_values:
+                                target_values.append(value)
+        else:
+            posts[new_key] = record
+        moved += 1
+    if moved:
+        _save_checkin_posts(data)
+    return moved
+
+
+def _promote_backup_channel_to_main(config: dict) -> dict:
+    """Promote the configured mirror and migrate all locally mirrored indexes.
+
+    This is intentionally local-file only: when a main channel is sealed we
+    must not depend on reading it.  Posts which were not mirrored remain out
+    of the current-main index rather than leaving users with dead links.
+    """
+    old_channel_id = _as_int(config.get("channel_id"))
+    backup_channel_id = _backup_channel_id(config, old_channel_id)
+    if old_channel_id is None or backup_channel_id is None:
+        raise ValueError("没有可提升的备用频道")
+
+    message_pairs = _promotable_backup_post_pairs(old_channel_id, backup_channel_id)
+    reports_data = _load_comment_reports()
+    keyword_data = _load_keyword_map()
+    user_posts = load_json(USER_MESSAGE_FILE)
+    if not isinstance(user_posts, list):
+        user_posts = []
+
+    relinked_reports = 0
+    for old_message_id, backup_message_id in message_pairs:
+        relinked_reports += len(_relocate_post_indexes(
+            reports_data,
+            keyword_data,
+            user_posts,
+            source_channel_id=old_channel_id,
+            source_message_id=old_message_id,
+            target_channel_id=backup_channel_id,
+            target_message_id=backup_message_id,
+        ))
+
+    # Keyword/reply records must use the promoted post's linked discussion,
+    # never the source post's old discussion mapping.
+    comment_map = _load_comment_map()
+    for _old_message_id, backup_message_id in message_pairs:
+        _clear_or_apply_promoted_discussion_mapping(
+            keyword_data,
+            comment_map,
+            backup_channel_id,
+            backup_message_id,
+        )
+
+    _save_comment_reports(reports_data)
+    _save_keyword_map(keyword_data)
+    save_json(USER_MESSAGE_FILE, user_posts)
+    checkin_posts = _relocate_checkin_posts(
+        old_channel_id,
+        backup_channel_id,
+        message_pairs,
+    )
+
+    _record_publish_channel_change(config, old_channel_id, backup_channel_id)
+    config["channel_id"] = backup_channel_id
+    # The promoted channel cannot also remain the backup. Keep the existing
+    # transport/session choices so setting the next backup is a one-step action.
+    config["backup_channel_id"] = None
+    save_publish_config(config)
+    return {
+        "old_channel_id": old_channel_id,
+        "new_channel_id": backup_channel_id,
+        "message_pairs": message_pairs,
+        "relinked_reports": relinked_reports,
+        "checkin_posts": checkin_posts,
+    }
+
+
+async def _resolve_promoted_discussions_task(
+    context: ContextTypes.DEFAULT_TYPE,
+    new_channel_id: int,
+    message_ids: list[int],
+    notify_chat_id: int,
+) -> None:
+    """Backfill linked-discussion mappings for promoted historical posts."""
+    if not message_ids:
+        return
+    comment_map = _load_comment_map()
+    keyword_data = _load_keyword_map()
+    resolved, failed, changed = await _restore_cloned_discussion_mappings(
+        context,
+        config=load_publish_config(),
+        target_channel_id=new_channel_id,
+        target_message_ids=message_ids,
+        comment_map=comment_map,
+        keyword_data=keyword_data,
+    )
+    if changed:
+        _save_comment_map(comment_map)
+        _save_keyword_map(keyword_data)
+    if resolved or failed:
+        try:
+            await context.bot.send_message(
+                chat_id=notify_chat_id,
+                text=(
+                    "📌 备用频道历史帖讨论区关联完成\n"
+                    f"已关联：{resolved} 条\n"
+                    f"未关联：{failed} 条"
+                ),
+            )
+        except Exception as exc:
+            print(f"备用频道提升后发送讨论区关联结果失败: {exc}")
+
+
 def _comment_map_key(channel_id, message_id) -> str:
     return f"{channel_id}:{message_id}"
 
@@ -2215,14 +2482,30 @@ def _load_comment_reports() -> dict:
 
 
 def _save_comment_reports(data: dict) -> None:
+    """Persist reports without discarding historical comments.
+
+    The former 3,000-record hard limit evicted the oldest report regardless of
+    whether it contained approved comments.  A later repost then recreated the
+    same username as an empty report, making its historical report appear to
+    have vanished.  Keep a substantially larger cache and, if it ever needs
+    trimming, remove only empty report shells.  Reports with comment history
+    are never silently deleted.
+    """
     reports = data.get("reports", {}) if isinstance(data, dict) else {}
-    if isinstance(reports, dict) and len(reports) > 3000:
-        expired = sorted(
-            reports,
-            key=lambda key: int((reports.get(key) or {}).get("created_at", 0) or 0),
-        )[: len(reports) - 3000]
-        for key in expired:
-            reports.pop(key, None)
+    if isinstance(reports, dict) and len(reports) > MAX_COMMENT_REPORTS:
+        empty_report_ids = sorted(
+            (
+                report_id
+                for report_id, report in reports.items()
+                if isinstance(report, dict) and not report.get("comments")
+            ),
+            key=lambda report_id: int(
+                (reports.get(report_id) or {}).get("created_at", 0) or 0
+            ),
+        )
+        remove_count = min(len(reports) - MAX_COMMENT_REPORTS, len(empty_report_ids))
+        for report_id in empty_report_ids[:remove_count]:
+            reports.pop(report_id, None)
     save_json(COMMENT_REPORTS_FILE, data)
 
 
@@ -3233,7 +3516,7 @@ async def _migrate_historical_posts(
     context: ContextTypes.DEFAULT_TYPE,
     target_channel_id: int,
     source_channel_id: int,
-) -> tuple[int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int]:
     """Rebind only mappings whose old and new channel IDs both match.
 
     Also restores the target channel's discussion-message mapping so comments
@@ -3247,8 +3530,9 @@ async def _migrate_historical_posts(
     if not isinstance(user_posts, list):
         user_posts = []
 
-    rebound = already_done = reports_relinked = 0
+    rebound = already_done = reports_relinked = checkin_posts_relinked = 0
     target_message_ids = []
+    checkin_message_pairs: list[tuple[int, int]] = []
     data_changed = False
     for (mapped_source_channel_id, source_message_id), mapping in mappings.items():
         target_message_id = mapping["target_message_id"]
@@ -3272,6 +3556,7 @@ async def _migrate_historical_posts(
 
         if target_message_id not in target_message_ids:
             target_message_ids.append(target_message_id)
+        checkin_message_pairs.append((source_message_id, target_message_id))
         report_ids = _relocate_post_indexes(
             reports_data,
             keyword_data,
@@ -3283,6 +3568,15 @@ async def _migrate_historical_posts(
         )
         reports_relinked += len(report_ids)
         data_changed = True
+
+    # The online roster stores its own channel/message pointer. Move it along
+    # with the report and keyword indexes so its text links cannot keep opening
+    # the retired main channel after a historical repost/clone migration.
+    checkin_posts_relinked = _relocate_checkin_posts(
+        source_channel_id,
+        target_channel_id,
+        checkin_message_pairs,
+    )
 
     comment_map = _load_comment_map()
     discussion_resolved, discussion_failed, discussion_changed = await _restore_cloned_discussion_mappings(
@@ -3300,7 +3594,14 @@ async def _migrate_historical_posts(
         _save_comment_reports(reports_data)
         _save_keyword_map(keyword_data)
         save_json(USER_MESSAGE_FILE, user_posts)
-    return rebound, already_done, reports_relinked, discussion_resolved, discussion_failed
+    return (
+        rebound,
+        already_done,
+        reports_relinked,
+        checkin_posts_relinked,
+        discussion_resolved,
+        discussion_failed,
+    )
 
 
 async def _run_historical_post_migration_task(
@@ -3310,7 +3611,14 @@ async def _run_historical_post_migration_task(
     notify_chat_id: int,
 ) -> None:
     try:
-        rebound, already_done, reports_relinked, discussion_resolved, discussion_failed = await _migrate_historical_posts(
+        (
+            rebound,
+            already_done,
+            reports_relinked,
+            checkin_posts_relinked,
+            discussion_resolved,
+            discussion_failed,
+        ) = await _migrate_historical_posts(
             context,
             target_channel_id,
             source_channel_id,
@@ -3324,6 +3632,7 @@ async def _run_historical_post_migration_task(
                 f"新关联帖子：{rebound} 条\n"
                 f"已关联跳过：{already_done} 条\n"
                 f"已重新绑定报告：{reports_relinked} 个\n"
+                f"已迁移在线宝宝链接：{checkin_posts_relinked} 条\n"
                 f"已恢复讨论组映射：{discussion_resolved} 条\n"
                 f"讨论组映射失败：{discussion_failed} 条\n\n"
                 "已同时校验 history_forward_state 中的旧频道和新频道 ID；"
@@ -4234,6 +4543,10 @@ def _find_keyword_routes(query: str, *, require_discussion: bool = True) -> list
     if not key:
         return []
     data = _load_keyword_map()
+    # Keyword/comment routing is deliberately scoped to the active primary
+    # channel.  During a failover, only mirrored records are rebased onto that
+    # new ID, so old unavailable posts cannot be returned by a search.
+    current_main_channel_id = _as_int(load_publish_config().get("channel_id"))
     matches = []
     for stored_key, records in data.items():
         if key not in stored_key and stored_key not in key:
@@ -4241,9 +4554,12 @@ def _find_keyword_routes(query: str, *, require_discussion: bool = True) -> list
         for record in records or []:
             if not isinstance(record, dict):
                 continue
+            channel_id = _as_int(record.get("channel_id"))
+            if current_main_channel_id is not None and channel_id != current_main_channel_id:
+                continue
             if require_discussion and not record.get("discussion_message_id"):
                 continue
-            if record.get("channel_id") and record.get("channel_message_id"):
+            if channel_id is not None and record.get("channel_message_id"):
                 matches.append({**record, "key": stored_key})
     matches.sort(key=lambda item: int(item.get("created_at", 0) or 0), reverse=True)
     return matches[:30]
@@ -4675,6 +4991,7 @@ def _find_group_keyword_reply_values(query: str, input_label: str, reply_label: 
     if not query_key:
         return []
     data = _load_keyword_map()
+    current_main_channel_id = _as_int(load_publish_config().get("channel_id"))
     source_posts = set()
     for stored_key, records in data.items():
         if query_key != _normalize_routing_keyword(stored_key):
@@ -4686,7 +5003,11 @@ def _find_group_keyword_reply_values(query: str, input_label: str, reply_label: 
                 continue
             channel_id = _as_int(record.get("channel_id"))
             message_id = _as_int(record.get("channel_message_id"))
-            if channel_id is not None and message_id is not None:
+            if (
+                channel_id is not None
+                and message_id is not None
+                and (current_main_channel_id is None or channel_id == current_main_channel_id)
+            ):
                 source_posts.add((channel_id, message_id))
 
     if not reply_label:
@@ -6551,7 +6872,7 @@ def publish_setting_keyboard(config: dict):
             callback_data="publish:migrate_forward_comments",
         )],
         [InlineKeyboardButton(
-            "🔗 关联已克隆历史主帖到当前发布频道(防止主频道炸了,目前模式不需要)",
+            "🔗 关联已克隆历史主帖到当前发布频道",
             callback_data="publish:migrate_history_posts",
         )],
         [
@@ -6582,6 +6903,10 @@ def publish_channel_keyboard(config: dict):
         )],
     ]
     if backup_channel_id is not None:
+        rows.append([InlineKeyboardButton(
+            "🚨 备用频道升为主频道",
+            callback_data="publish:promote_backup_channel",
+        )])
         rows.append([InlineKeyboardButton("🗑 清除备用频道", callback_data="publish:clear_backup_channel")])
         rows.append([InlineKeyboardButton(
             f"备用同步方式：{_backup_transport_label(config)}",
@@ -7816,12 +8141,78 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ 返回频道设置", callback_data="publish:channel")]]),
         )
 
+    if action == "cancel_backup_channel_input":
+        context.user_data.pop("waiting_backup_channel_id", None)
+        return await query.edit_message_text(
+            "已保留新的主频道；暂未设置新的备用频道。",
+            reply_markup=publish_channel_keyboard(config),
+        )
+
     if action == "set_backup_channel":
         context.user_data["waiting_backup_channel_id"] = True
         return await query.edit_message_text(
             "✏️ 设置备用频道\n\n请输入备用频道 ID，例如：\n-1001234567890\n\n"
             "之后每条主帖会自动镜像到备用频道；备用频道不会参与关键词搜索或评论定位。",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ 返回频道设置", callback_data="publish:channel")]]),
+        )
+
+    if action == "promote_backup_channel":
+        old_channel_id = _as_int(config.get("channel_id"))
+        backup_channel_id = _backup_channel_id(config, old_channel_id)
+        if old_channel_id is None or backup_channel_id is None:
+            return await query.answer("请先设置可用的主频道和备用频道。", show_alert=True)
+        pair_count = len(_promotable_backup_post_pairs(old_channel_id, backup_channel_id))
+        return await query.edit_message_text(
+            "🚨 备用频道升为主频道\n\n"
+            f"当前主频道：{old_channel_id}\n"
+            f"将提升的备用频道：{backup_channel_id}\n"
+            f"可直接接管的镜像帖子：{pair_count} 条\n\n"
+            "确认后会立即：\n"
+            "• 将备用频道设为新的主频道；\n"
+            "• 迁移已镜像帖的关键词、搜索、群关键词回复和在线宝宝记录；\n"
+            "• 清空当前备用频道，随后请发送一个新的备用频道 ID。\n\n"
+            "没有镜像记录的旧帖不会保留为当前搜索结果，避免用户打开已失效频道。",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ 确认提升", callback_data="publish:confirm_promote_backup_channel")],
+                [InlineKeyboardButton("⬅️ 取消", callback_data="publish:channel")],
+            ]),
+        )
+
+    if action == "confirm_promote_backup_channel":
+        try:
+            result = _promote_backup_channel_to_main(config)
+        except ValueError as exc:
+            return await query.answer(str(exc), show_alert=True)
+        except Exception as exc:
+            print(f"备用频道提升失败: {exc}")
+            return await query.answer("提升失败，配置未完成切换，请稍后重试。", show_alert=True)
+
+        # The very next message from this administrator becomes the new mirror.
+        context.user_data["waiting_backup_channel_id"] = True
+        context.user_data.pop("waiting_channel_id", None)
+        target_message_ids = [target_id for _source_id, target_id in result["message_pairs"]]
+        if target_message_ids:
+            notify_chat_id = query.message.chat_id if query.message else query.from_user.id
+            context.application.create_task(
+                _resolve_promoted_discussions_task(
+                    context,
+                    result["new_channel_id"],
+                    target_message_ids,
+                    notify_chat_id,
+                ),
+                name=f"promoted-backup-discussions:{result['new_channel_id']}",
+            )
+        return await query.edit_message_text(
+            "✅ 已完成主备切换\n\n"
+            f"新主频道：{result['new_channel_id']}\n"
+            f"已迁移镜像帖子索引：{len(result['message_pairs'])} 条\n"
+            f"已迁移报告定位：{result['relinked_reports']} 个\n"
+            f"已迁移在线宝宝记录：{result['checkin_posts']} 条\n\n"
+            "请现在发送新的备用频道 ID，例如：\n-1001234567890\n\n"
+            "新主频道之后发布的帖子会继续自动镜像到它。",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ 暂不设置", callback_data="publish:cancel_backup_channel_input")]
+            ]),
         )
 
     if action == "clear_backup_channel":
@@ -9673,7 +10064,8 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if old_channel_id is not None and old_channel_id != new_channel_id:
             note = (
                 f"\n已记录频道变更：{old_channel_id} → {new_channel_id}。"
-                "之后可自动关联已克隆历史主帖。"
+                "请在投稿配置中点击“关联已克隆历史主帖到当前发布频道”，"
+                "即可同步修复历史报告和在线宝宝的跳转地址。"
             )
         return await update.message.reply_text(
             f"✅ 已保存频道：{new_channel_id}{note}"
