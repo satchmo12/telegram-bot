@@ -317,6 +317,8 @@ def build_context(chat_id: int) -> str:
 async def ask_ollama(
     context_text: str,
     current_text: str,
+    *,
+    mode: str = "reply",
 ) -> Optional[str]:
     """
     调用本地 Ollama。
@@ -327,7 +329,7 @@ async def ask_ollama(
     4. keep_alive 保持模型在内存中。
     """
 
-    prompt = f"""判断 Telegram 群消息是否值得自然接话。
+    chat_prompt = f"""判断 Telegram 群消息是否值得自然接话。
 
 最近聊天：
 {context_text or "(无)"}
@@ -378,6 +380,23 @@ async def ask_ollama(
 - 一句直接发送给用户的中文回复
 
 不要输出其他任何内容。"""
+
+    if mode == "channel_comment":
+        prompt = f"""请为 Telegram 群内转发的频道消息写一条简短、自然的中文评论。
+
+频道消息：
+{current_text}
+
+规则：
+1. 直接评论消息内容，补充一个自然观点、感受或有用信息。
+2. 不复述、不要总结原文，不要提及“频道”“转发”“AI”。
+3. 不要广告、引流、夸张承诺或虚构事实。
+4. 最多 40 个字，像真实群成员的单句评论。
+5. 如果内容确实无法评论，输出 NO。
+
+只输出最终评论，不要解释或输出分析过程。"""
+    else:
+        prompt = chat_prompt
 
     payload = {
         "model": OLLAMA_MODEL,

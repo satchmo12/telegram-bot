@@ -33,6 +33,7 @@ from channel.telethon_ai_reply import (
     get_group_settings as get_protocol_ai_group_settings,
     remove_session_config as remove_protocol_ai_session_config,
     set_group_ai_enabled,
+    set_group_ai_comment_enabled,
 )
 
 HISTORY_RANGE_FILE = os.path.join("data", "history_forward_range.json")
@@ -465,7 +466,7 @@ def _build_group_list_page(
         [InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:menu:{session_name}")]
     )
     text = (
-        f"加入的群组（共 {total} 个，第 {page}/{total_pages} 页；点击群名管理 AI，右侧可群发）：\n"
+        f"加入的群组（共 {total} 个，第 {page}/{total_pages} 页；点击群名管理 AI 回复/评论）：\n"
         + "\n".join(lines)
     )
     return text, InlineKeyboardMarkup(keyboard_rows)
@@ -477,7 +478,9 @@ def _build_group_manage_text(session_name: str, group: dict, settings: dict) -> 
         f"协议号：{_get_cached_session_label(session_name)}\n"
         f"群组：{_truncate_display_text(_group_display_name(group))}\n\n"
         f"AI 回复：{'✅ 已开启' if settings['enabled'] else '🚫 已关闭'}\n"
-        "AI 开关只作用于当前协议号的当前群组。"
+        f"AI 评论（频道信息）：{'✅ 已开启' if settings['channel_comment_enabled'] else '🚫 已关闭'}\n\n"
+        "AI 评论开启后，会对本群内转发或同步的频道消息以回复形式自动评论。\n"
+        "两个开关只作用于当前协议号的当前群组。"
     )
 
 
@@ -488,6 +491,12 @@ def _build_group_manage_keyboard(session_name: str, group_id: int, settings: dic
                 InlineKeyboardButton(
                     f"{'✅ 关闭' if settings['enabled'] else '🚫 开启'} AI 回复",
                     callback_data=f"{CALLBACK_PREFIX}:aitoggle:{session_name}|{group_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    f"{'✅ 关闭' if settings['channel_comment_enabled'] else '🚫 开启'} AI 评论",
+                    callback_data=f"{CALLBACK_PREFIX}:aicommenttoggle:{session_name}|{group_id}",
                 )
             ],
             [
@@ -1382,7 +1391,7 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
             reply_markup=keyboard,
         )
 
-    if action in {"gmenu", "aitoggle"}:
+    if action in {"gmenu", "aitoggle", "aicommenttoggle"}:
         await _clear_login_state(uid, context)
         try:
             session_name, group_id_raw = payload.rsplit("|", 1)
@@ -1403,8 +1412,17 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
             settings = set_group_ai_enabled(
                 bot_name, session_name, group_id, not settings["enabled"]
             )
-            # Do not wait for the 30-second maintenance cycle before a newly
-            # enabled protocol account begins listening (or an unused one stops).
+        elif action == "aicommenttoggle":
+            settings = set_group_ai_comment_enabled(
+                bot_name,
+                session_name,
+                group_id,
+                not settings["channel_comment_enabled"],
+            )
+
+        if action in {"aitoggle", "aicommenttoggle"}:
+            # Do not wait for the maintenance cycle before a newly enabled
+            # protocol account starts listening (or an unused one stops).
             from channel.telethon_forwarder import request_telethon_refresh
 
             request_telethon_refresh(bot_name)

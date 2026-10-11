@@ -3,7 +3,7 @@
         "name": "J-Satchmo",
         "username": "iwoai",
         "join_time": 1772735335,
-        "last_active": 1791436998,
+        "last_active": 1791554752,
         "blocked": false
     },
     "8187270541": {
@@ -258,5 +258,12 @@
         "last_active": 1791377231,
         "blocked": true,
         "blocked_at": 1791377756
+    },
+    "8303313727": {
+        "name": "Last",
+        "username": "last_born_rf",
+        "join_time": 1791636586,
+        "last_active": 1791636593,
+        "blocked": false
     }
 }

@@ -16,6 +16,9 @@ PROTOCOL_AI_REPLY_FILE = "data/protocol_ai_reply.json"
 # replying in every group until an owner enables a specific group in the panel.
 DEFAULT_SETTINGS = {
     "enabled": False,
+    # 频道内容评论与普通群聊 AI 回复分开控制，默认关闭，避免新登录
+    # 的协议号在群内自动发言。
+    "channel_comment_enabled": False,
     "probability_percent": 50,
     "min_interval_sec": 10,
     "max_replies_per_hour": 1000,
@@ -44,6 +47,17 @@ def _clamp_int(value: Any, minimum: int, maximum: int, default: int) -> int:
     return max(minimum, min(maximum, value))
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """Parse persisted JSON booleans without treating ``"false"`` as true."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "开启"}
+    return bool(value)
+
+
 def _load_config(bot_name: str) -> dict:
     data = load_json(_config_path(bot_name))
     if not isinstance(data, dict):
@@ -67,7 +81,11 @@ def get_group_settings(bot_name: str, session_name: str, group_id: int) -> dict:
     if not isinstance(raw, dict):
         raw = {}
     return {
-        "enabled": bool(raw.get("enabled", DEFAULT_SETTINGS["enabled"])),
+        "enabled": _as_bool(raw.get("enabled"), DEFAULT_SETTINGS["enabled"]),
+        "channel_comment_enabled": _as_bool(
+            raw.get("channel_comment_enabled"),
+            DEFAULT_SETTINGS["channel_comment_enabled"],
+        ),
         "probability_percent": _clamp_int(
             raw.get("probability_percent", DEFAULT_SETTINGS["probability_percent"]),
             0,
@@ -111,8 +129,30 @@ def set_group_ai_enabled(
     return current
 
 
+def set_group_ai_comment_enabled(
+    bot_name: str, session_name: str, group_id: int, enabled: bool
+) -> dict:
+    """Persist the automatic channel-comment switch for one session/group."""
+    data = _load_config(bot_name)
+    sessions = data.setdefault("sessions", {})
+    session = sessions.setdefault(str(session_name), {})
+    if not isinstance(session, dict):
+        session = {}
+        sessions[str(session_name)] = session
+    groups = session.setdefault("groups", {})
+    if not isinstance(groups, dict):
+        groups = {}
+        session["groups"] = groups
+
+    current = get_group_settings(bot_name, session_name, group_id)
+    current["channel_comment_enabled"] = bool(enabled)
+    groups[str(group_id)] = current
+    _save_config(bot_name, data)
+    return current
+
+
 def get_enabled_sessions(bot_name: str) -> set[str]:
-    """Return sessions that have at least one group with protocol AI enabled."""
+    """Return sessions that have normal AI replies or channel comments enabled."""
     sessions = _load_config(bot_name).get("sessions", {})
     if not isinstance(sessions, dict):
         return set()
@@ -123,7 +163,13 @@ def get_enabled_sessions(bot_name: str) -> set[str]:
             continue
         if any(
             isinstance(settings, dict)
-            and bool(settings.get("enabled", DEFAULT_SETTINGS["enabled"]))
+            and (
+                _as_bool(settings.get("enabled"), DEFAULT_SETTINGS["enabled"])
+                or _as_bool(
+                    settings.get("channel_comment_enabled"),
+                    DEFAULT_SETTINGS["channel_comment_enabled"],
+                )
+            )
             for settings in groups.values()
         ):
             enabled_sessions.add(str(session_name))
@@ -157,8 +203,36 @@ def _context_text(key: tuple[str, str, int]) -> str:
     )
 
 
+def _is_channel_post_message(message: Any, sender: Any = None) -> bool:
+    """Whether a group message originates from a channel post.
+
+    Telegram represents channel posts forwarded into a group with a
+    ``MessageFwdHeader``. Attribute names differ between Telethon releases,
+    so accept both the old ``fwd_from`` alias and the newer ``forward`` one.
+    A linked discussion group can also expose the original channel as sender.
+    """
+    forward = getattr(message, "fwd_from", None) or getattr(message, "forward", None)
+    if forward is not None:
+        if getattr(forward, "channel_post", None) is not None:
+            return True
+        source_peer = getattr(forward, "from_id", None)
+        if getattr(source_peer, "channel_id", None) is not None:
+            return True
+        if source_peer and source_peer.__class__.__name__ == "PeerChannel":
+            return True
+
+    # This covers a channel post delivered to its linked discussion group.
+    return bool(
+        getattr(message, "post", False)
+        and (
+            bool(getattr(sender, "broadcast", False))
+            or sender.__class__.__name__ == "Channel"
+        )
+    )
+
+
 async def handle_protocol_group_message(bot_name: str, session_name: str, client, event) -> None:
-    """Possibly reply to one incoming Telethon group message as its account."""
+    """Reply in a group, or comment on a channel post, when that feature is enabled."""
     if not getattr(event, "is_group", False):
         return
 
@@ -168,17 +242,17 @@ async def handle_protocol_group_message(bot_name: str, session_name: str, client
         return
 
     settings = get_group_settings(bot_name, session_name, int(chat_id))
-    if not settings["enabled"]:
+    if not settings["enabled"] and not settings["channel_comment_enabled"]:
         return
     if getattr(event, "out", False):
-        # Do not reply to messages sent by this same protocol account; otherwise
-        # it could trigger a loop with its own AI replies.
+        # Do not react to messages sent by this same protocol account; otherwise
+        # it could trigger a loop with its own replies/comments.
         print(f"[协议号AI][SKIP] 自己发送的消息 session={session_name} group={chat_id}")
         return
 
-    # Do not let a protocol account chat with other Telegram bots.  Telethon
-    # resolves the sender lazily, so only request it after confirming that this
-    # specific session/group has AI enabled.
+    # Telethon resolves the sender lazily. Do it only after confirming this
+    # group has at least one AI feature enabled.
+    sender = None
     try:
         sender = await event.get_sender()
         if bool(getattr(sender, "bot", False)):
@@ -191,7 +265,14 @@ async def handle_protocol_group_message(bot_name: str, session_name: str, client
     text = (getattr(event, "raw_text", None) or getattr(message, "message", None) or "").strip()
     if not text or text.startswith("/") or len(text) > MAX_MESSAGE_LENGTH:
         return
-    # print(f"[协议号AI][RECV] 收到群消息 session={session_name} group={chat_id}: {text!r}")
+
+    is_channel_post = _is_channel_post_message(message, sender)
+    # A channel post gets exactly one reply: when the comment switch is on,
+    # use a threaded comment instead of also emitting the normal group reply.
+    should_comment = settings["channel_comment_enabled"] and is_channel_post
+    should_reply = settings["enabled"] and not should_comment
+    if not should_reply and not should_comment:
+        return
 
     key = _chat_key(bot_name, session_name, int(chat_id))
     sender_id = getattr(event, "sender_id", 0) or 0
@@ -199,49 +280,62 @@ async def handle_protocol_group_message(bot_name: str, session_name: str, client
 
     if key in _processing_chats or not _can_reply(key, settings):
         return
-    if random.random() > settings["probability_percent"] / 100:
+    # The ordinary group AI retains its configured probability. An enabled
+    # channel-comment switch comments on every eligible post (subject to the
+    # existing cooldown/rate limits), matching the meaning of "自动评论".
+    if should_reply and random.random() > settings["probability_percent"] / 100:
         return
 
     _processing_chats.add(key)
     try:
-        reply_text = await ask_ollama(_context_text(key), text)
+        reply_text = await ask_ollama(
+            _context_text(key),
+            text,
+            mode="channel_comment" if should_comment else "reply",
+        )
         if not reply_text:
             return
 
         await asyncio.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
-        # The switch may have changed while Ollama was generating the reply.
+        # The switches may have changed while Ollama was generating content.
         send_settings = get_group_settings(bot_name, session_name, int(chat_id))
-        if not send_settings["enabled"] or not _can_reply(key, send_settings):
+        still_enabled = (
+            send_settings["channel_comment_enabled"] if should_comment else send_settings["enabled"]
+        )
+        if not still_enabled or not _can_reply(key, send_settings):
             return
 
-        # await client.send_message(
-        #     int(chat_id),
-        #     reply_text,
-        #     reply_to=getattr(message, "id", None),
-        #     link_preview=False,
-        # )
-        
-        if random.random() < 0.8:
-            # 80% 直接发
-            await client.send_message(
-                int(chat_id),
-                reply_text,
-                link_preview=False,
-            )
-        else:
-            # 20% 回复原消息
+        if should_comment:
+            # Always reply to the source post so the output is a real comment,
+            # rather than an unrelated message in the group timeline.
             await client.send_message(
                 int(chat_id),
                 reply_text,
                 reply_to=getattr(message, "id", None),
                 link_preview=False,
             )
+        elif random.random() < 0.8:
+            await client.send_message(int(chat_id), reply_text, link_preview=False)
+        else:
+            await client.send_message(
+                int(chat_id),
+                reply_text,
+                reply_to=getattr(message, "id", None),
+                link_preview=False,
+            )
+
         now = time.time()
         _last_reply_time[key] = now
         _reply_history[key].append(now)
         _message_history[key].append({"sender_id": 0, "text": reply_text})
-        print(f"[协议号AI] 回复成功 session={session_name} group={chat_id}: {reply_text!r}")
+        action = "评论" if should_comment else "回复"
+        print(f"[协议号AI] {action}成功 session={session_name} group={chat_id}: {reply_text!r}")
     except Exception:
-        logging.exception("协议号 AI 回复失败 session=%s group=%s", session_name, chat_id)
+        logging.exception(
+            "协议号 AI %s失败 session=%s group=%s",
+            "评论" if should_comment else "回复",
+            session_name,
+            chat_id,
+        )
     finally:
         _processing_chats.discard(key)

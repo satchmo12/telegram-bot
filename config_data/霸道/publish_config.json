@@ -52,5 +52,12 @@
     "submission_reward_group_id": null,
     "submission_reward_group_title": "",
     "comment_buttons": [],
-    "bottom_comment_buttons_enabled": false
+    "bottom_comment_buttons_enabled": false,
+    "checkin_subgroup_label": "",
+    "collection_display_enabled": false,
+    "collection_display_command_text": "老师",
+    "collection_display_text": "收录老师",
+    "collection_display_label": "艺名",
+    "collection_display_group_label": "",
+    "collection_display_subgroup_label": ""
 }

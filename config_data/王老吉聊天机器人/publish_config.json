@@ -52,5 +52,12 @@
         "global_ad_config": true
     },
     "submission_enabled": false,
-    "random_view_enabled": false
+    "random_view_enabled": false,
+    "checkin_subgroup_label": "",
+    "collection_display_enabled": false,
+    "collection_display_command_text": "老师",
+    "collection_display_text": "收录老师",
+    "collection_display_label": "艺名",
+    "collection_display_group_label": "",
+    "collection_display_subgroup_label": ""
 }
