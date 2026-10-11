@@ -4549,7 +4549,7 @@ def _find_keyword_routes(query: str, *, require_discussion: bool = True) -> list
     current_main_channel_id = _as_int(load_publish_config().get("channel_id"))
     matches = []
     for stored_key, records in data.items():
-        if key not in stored_key and stored_key not in key:
+        if key not in stored_key:
             continue
         for record in records or []:
             if not isinstance(record, dict):
