@@ -1728,6 +1728,290 @@ def _collection_display_command_text(config: dict) -> str:
     return _checkin_command_text(config, "collection_display_command_text", "老师")
 
 
+TEACHER_LIST_CALLBACK_PREFIX = "teacher_list"
+TEACHER_LIST_BUTTONS_PER_ROW = 3
+TEACHER_LIST_PAGE_SIZE = 20
+
+
+def _teacher_list_button_rows(buttons: list[InlineKeyboardButton]) -> list[list[InlineKeyboardButton]]:
+    """Place roster navigation choices in rows of three buttons."""
+    return [
+        buttons[index : index + TEACHER_LIST_BUTTONS_PER_ROW]
+        for index in range(0, len(buttons), TEACHER_LIST_BUTTONS_PER_ROW)
+    ]
+
+
+def _teacher_list_button_text(value: str) -> str:
+    """Keep category captions safely within Telegram's inline-button limit."""
+    value = str(value or "未分类").strip() or "未分类"
+    return value if len(value) <= 60 else f"{value[:59]}…"
+
+
+def _teacher_list_catalog(config: dict) -> list[dict]:
+    """Return collected posts organized as primary -> secondary categories.
+
+    The existing collection-display settings determine both category levels, so
+    the owner can change the fields (for example 城市 / 区域) without code
+    changes. Empty category settings still retain the two-step navigation by
+    using a single ``全部`` category at that level.
+    """
+    primary_label = str((config or {}).get("collection_display_group_label") or "").strip()
+    secondary_label = str((config or {}).get("collection_display_subgroup_label") or "").strip()
+    catalog: list[dict] = []
+    primary_lookup: dict[str, dict] = {}
+
+    for post in _load_collection_display_posts(config):
+        primary = (
+            _checkin_group_value_for_label(
+                post, primary_label, recover_from_keyword_index=False
+            )
+            if primary_label
+            else "全部"
+        )
+        secondary = (
+            _checkin_group_value_for_label(
+                post, secondary_label, recover_from_keyword_index=False
+            )
+            if secondary_label
+            else "全部"
+        )
+        primary = primary or "未分类"
+        secondary = secondary or "未分类"
+
+        primary_item = primary_lookup.get(primary)
+        if primary_item is None:
+            primary_item = {"name": primary, "secondary": [], "lookup": {}}
+            primary_lookup[primary] = primary_item
+            catalog.append(primary_item)
+
+        secondary_item = primary_item["lookup"].get(secondary)
+        if secondary_item is None:
+            secondary_item = {"name": secondary, "posts": []}
+            primary_item["lookup"][secondary] = secondary_item
+            primary_item["secondary"].append(secondary_item)
+        secondary_item["posts"].append(post)
+
+    # ``lookup`` only helps construction and must not leak into callback state.
+    for primary_item in catalog:
+        primary_item.pop("lookup", None)
+    return catalog
+
+
+def _teacher_list_primary_keyboard(catalog: list[dict]) -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(
+            _teacher_list_button_text(item["name"]),
+            callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:secondary:{index}",
+        )
+        for index, item in enumerate(catalog)
+    ]
+    rows = _teacher_list_button_rows(buttons)
+    rows.append([InlineKeyboardButton("✖️ 关闭", callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:close")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _teacher_list_secondary_keyboard(catalog: list[dict], primary_index: int) -> InlineKeyboardMarkup:
+    primary = catalog[primary_index]
+    buttons = [
+        InlineKeyboardButton(
+            _teacher_list_button_text(item["name"]),
+            callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:content:{primary_index}:{index}:0",
+        )
+        for index, item in enumerate(primary["secondary"])
+    ]
+    rows = _teacher_list_button_rows(buttons)
+    rows.append([InlineKeyboardButton("⬅️ 返回一级分类", callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:primary")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _teacher_list_content_payload(
+    config: dict,
+    catalog: list[dict],
+    primary_index: int,
+    secondary_index: int,
+    page: int,
+) -> tuple[str, list[MessageEntity], InlineKeyboardMarkup]:
+    primary = catalog[primary_index]
+    secondary = primary["secondary"][secondary_index]
+    posts = secondary["posts"]
+    page_count = max(1, (len(posts) + TEACHER_LIST_PAGE_SIZE - 1) // TEACHER_LIST_PAGE_SIZE)
+    page = max(0, min(page, page_count - 1))
+    start = page * TEACHER_LIST_PAGE_SIZE
+    visible_posts = posts[start : start + TEACHER_LIST_PAGE_SIZE]
+
+    title = _checkin_command_text(config, "collection_display_text", "收录老师")
+    lines = [f"📚 {title}", f"【{primary['name']}】", f"〔{secondary['name']}〕", ""]
+    link_items: list[tuple[str, str]] = []
+    for offset, post in enumerate(visible_posts, start=start + 1):
+        name_text = _collection_display_value(post, config)
+        line = f"{offset}. {name_text}"
+        lines.append(line)
+        link = _fallback_channel_message_link(
+            _as_int(post.get("channel_id")), _as_int(post.get("message_id"))
+        )
+        if link:
+            link_items.append((line, len(str(offset)) + 2, len(name_text), link))
+
+    if page_count > 1:
+        lines.extend(["", f"第 {page + 1}/{page_count} 页，共 {len(posts)} 条"])
+    result_text = "\n".join(lines)
+    entities: list[MessageEntity] = []
+    cursor = 0
+    for line, name_offset, name_length, link in link_items:
+        line_start = result_text.find(line, cursor)
+        if line_start < 0:
+            continue
+        entities.append(
+            MessageEntity(
+                type=MessageEntity.TEXT_LINK,
+                offset=line_start + name_offset,
+                length=name_length,
+                url=link,
+            )
+        )
+        cursor = line_start + len(line)
+
+    rows: list[list[InlineKeyboardButton]] = []
+    if page_count > 1:
+        pager = []
+        if page > 0:
+            pager.append(
+                InlineKeyboardButton(
+                    "◀️ 上一页",
+                    callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:content:{primary_index}:{secondary_index}:{page - 1}",
+                )
+            )
+        if page < page_count - 1:
+            pager.append(
+                InlineKeyboardButton(
+                    "下一页 ▶️",
+                    callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:content:{primary_index}:{secondary_index}:{page + 1}",
+                )
+            )
+        if pager:
+            rows.append(pager)
+    rows.append([
+        InlineKeyboardButton(
+            "⬅️ 返回二级分类",
+            callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:secondary:{primary_index}",
+        )
+    ])
+    return (
+        result_text,
+        MessageEntity.adjust_message_entities_to_utf_16(result_text, entities),
+        InlineKeyboardMarkup(rows),
+    )
+
+
+def _teacher_list_is_available(context: ContextTypes.DEFAULT_TYPE, config: dict) -> bool:
+    return _is_master_bot_context(context) and bool(
+        (config or {}).get("collection_display_enabled", False)
+    )
+
+
+async def show_teacher_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Open the master bot's collected-teacher list at its first category level."""
+    message = update.effective_message or update.message
+    if not message:
+        return
+    config = load_publish_config()
+    if not _teacher_list_is_available(context, config):
+        await message.reply_text("老师列表暂未开启。")
+        return
+
+    catalog = _teacher_list_catalog(config)
+    if not catalog:
+        await message.reply_text("当前暂无收录内容。")
+        return
+
+    title = _checkin_command_text(config, "collection_display_text", "收录老师")
+    await message.reply_text(
+        f"📚 {title}\n请选择一级分类：",
+        reply_markup=_teacher_list_primary_keyboard(catalog),
+    )
+
+
+async def handle_teacher_list_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Navigate the public master-bot teacher roster without exposing content early."""
+    query = update.callback_query
+    if not query or not query.data or not query.data.startswith(f"{TEACHER_LIST_CALLBACK_PREFIX}:"):
+        return
+
+    config = load_publish_config()
+    if not _teacher_list_is_available(context, config):
+        await query.answer("老师列表暂未开启。", show_alert=True)
+        return
+
+    catalog = _teacher_list_catalog(config)
+    if not catalog:
+        await query.answer("当前暂无收录内容。", show_alert=True)
+        return
+
+    parts = query.data.split(":")
+    stage = parts[1] if len(parts) > 1 else ""
+    title = _checkin_command_text(config, "collection_display_text", "收录老师")
+
+    if stage == "close":
+        await query.answer()
+        try:
+            await query.message.delete()
+        except Exception:
+            await query.edit_message_text("老师列表已关闭。")
+        return
+
+    if stage == "primary":
+        await query.answer()
+        await query.edit_message_text(
+            f"📚 {title}\n请选择一级分类：",
+            reply_markup=_teacher_list_primary_keyboard(catalog),
+        )
+        return
+
+    try:
+        primary_index = int(parts[2])
+        if primary_index < 0:
+            raise IndexError
+        primary = catalog[primary_index]
+    except (IndexError, TypeError, ValueError):
+        await query.answer("分类已更新，请重新打开老师列表。", show_alert=True)
+        return
+
+    if stage == "secondary":
+        await query.answer()
+        await query.edit_message_text(
+            f"📚 {title}\n一级分类：{primary['name']}\n请选择二级分类：",
+            reply_markup=_teacher_list_secondary_keyboard(catalog, primary_index),
+        )
+        return
+
+    if stage == "content":
+        try:
+            secondary_index = int(parts[3])
+            page = int(parts[4]) if len(parts) > 4 else 0
+            if secondary_index < 0 or page < 0:
+                raise IndexError
+            # Validate before building the payload so stale callback data is safe.
+            primary["secondary"][secondary_index]
+        except (IndexError, TypeError, ValueError):
+            await query.answer("分类已更新，请重新打开老师列表。", show_alert=True)
+            return
+        text, entities, keyboard = _teacher_list_content_payload(
+            config, catalog, primary_index, secondary_index, page
+        )
+        await query.answer()
+        await query.edit_message_text(
+            text,
+            entities=entities or None,
+            disable_web_page_preview=True,
+            reply_markup=keyboard,
+        )
+        return
+
+    await query.answer("无效的老师列表操作。", show_alert=True)
+
+
 async def _reply_collection_display(message, context: ContextTypes.DEFAULT_TYPE, config: dict) -> None:
     posts = _load_collection_display_posts(config)
     if not posts:

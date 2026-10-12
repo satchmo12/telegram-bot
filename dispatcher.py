@@ -3,7 +3,7 @@ import time
 import traceback
 
 from channel.channel_forwarder import handle_message
-from channel.publish_setting import _handle_publish_action
+from channel.publish_setting import _handle_publish_action, show_teacher_list
 from command_router import dispatch_command
 from forward.message_forward import handle_text_private_message
 from game.calculator import calculator_handler
@@ -191,6 +191,9 @@ async def handle_text(update, context):
         return True
     elif text == "🔎查找收录老师与标签":
         await _handle_publish_action(update, context, "keyword_post_search")
+        return True
+    elif text == "老师列表":
+        await show_teacher_list(update, context)
         return True
 
     chat_id = str(update.effective_chat.id) if update.effective_chat else ""

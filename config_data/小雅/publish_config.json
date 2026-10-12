@@ -169,7 +169,7 @@
         "骗子",
         "骚扰"
     ],
-    "bottom_comment_buttons_enabled": true,
+    "bottom_comment_buttons_enabled": false,
     "comment_buttons": [
         {
             "id": 1,

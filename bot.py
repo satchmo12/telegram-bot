@@ -51,6 +51,7 @@ from channel.channel_config import is_active_subscription
 from channel.publish_setting import (
     handle_comment_start_parameter,
     handle_report_start_parameter,
+    handle_teacher_list_callback,
     load_publish_config,
 )
 from custom_command_templates import (
@@ -105,6 +106,9 @@ async def show_menu(update, context):
             keyboard.append([])
         keyboard[-1].append(label)
     keyboard.append(["🔎查找收录老师与标签"])
+    bot_name = str(context.application.bot_data.get("name", "")).strip()
+    if MASTER_BOT_NAME and bot_name == MASTER_BOT_NAME:
+        keyboard.append(["老师列表"])
 
     reply_markup = ReplyKeyboardMarkup(
         keyboard,
@@ -114,8 +118,6 @@ async def show_menu(update, context):
 
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
-        # Telegram rejects an empty message body, which prevents /start from
-        # continuing to the welcome panel and makes it look unresponsive.
         text="请选择功能：",
         reply_markup=reply_markup,
     )
@@ -250,13 +252,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             ),
         )
     ]
-
-    # chat_id = int(update.effective_chat.id) if update and update.effective_chat else None
-    # await context.bot.send_message(
-    #             chat_id=chat_id,
-    #             text=results,
-    #         )
-
+    
     await update.inline_query.answer(results=results, cache_time=0, is_personal=True)
 
 
@@ -344,6 +340,8 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
     chat = update.effective_chat
 
     user_data = context.user_data or {}
+    # 打印
+    # debug_print_message(update)
 
     # 投稿及审核拒绝原因由投稿模块处理；不要再走私聊双向转发。
     if (
@@ -1118,9 +1116,21 @@ def _build_start_panel_rows(
         )
     if resource_row:
         rows.append(resource_row)
+
+    # The roster is public only on the master bot. It uses the same collection
+    # display switch as the reply-keyboard entry.
+    if bot_name == MASTER_BOT_NAME and bool(publish_config.get("collection_display_enabled", False)):
+        rows.append([
+            InlineKeyboardButton("老师列表", callback_data="teacher_list:primary"),
+        ])
+
     # Post lookup is deliberately explicit. It must never consume ordinary
     # private text such as a protocol-login phone number.
-    rows.append([InlineKeyboardButton("🔎 查找收录标签", callback_data="publish:keyword_post_search")])
+    rows.append(
+        [
+            InlineKeyboardButton("🔎 查找收录标签", callback_data="publish:keyword_post_search"),
+         
+        ])
 
     return rows
 
@@ -1357,6 +1367,7 @@ def create_app(bot_cfg: dict):
         CallbackQueryHandler(handle_private_dialog_callback, pattern=r"^pfmode:")
     )
     app.add_handler(CallbackQueryHandler(clear_login_prompt_on_callback), group=-900)
+    app.add_handler(CallbackQueryHandler(handle_teacher_list_callback, pattern=r"^teacher_list:"))
     app.add_handler(CallbackQueryHandler(start_panel_callback, pattern=r"^start:"))
 
     # 内连
@@ -1781,7 +1792,64 @@ async def main():
                 logging.exception(
                     "停止机器人失败 [%s]: %s", app.bot_data.get("name"), e
                 )
+  
+def debug_print_message(update: Update) -> None:
+    """打印 Telegram 消息正文、实体、媒体和转发来源，方便调试。"""
+    message = update.effective_message
+    if not message:
+        print("[消息调试] 没有有效消息")
+        return
 
+    chat = update.effective_chat
+    user = update.effective_user
 
+    print("\n========== 消息调试开始 ==========")
+    print("消息 ID:", message.message_id)
+    print("聊天 ID:", chat.id if chat else None)
+    print("发送者 ID:", user.id if user else None)
+
+    # 消息正文
+    print("\n--- 消息正文 ---")
+    print("text:", repr(message.text))
+    print("caption:", repr(message.caption))
+
+    # 文字格式及超链接
+    print("\n--- 消息实体 ---")
+    print("entities:", message.entities)
+    print("caption_entities:", message.caption_entities)
+
+    for field_name, entities in (
+        ("entities", message.entities),
+        ("caption_entities", message.caption_entities),
+    ):
+        for entity in entities or []:
+            print({
+                "field": field_name,
+                "type": entity.type,
+                "offset": entity.offset,
+                "length": entity.length,
+                "url": entity.url,
+            })
+
+    # 媒体信息
+    print("\n--- 媒体信息 ---")
+    print("media_group_id:", message.media_group_id)
+    print("photo:", bool(message.photo))
+    print("video:", bool(message.video))
+    print("document:", bool(message.document))
+    print("animation:", bool(message.animation))
+    print("audio:", bool(message.audio))
+    print("voice:", bool(message.voice))
+
+    # 转发来源
+    print("\n--- 转发来源 ---")
+    print("forward_origin:", message.forward_origin)
+
+    # 完整消息字典
+    print("\n--- 完整消息字典 ---")
+    print(message.to_dict())
+
+    print("========== 消息调试结束 ==========\n")
+    
 if __name__ == "__main__":
     asyncio.run(main())
