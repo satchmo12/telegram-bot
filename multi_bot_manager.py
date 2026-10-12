@@ -500,7 +500,7 @@ def _build_timezone_keyboard(name: str, current_timezone: str) -> InlineKeyboard
                 callback_data=f"{CALLBACK_PREFIX}:timezone_set:{name}:{timezone_name}",
             )
         ])
-    rows.append([InlineKeyboardButton("⬅️ 返回机器人详情", callback_data=f"{CALLBACK_PREFIX}:open:{name}")])
+    rows.append([InlineKeyboardButton("⬅️ 返回机器人设置", callback_data=f"{CALLBACK_PREFIX}:settings")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -537,14 +537,6 @@ def _build_detail_keyboard(cfg: dict, *, can_edit: bool, can_control: bool) -> I
     #     rows.append(
     #         [InlineKeyboardButton("🧬 克隆机器人", callback_data=f"{CALLBACK_PREFIX}:clone:{name}")]
     #     )
-
-    if can_edit:
-        rows.append([
-            InlineKeyboardButton(
-                f"🕒 时区：{_timezone_label(cfg.get('timezone', 'Asia/Shanghai'))}",
-                callback_data=f"{CALLBACK_PREFIX}:timezone:{name}",
-            )
-        ])
 
     if can_edit and cfg.get("managed"):
         enabled_features = set(cfg.get("enabled_features", []))
@@ -588,6 +580,32 @@ async def _show_detail(query, cfg: dict):
         ),
         parse_mode="HTML",
         disable_web_page_preview=True,
+    )
+
+
+def _current_bot_config(context: ContextTypes.DEFAULT_TYPE) -> Optional[dict]:
+    name = str(context.application.bot_data.get("name", "")).strip()
+    return get_bot_config_by_name(name) if name else None
+
+
+async def _show_current_bot_settings(query, cfg: dict):
+    name = str(cfg.get("name", "")).strip()
+    return await query.edit_message_text(
+        "⚙️ 机器人设置\n\n"
+        f"当前机器人：{html.escape(name)}\n"
+        f"时区：{html.escape(_timezone_label(cfg.get('timezone', 'Asia/Shanghai')))}",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🕒 设置时区",
+                        callback_data=f"{CALLBACK_PREFIX}:current_timezone",
+                    )
+                ],
+                [InlineKeyboardButton("⬅️ 返回主面板", callback_data="start:back")],
+            ]
+        ),
+        parse_mode="HTML",
     )
 
 
@@ -650,6 +668,28 @@ async def handle_multi_bot_callback(update: Update, context: ContextTypes.DEFAUL
             return await query.answer(_no_bot_hint(), show_alert=True)
         await query.answer()
         return await _show_list(query)
+
+    if action == "settings":
+        cfg = _current_bot_config(context)
+        if not cfg:
+            return await query.answer("未找到当前机器人配置。", show_alert=True)
+        if not _can_edit_bot(cfg, query.from_user.id):
+            return await query.answer("仅机器人所有者或超级管理员可修改设置。", show_alert=True)
+        await query.answer()
+        return await _show_current_bot_settings(query, cfg)
+
+    if action == "current_timezone":
+        cfg = _current_bot_config(context)
+        if not cfg:
+            return await query.answer("未找到当前机器人配置。", show_alert=True)
+        if not _can_edit_bot(cfg, query.from_user.id):
+            return await query.answer("仅机器人所有者或超级管理员可修改时区。", show_alert=True)
+        await query.answer()
+        return await query.edit_message_text(
+            "🕒 选择本机器人的时区。\n\n"
+            "该设置会用于每日积分、发言统计日期、定时广告时段和后续显示时间。",
+            reply_markup=_build_timezone_keyboard(cfg.get("name", ""), cfg.get("timezone")),
+        )
 
     if action == "clone_cancel":
         await query.answer()
@@ -719,6 +759,25 @@ async def handle_multi_bot_callback(update: Update, context: ContextTypes.DEFAUL
             reply_markup=_build_clone_token_keyboard(),
         )
 
+    if action == "timezone_set":
+        current_cfg = _current_bot_config(context)
+        if not current_cfg:
+            return await query.answer("未找到当前机器人配置。", show_alert=True)
+        current_name = str(current_cfg.get("name", "")).strip()
+        if name != current_name:
+            return await query.answer("请在对应机器人的主面板修改时区。", show_alert=True)
+        if not _can_edit_bot(current_cfg, query.from_user.id):
+            return await query.answer("仅机器人所有者或超级管理员可修改时区。", show_alert=True)
+        if feature_key not in TIMEZONE_LABELS:
+            return await query.answer("时区参数无效。", show_alert=True)
+        updated = update_bot_timezone(current_name, feature_key)
+        if not updated:
+            return await query.answer("保存时区失败。", show_alert=True)
+        context.application.bot_data["timezone"] = updated["timezone"]
+        set_bot_timezone(current_name, updated["timezone"])
+        await query.answer(f"已设置为 {_timezone_label(updated['timezone'])}")
+        return await _show_current_bot_settings(query, updated)
+
     if not _can_manage(update, context):
         await query.answer("无权限或不在主机器人面板。", show_alert=True)
         return
@@ -754,35 +813,6 @@ async def handle_multi_bot_callback(update: Update, context: ContextTypes.DEFAUL
         await query.answer(msg[:180], show_alert=not ok)
         fresh = get_bot_config_by_name(name) or cfg
         return await _show_detail(query, fresh)
-
-    if action == "timezone":
-        if not cfg:
-            return await query.answer("机器人不存在。", show_alert=True)
-        if not _can_edit_bot(cfg, query.from_user.id):
-            return await query.answer("仅机器人所有者或超级管理员可修改时区。", show_alert=True)
-        await query.answer()
-        return await query.edit_message_text(
-            "🕒 选择机器人时区。\n\n"
-            "该设置会用于每日积分、发言统计日期、定时广告时段和后续显示时间。",
-            reply_markup=_build_timezone_keyboard(name, cfg.get("timezone")),
-        )
-
-    if action == "timezone_set":
-        if not cfg:
-            return await query.answer("机器人不存在。", show_alert=True)
-        if not _can_edit_bot(cfg, query.from_user.id):
-            return await query.answer("仅机器人所有者或超级管理员可修改时区。", show_alert=True)
-        if feature_key not in TIMEZONE_LABELS:
-            return await query.answer("时区参数无效。", show_alert=True)
-        updated = update_bot_timezone(name, feature_key)
-        if not updated:
-            return await query.answer("保存时区失败。", show_alert=True)
-        app = get_running_app(name)
-        if app:
-            app.bot_data["timezone"] = updated["timezone"]
-        set_bot_timezone(name, updated["timezone"])
-        await query.answer(f"已设置为 {_timezone_label(updated['timezone'])}")
-        return await _show_detail(query, get_bot_config_by_name(name) or updated)
 
     if action == "feature_toggle":
         managed = get_managed_bot_by_name(name)

@@ -29,6 +29,7 @@ from channel.channel_config import handle_channel_config_text
 from channel.telethon_login import handle_telethon_login_text
 from group.ai_group_reply import ai_group_reply_handler
 from custom_command_templates import handle_custom_template_text
+from reply_keyboard_buttons import handle_reply_keyboard_button_text
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -114,6 +115,10 @@ async def handle_text_dispatcher(update: Update, context: ContextTypes.DEFAULT_T
     # Reply-keyboard labels for visible command templates take precedence over
     # generic AI/private-message processing.
     if await handle_custom_template_text(update, context):
+        return
+
+    # Explicit keyboard button labels take precedence over generic text/AI handling.
+    if await handle_reply_keyboard_button_text(update, context):
         return
 
     # 仅主机器人：用户级 AI 对话（开启后无需 @）

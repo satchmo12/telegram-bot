@@ -58,6 +58,7 @@ from custom_command_templates import (
     visible_bot_commands,
     visible_reply_labels,
 )
+from reply_keyboard_buttons import visible_reply_keyboard_labels
 from command_router import get_matched_command
 from admin_permissions import has_admin_permission, is_owner_or_super_admin
 
@@ -97,7 +98,9 @@ async def show_menu(update, context):
     # shortcuts. Adding/removing a visible template updates this menu too.
     keyboard = [["✍️我要投稿"]]
     
-    for label in visible_reply_labels():
+    for label in [*visible_reply_labels(), *visible_reply_keyboard_labels()]:
+        if label in {item for row in keyboard for item in row}:
+            continue
         if len(keyboard[-1]) >= 2:
             keyboard.append([])
         keyboard[-1].append(label)
@@ -1039,9 +1042,11 @@ def _build_start_panel_rows(
         rows.append(
             [
                 InlineKeyboardButton("🧬克隆机器人", callback_data=f"mbot:clone:{MASTER_BOT_NAME}"),
-                InlineKeyboardButton("🤖机器人面板", callback_data="mbot:list")
+                InlineKeyboardButton("🤖机器人面板", callback_data="mbot:list"),
             ]
         )
+    if is_bot_admin_viewer:
+        rows.append([InlineKeyboardButton("⚙️机器人设置", callback_data="mbot:settings")])
 
     if is_bot_admin_viewer or any(
         can_use(permission) for permission in ("submission_config", "private_forward")
@@ -1060,6 +1065,7 @@ def _build_start_panel_rows(
                 owner_row.append(InlineKeyboardButton("🧩模板发布", callback_data="publish:template_publish"))
         if is_bot_admin_viewer:
             owner_row.append(InlineKeyboardButton("⌨️命令模板", callback_data="ccmd:menu"))
+            owner_row.append(InlineKeyboardButton("⌨️键盘按钮", callback_data="rkb:menu"))
             owner_row.append(InlineKeyboardButton("👥多管理员", callback_data="adm:panel"))
         if can_config_welcome:
             owner_row.append(InlineKeyboardButton("✏️欢迎词", callback_data="welcome:edit"))
