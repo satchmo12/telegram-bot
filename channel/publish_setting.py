@@ -1644,13 +1644,34 @@ def _collection_display_value(post: dict, config: dict) -> str:
     return "收录帖子"
 
 
-def _load_collection_display_posts(config: dict) -> list[dict]:
-    """Rebuild one structured record for every indexed current-channel post.
+def _latest_collection_posts_by_contact(posts: list[dict], config: dict) -> list[dict]:
+    """Keep the newest collected post for each Telegram contact.
 
-    Keep every matching post, including posts with the same Telegram username.
-    Historical entries must remain visible in the collection display instead of
-    being hidden behind the latest repost for that username.
+    Reposting the same ``联系`` / ``联系方式`` username updates the teacher's
+    roster entry instead of leaving an older post in the ``老师`` display.
+    Posts without a recognized Telegram contact remain visible.
     """
+    ordered_posts = sorted(
+        posts,
+        key=lambda post: (
+            int(post.get("created_at", 0) or 0),
+            int(post.get("message_id", 0) or 0),
+        ),
+        reverse=True,
+    )
+    selected_posts = []
+    seen_contacts = set()
+    for post in ordered_posts:
+        contacts = _checkin_contact_keys(post, config)
+        if contacts and contacts.intersection(seen_contacts):
+            continue
+        selected_posts.append(post)
+        seen_contacts.update(contacts)
+    return selected_posts
+
+
+def _load_collection_display_posts(config: dict) -> list[dict]:
+    """Rebuild the newest collected record for every current-channel contact."""
     target_channel_id = _as_int((config or {}).get("channel_id"))
     posts: dict[tuple[int, int], dict] = {}
     for records in _load_keyword_map().values():
@@ -1686,14 +1707,7 @@ def _load_collection_display_posts(config: dict) -> list[dict]:
                 )
             except (TypeError, ValueError):
                 pass
-    return sorted(
-        posts.values(),
-        key=lambda post: (
-            int(post.get("created_at", 0) or 0),
-            int(post.get("message_id", 0) or 0),
-        ),
-        reverse=True,
-    )
+    return _latest_collection_posts_by_contact(list(posts.values()), config)
 
 
 def _group_collection_display_posts(posts: list[dict], config: dict) -> dict[str, dict[str, list[dict]]]:
@@ -1806,7 +1820,9 @@ def _teacher_list_primary_keyboard(catalog: list[dict]) -> InlineKeyboardMarkup:
         for index, item in enumerate(catalog)
     ]
     rows = _teacher_list_button_rows(buttons)
-    rows.append([InlineKeyboardButton("✖️ 关闭", callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:close")])
+    # 一级分类的上一级就是 /start 首页。复用现有 start:back 回调，
+    # 让从欢迎页或底部键盘进入的老师列表都能回到首页。
+    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1830,6 +1846,8 @@ def _teacher_list_content_payload(
     primary_index: int,
     secondary_index: int,
     page: int,
+    *,
+    show_delete_button: bool = False,
 ) -> tuple[str, list[MessageEntity], InlineKeyboardMarkup]:
     primary = catalog[primary_index]
     secondary = primary["secondary"][secondary_index]
@@ -1890,6 +1908,13 @@ def _teacher_list_content_payload(
             )
         if pager:
             rows.append(pager)
+    if show_delete_button:
+        rows.append([
+            InlineKeyboardButton(
+                "🗑 删除收录记录",
+                callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:delete_menu:{primary_index}:{secondary_index}:{page}",
+            )
+        ])
     rows.append([
         InlineKeyboardButton(
             "⬅️ 返回二级分类",
@@ -1901,6 +1926,116 @@ def _teacher_list_content_payload(
         MessageEntity.adjust_message_entities_to_utf_16(result_text, entities),
         InlineKeyboardMarkup(rows),
     )
+
+
+def _teacher_list_delete_callback_data(
+    action: str,
+    channel_id: int,
+    message_id: int,
+    primary_index: int,
+    secondary_index: int,
+    page: int,
+) -> Optional[str]:
+    """Build a compact, safe callback for one selected collected post."""
+    callback_data = (
+        f"{TEACHER_LIST_CALLBACK_PREFIX}:{action}:{channel_id}:{message_id}:"
+        f"{primary_index}:{secondary_index}:{page}"
+    )
+    return callback_data if len(callback_data.encode("utf-8")) <= 64 else None
+
+
+def _teacher_list_find_post(
+    catalog: list[dict], channel_id: int, message_id: int
+) -> Optional[dict]:
+    """Locate a selected roster item again before showing its delete prompt."""
+    for primary in catalog:
+        for secondary in primary["secondary"]:
+            for post in secondary["posts"]:
+                if (
+                    _as_int(post.get("channel_id")) == channel_id
+                    and _as_int(post.get("message_id")) == message_id
+                ):
+                    return post
+    return None
+
+
+def _teacher_list_delete_menu_payload(
+    config: dict,
+    catalog: list[dict],
+    primary_index: int,
+    secondary_index: int,
+    page: int,
+    *,
+    notice: str = "",
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Build the admin-only picker for deleting one record at a time."""
+    primary = catalog[primary_index]
+    secondary = primary["secondary"][secondary_index]
+    posts = secondary["posts"]
+    page_count = max(1, (len(posts) + TEACHER_LIST_PAGE_SIZE - 1) // TEACHER_LIST_PAGE_SIZE)
+    page = max(0, min(page, page_count - 1))
+    start = page * TEACHER_LIST_PAGE_SIZE
+    visible_posts = posts[start : start + TEACHER_LIST_PAGE_SIZE]
+
+    title = _checkin_command_text(config, "collection_display_text", "收录老师")
+    lines = [
+        f"🗑 管理 {title}",
+        f"【{primary['name']}】〔{secondary['name']}〕",
+        "请选择要删除的收录记录。仅删除本地收录、关键词和关联记录，不会删除频道原帖。",
+    ]
+    if notice:
+        lines.extend(["", notice])
+    if page_count > 1:
+        lines.extend(["", f"第 {page + 1}/{page_count} 页，共 {len(posts)} 条"])
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for offset, post in enumerate(visible_posts, start=start + 1):
+        channel_id = _as_int(post.get("channel_id"))
+        message_id = _as_int(post.get("message_id"))
+        if channel_id is None or message_id is None or message_id <= 0:
+            continue
+        callback_data = _teacher_list_delete_callback_data(
+            "delete_confirm",
+            channel_id,
+            message_id,
+            primary_index,
+            secondary_index,
+            page,
+        )
+        if not callback_data:
+            continue
+        # One record per row makes the destructive choice unambiguous even when
+        # several teachers share the same display name.
+        caption = _teacher_list_button_text(
+            f"🗑 {offset}. {_collection_display_value(post, config)}"
+        )
+        rows.append([InlineKeyboardButton(caption, callback_data=callback_data)])
+
+    if page_count > 1:
+        pager = []
+        if page > 0:
+            pager.append(
+                InlineKeyboardButton(
+                    "◀️ 上一页",
+                    callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:delete_menu:{primary_index}:{secondary_index}:{page - 1}",
+                )
+            )
+        if page < page_count - 1:
+            pager.append(
+                InlineKeyboardButton(
+                    "下一页 ▶️",
+                    callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:delete_menu:{primary_index}:{secondary_index}:{page + 1}",
+                )
+            )
+        if pager:
+            rows.append(pager)
+    rows.append([
+        InlineKeyboardButton(
+            "⬅️ 返回老师列表",
+            callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:content:{primary_index}:{secondary_index}:{page}",
+        )
+    ])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
 def _teacher_list_is_available(context: ContextTypes.DEFAULT_TYPE, config: dict) -> bool:
@@ -1934,7 +2069,7 @@ async def show_teacher_list(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def handle_teacher_list_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Navigate the public master-bot teacher roster without exposing content early."""
+    """Navigate the public master-bot teacher roster and admin record deletion."""
     query = update.callback_query
     if not query or not query.data or not query.data.startswith(f"{TEACHER_LIST_CALLBACK_PREFIX}:"):
         return
@@ -1952,6 +2087,9 @@ async def handle_teacher_list_callback(
     parts = query.data.split(":")
     stage = parts[1] if len(parts) > 1 else ""
     title = _checkin_command_text(config, "collection_display_text", "收录老师")
+    can_delete = bool(query.from_user) and has_admin_permission(
+        context, query.from_user.id, "submission_config"
+    )
 
     if stage == "close":
         await query.answer()
@@ -1968,6 +2106,98 @@ async def handle_teacher_list_callback(
             reply_markup=_teacher_list_primary_keyboard(catalog),
         )
         return
+
+    if stage in {"delete_confirm", "delete_execute"}:
+        if not can_delete:
+            await query.answer("你没有删除收录信息的权限。", show_alert=True)
+            return
+        try:
+            if len(parts) != 7:
+                raise ValueError
+            channel_id = _as_int(parts[2])
+            message_id = _as_int(parts[3])
+            primary_index = int(parts[4])
+            secondary_index = int(parts[5])
+            page = int(parts[6])
+            if (
+                channel_id is None
+                or message_id is None
+                or message_id <= 0
+                or primary_index < 0
+                or secondary_index < 0
+                or page < 0
+            ):
+                raise ValueError
+        except (IndexError, TypeError, ValueError):
+            await query.answer("删除参数无效，请重新打开老师列表。", show_alert=True)
+            return
+
+        selected_post = _teacher_list_find_post(catalog, channel_id, message_id)
+        if selected_post is None:
+            await query.answer("该收录记录已不存在，请刷新列表。", show_alert=True)
+            return
+
+        if stage == "delete_confirm":
+            display_name = _collection_display_value(selected_post, config)
+            confirm_callback = _teacher_list_delete_callback_data(
+                "delete_execute",
+                channel_id,
+                message_id,
+                primary_index,
+                secondary_index,
+                page,
+            )
+            if not confirm_callback:
+                await query.answer("删除参数过长，请重新打开老师列表。", show_alert=True)
+                return
+            await query.answer()
+            return await query.edit_message_text(
+                f"⚠️ 确定删除收录记录吗？\n\n{display_name}\n消息 ID：{message_id}\n\n"
+                "频道原帖不会删除，但该帖的本地收录、关键词、签到及关联记录会被清除。",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ 确认删除", callback_data=confirm_callback)],
+                    [InlineKeyboardButton(
+                        "⬅️ 返回删除列表",
+                        callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:delete_menu:{primary_index}:{secondary_index}:{page}",
+                    )],
+                ]),
+            )
+
+        removed = _remove_post_collection(channel_id, message_id)
+        details = []
+        if removed["keyword_records"]:
+            details.append(f"关键词 {removed['keyword_records']} 条")
+        if removed["checkin_post"]:
+            details.append("签到记录")
+        if removed["comment_mapping"]:
+            details.append("评论映射")
+        if removed["backup_mapping"]:
+            details.append("备用帖映射")
+        if removed["report_subjects"]:
+            details.append("报告收录字段")
+        detail_text = "、".join(details) or "没有找到仍需清理的本地记录"
+
+        refreshed_catalog = _teacher_list_catalog(config)
+        await query.answer("✅ 收录记录已删除。")
+        try:
+            # Keep administrators in the selection flow while the category still
+            # exists, so multiple records can be removed without reopening it.
+            refreshed_catalog[primary_index]["secondary"][secondary_index]
+            text, keyboard = _teacher_list_delete_menu_payload(
+                config,
+                refreshed_catalog,
+                primary_index,
+                secondary_index,
+                page,
+                notice=f"✅ 已删除消息 ID {message_id} 的收录记录（{detail_text}）。",
+            )
+        except (IndexError, TypeError):
+            text = (
+                f"✅ 已删除消息 ID {message_id} 的收录记录（{detail_text}）。\n\n"
+                "当前分类已无其他收录内容，请选择一级分类。"
+            )
+            keyboard = _teacher_list_primary_keyboard(refreshed_catalog) if refreshed_catalog else None
+        return await query.edit_message_text(text, reply_markup=keyboard)
 
     try:
         primary_index = int(parts[2])
@@ -1986,7 +2216,7 @@ async def handle_teacher_list_callback(
         )
         return
 
-    if stage == "content":
+    if stage in {"content", "delete_menu"}:
         try:
             secondary_index = int(parts[3])
             page = int(parts[4]) if len(parts) > 4 else 0
@@ -1997,8 +2227,24 @@ async def handle_teacher_list_callback(
         except (IndexError, TypeError, ValueError):
             await query.answer("分类已更新，请重新打开老师列表。", show_alert=True)
             return
+
+        if stage == "delete_menu":
+            if not can_delete:
+                await query.answer("你没有删除收录信息的权限。", show_alert=True)
+                return
+            text, keyboard = _teacher_list_delete_menu_payload(
+                config, catalog, primary_index, secondary_index, page
+            )
+            await query.answer()
+            return await query.edit_message_text(text, reply_markup=keyboard)
+
         text, entities, keyboard = _teacher_list_content_payload(
-            config, catalog, primary_index, secondary_index, page
+            config,
+            catalog,
+            primary_index,
+            secondary_index,
+            page,
+            show_delete_button=can_delete,
         )
         await query.answer()
         await query.edit_message_text(

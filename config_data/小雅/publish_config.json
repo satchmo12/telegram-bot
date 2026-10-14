@@ -74,11 +74,11 @@
     "continuous_submission_enabled": false,
     "custom_bot_button_visible": true,
     "custom_menu_buttons": {
-        "channel_clone": true,
+        "channel_clone": false,
         "telethon_manage": true,
-        "bot_channel_config": true,
+        "bot_channel_config": false,
         "group_config": true,
-        "global_ad_config": true
+        "global_ad_config": false
     },
     "discussion_mapping_session": "main",
     "report_link_enabled": true,

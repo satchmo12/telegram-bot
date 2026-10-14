@@ -6,7 +6,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
 )
-from command_router import register_command
+from command_router import FEATURE_NIUNIU, group_feature_required, register_command
 from database import *
 
 from utils import get_group_whitelist, safe_reply
@@ -202,6 +202,10 @@ def check_action_cooldown(user_id: int, action_key: str, cooldown: int):
 
 # ===== 指令 =====
 @register_command("牛牛指令")
+@group_feature_required(
+    FEATURE_NIUNIU,
+    "⚠️ 本群未开启牛牛游戏，请管理员到【群设置】-【游戏功能】开启。",
+)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = """
 🍆 你好！我是鸡巴机器人 🤖
@@ -223,6 +227,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== 签到 =====
 @register_command("撸一发", "签到")
+@group_feature_required(
+    FEATURE_NIUNIU,
+    "⚠️ 本群未开启牛牛游戏，请管理员到【群设置】-【游戏功能】开启。",
+)
 async def sign(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -279,6 +287,10 @@ async def sign(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== 查看长度 =====
 @register_command("我要验牌", "我要演牌")
+@group_feature_required(
+    FEATURE_NIUNIU,
+    "⚠️ 本群未开启牛牛游戏，请管理员到【群设置】-【游戏功能】开启。",
+)
 async def dick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -295,6 +307,10 @@ async def dick(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== PK =====
 @register_command("对狙", "操", "日")
+@group_feature_required(
+    FEATURE_NIUNIU,
+    "⚠️ 本群未开启牛牛游戏，请管理员到【群设置】-【游戏功能】开启。",
+)
 async def pk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -340,6 +356,10 @@ async def pk(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== 赠送 =====
 @register_command("激情", "割吊")
+@group_feature_required(
+    FEATURE_NIUNIU,
+    "⚠️ 本群未开启牛牛游戏，请管理员到【群设置】-【游戏功能】开启。",
+)
 async def jy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -374,6 +394,10 @@ async def jy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== 排行榜 =====
 @register_command("排行榜", "牛牛", "给我擦皮鞋")
+@group_feature_required(
+    FEATURE_NIUNIU,
+    "⚠️ 本群未开启牛牛游戏，请管理员到【群设置】-【游戏功能】开启。",
+)
 async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -406,6 +430,10 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== 强奸 =====
 @register_command("强奸")
+@group_feature_required(
+    FEATURE_NIUNIU,
+    "⚠️ 本群未开启牛牛游戏，请管理员到【群设置】-【游戏功能】开启。",
+)
 async def qj(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -453,6 +481,10 @@ async def qj(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== 个人信息 =====
 @register_command("牛牛信息", "个人信息")
+@group_feature_required(
+    FEATURE_NIUNIU,
+    "⚠️ 本群未开启牛牛游戏，请管理员到【群设置】-【游戏功能】开启。",
+)
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -490,6 +522,10 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== 看AV =====
 @register_command("看AV", "看片")
+@group_feature_required(
+    FEATURE_NIUNIU,
+    "⚠️ 本群未开启牛牛游戏，请管理员到【群设置】-【游戏功能】开启。",
+)
 async def av(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -519,6 +555,10 @@ async def av(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== 偷取 =====
 @register_command("偷取", "口交")
+@group_feature_required(
+    FEATURE_NIUNIU,
+    "⚠️ 本群未开启牛牛游戏，请管理员到【群设置】-【游戏功能】开启。",
+)
 async def kj(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -564,6 +604,10 @@ async def kj(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== 约炮 =====
 @register_command("约炮")
+@group_feature_required(
+    FEATURE_NIUNIU,
+    "⚠️ 本群未开启牛牛游戏，请管理员到【群设置】-【游戏功能】开启。",
+)
 async def yp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -599,6 +643,10 @@ async def yp(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== 匿名模式 =====
 @register_command("匿名模式")
+@group_feature_required(
+    FEATURE_NIUNIU,
+    "⚠️ 本群未开启牛牛游戏，请管理员到【群设置】-【游戏功能】开启。",
+)
 async def setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -618,6 +666,10 @@ async def setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== 纳妾 =====
 @register_command("纳妾")
+@group_feature_required(
+    FEATURE_NIUNIU,
+    "⚠️ 本群未开启牛牛游戏，请管理员到【群设置】-【游戏功能】开启。",
+)
 async def naqie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -646,6 +698,10 @@ async def naqie(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @register_command("妻妾排行榜", "妻妾榜", "妾榜", "纳妾榜")
+@group_feature_required(
+    FEATURE_NIUNIU,
+    "⚠️ 本群未开启牛牛游戏，请管理员到【群设置】-【游戏功能】开启。",
+)
 async def concubine_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return

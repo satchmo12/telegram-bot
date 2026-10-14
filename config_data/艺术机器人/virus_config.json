@@ -1,0 +1,23 @@
+{
+    "enabled": true,
+    "duration": 30,
+    "min_active_players": 2,
+    "spread_required": 2,
+    "death_threshold": 3,
+    "first_spread_timeout": 120,
+    "antidote": {
+        "enabled": true,
+        "min_interval": 360,
+        "max_interval": 3600,
+        "duration": 180,
+        "items": [
+            "我是小狗汪汪汪",
+            "好痒啊",
+            "用力啊",
+            "啊啊啊",
+            "我是疯子",
+            "快点蹂躏我",
+            "好舒服好满足"
+        ]
+    }
+}

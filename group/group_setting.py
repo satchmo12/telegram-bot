@@ -1,5 +1,6 @@
 import asyncio
 import html
+import re
 import time
 from typing import Optional
 
@@ -14,7 +15,7 @@ from telegram.ext import (
     ApplicationHandlerStop,
 )
 
-from command_router import FEATURE_FRIENDS, register_command
+from command_router import FEATURE_FRIENDS, FEATURE_NIUNIU, register_command
 from feature_flags import is_feature_enabled
 from game.points_lottery_core import (
     LOTTERY_COST_MAX,
@@ -100,6 +101,7 @@ TOGGLE_FIELDS = [
 ]
 GAME_TOGGLE_FIELDS = [
     ("chengyu_game", "成语接龙"),
+    (FEATURE_NIUNIU, "牛牛游戏"),
     ("manor", "庄园系统"),
     (FEATURE_FRIENDS, "群好友功能"),
 ]
@@ -136,6 +138,11 @@ AI_REPLY_MAX_PER_HOUR_MIN = 1
 AI_REPLY_MAX_PER_HOUR_MAX = 10000
 AI_REPLY_MIN_INTERVAL_SEC_MIN = 0
 AI_REPLY_MIN_INTERVAL_SEC_MAX = 3600
+AI_REPLY_DELAY_SEC_MIN = 0
+AI_REPLY_DELAY_SEC_MAX = 300
+AI_REPLY_STYLE_MAX_LENGTH = 240
+DEFAULT_AI_REPLY_DELAY_MIN_SEC = 2
+DEFAULT_AI_REPLY_DELAY_MAX_SEC = 8
 AD_PUSH_MIN_INTERVAL = 5
 AD_PUSH_MAX_INTERVAL = 1440
 MANAGE_CHECK_CACHE_TTL_SEC = 60
@@ -1344,7 +1351,17 @@ def _group_list_text(data: dict, page: int = 1) -> str:
     return f"请选择要配置的群：\n第 {page}/{total_pages} 页"
 
 
-def _ai_reply_settings_values(cfg: dict) -> tuple[bool, int, int, int]:
+def _ai_reply_style_value(cfg: dict) -> str:
+    """Return the optional per-bot, per-group reply persona."""
+    return str((cfg or {}).get("ai_reply_style") or "").strip()[:AI_REPLY_STYLE_MAX_LENGTH]
+
+
+def _ai_reply_style_summary(style: str) -> str:
+    style = _ai_reply_style_value({"ai_reply_style": style})
+    return style if style else "默认自然口语"
+
+
+def _ai_reply_settings_values(cfg: dict) -> tuple[bool, int, int, int, int, int, str]:
     """Return safe AI reply settings stored for one group."""
     try:
         probability = int(cfg.get("ai_reply_probability", 50))
@@ -1358,6 +1375,18 @@ def _ai_reply_settings_values(cfg: dict) -> tuple[bool, int, int, int]:
         min_interval = int(cfg.get("ai_reply_min_interval_sec", 60))
     except (TypeError, ValueError):
         min_interval = 60
+    try:
+        delay_min = int(cfg.get("ai_reply_delay_min_sec", DEFAULT_AI_REPLY_DELAY_MIN_SEC))
+    except (TypeError, ValueError):
+        delay_min = DEFAULT_AI_REPLY_DELAY_MIN_SEC
+    try:
+        delay_max = int(cfg.get("ai_reply_delay_max_sec", DEFAULT_AI_REPLY_DELAY_MAX_SEC))
+    except (TypeError, ValueError):
+        delay_max = DEFAULT_AI_REPLY_DELAY_MAX_SEC
+    delay_min = max(AI_REPLY_DELAY_SEC_MIN, min(AI_REPLY_DELAY_SEC_MAX, delay_min))
+    delay_max = max(AI_REPLY_DELAY_SEC_MIN, min(AI_REPLY_DELAY_SEC_MAX, delay_max))
+    if delay_min > delay_max:
+        delay_min, delay_max = delay_max, delay_min
     return (
         bool(cfg.get("ai_reply_enabled", False)),
         max(AI_REPLY_PROBABILITY_MIN, min(AI_REPLY_PROBABILITY_MAX, probability)),
@@ -1366,11 +1395,14 @@ def _ai_reply_settings_values(cfg: dict) -> tuple[bool, int, int, int]:
             AI_REPLY_MIN_INTERVAL_SEC_MIN,
             min(AI_REPLY_MIN_INTERVAL_SEC_MAX, min_interval),
         ),
+        delay_min,
+        delay_max,
+        _ai_reply_style_value(cfg),
     )
 
 
 def _build_ai_reply_settings_text(chat_id_str: str, cfg: dict) -> str:
-    enabled, probability, max_per_hour, min_interval = _ai_reply_settings_values(cfg)
+    enabled, probability, max_per_hour, min_interval, delay_min, delay_max, style = _ai_reply_settings_values(cfg)
     global_enabled = bool(get_global_ai_reply_config().get("enabled", False))
     return (
         "🤖 AI 接话设置\n"
@@ -1379,13 +1411,15 @@ def _build_ai_reply_settings_text(chat_id_str: str, cfg: dict) -> str:
         f"本群开关：{'✅ 已开启' if enabled else '🚫 已关闭'}\n"
         f"回复概率：{probability}%\n"
         f"每小时最多回复：{max_per_hour} 次\n"
-        f"两次回复最短间隔：{min_interval} 秒\n\n"
-        "提示：仅总开关开启后，才会检查本群开关。"
+        f"两次回复最短间隔：{min_interval} 秒\n"
+        f"发送等待：{delay_min}-{delay_max} 秒\n"
+        f"回复风格：{html.escape(_ai_reply_style_summary(style))}\n\n"
+        "每个机器人、每个群的风格和等待时间独立保存；同群多机器人请分别设置不同风格和等待区间。"
     )
 
 
 def _build_ai_reply_settings_keyboard(chat_id_str: str, cfg: dict) -> InlineKeyboardMarkup:
-    enabled, probability, max_per_hour, min_interval = _ai_reply_settings_values(cfg)
+    enabled, probability, max_per_hour, min_interval, delay_min, delay_max, style = _ai_reply_settings_values(cfg)
     return InlineKeyboardMarkup(
         [
             [
@@ -1408,6 +1442,16 @@ def _build_ai_reply_settings_keyboard(chat_id_str: str, cfg: dict) -> InlineKeyb
                 InlineKeyboardButton(
                     f"⏱ 最短间隔：{min_interval}s",
                     callback_data=f"{CALLBACK_PREFIX}:ai_reply_interval:{chat_id_str}",
+                ),
+                InlineKeyboardButton(
+                    f"⌛ 发送等待：{delay_min}-{delay_max}s",
+                    callback_data=f"{CALLBACK_PREFIX}:ai_reply_delay:{chat_id_str}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🎭 回复风格",
+                    callback_data=f"{CALLBACK_PREFIX}:ai_reply_style:{chat_id_str}",
                 )
             ],
             [
@@ -1483,11 +1527,21 @@ def _build_group_panel_text(
         lines.append(f"曝光度：{int(cfg.get('exposure', 0))}")
     if bool(cfg.get("active_speak_enabled", False)):
         lines.append(f"主动说话频率：每 {interval} 分钟")
-    ai_enabled, ai_probability, ai_max_per_hour, ai_min_interval = _ai_reply_settings_values(cfg)
+    (
+        ai_enabled,
+        ai_probability,
+        ai_max_per_hour,
+        ai_min_interval,
+        ai_delay_min,
+        ai_delay_max,
+        ai_style,
+    ) = _ai_reply_settings_values(cfg)
     lines.append(
         f"AI 接话：{'✅ 开启' if ai_enabled else '🚫 关闭'} | 概率 {ai_probability}% | "
-        f"每小时 {ai_max_per_hour} 次 | 间隔 {ai_min_interval}s"
+        f"每小时 {ai_max_per_hour} 次 | 间隔 {ai_min_interval}s | 等待 {ai_delay_min}-{ai_delay_max}s"
     )
+    if ai_style:
+        lines.append(f"AI 风格：{html.escape(_ai_reply_style_summary(ai_style))}")
     if lottery_cfg["enabled"]:
         lines.append(
             f"积分抽奖：单次消耗 {lottery_cfg['cost']} 分 奖品数 {prize_count}"
@@ -2887,7 +2941,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             parse_mode="HTML",
         )
 
-    if action in {"ai_reply_probability", "ai_reply_hourly_limit", "ai_reply_interval"} and len(parts) >= 3:
+    if action in {"ai_reply_probability", "ai_reply_hourly_limit", "ai_reply_interval", "ai_reply_delay", "ai_reply_style"} and len(parts) >= 3:
         chat_id_str = parts[2]
         chat_id = _parse_chat_id(chat_id_str)
         if chat_id is None:
@@ -2898,6 +2952,8 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             "ai_reply_probability": "ai_reply_probability",
             "ai_reply_hourly_limit": "ai_reply_hourly_limit",
             "ai_reply_interval": "ai_reply_interval",
+            "ai_reply_delay": "ai_reply_delay",
+            "ai_reply_style": "ai_reply_style",
         }
         prompt_map = {
             "ai_reply_probability": (
@@ -2908,6 +2964,13 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             ),
             "ai_reply_interval": (
                 f"请输入两次 AI 回复最短间隔秒数（{AI_REPLY_MIN_INTERVAL_SEC_MIN}-{AI_REPLY_MIN_INTERVAL_SEC_MAX}，0 表示不设间隔）。"
+            ),
+            "ai_reply_delay": (
+                f"请输入发送等待区间，例如 2-8（单位秒，{AI_REPLY_DELAY_SEC_MIN}-{AI_REPLY_DELAY_SEC_MAX}）。"
+            ),
+            "ai_reply_style": (
+                "请输入该机器人在本群的回复风格，例如：温柔随意，偶尔用“哈哈”，不使用表情包。\n"
+                "发送“默认”可恢复默认自然口语风格。"
             ),
         }
         context.user_data["group_setting_stage"] = stage_map[action]
@@ -3835,6 +3898,8 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
         "ai_reply_probability",
         "ai_reply_hourly_limit",
         "ai_reply_interval",
+        "ai_reply_delay",
+        "ai_reply_style",
         "ad_message",
         "ad_text",
         "ad_interval",
@@ -4043,6 +4108,37 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
             await update.message.reply_text(
                 f"✅ 已设置主动说话频率：每 {interval} 分钟"
             )
+        elif stage == "ai_reply_style":
+            if text in {"默认", "恢复默认", "清空"}:
+                cfg["ai_reply_style"] = ""
+                await update.message.reply_text("✅ 已恢复默认自然口语风格。")
+            elif not text:
+                return await update.message.reply_text("❗ 请输入回复风格，或发送“默认”。")
+            elif len(text) > AI_REPLY_STYLE_MAX_LENGTH:
+                return await update.message.reply_text(
+                    f"❗ 回复风格最多 {AI_REPLY_STYLE_MAX_LENGTH} 个字符。"
+                )
+            else:
+                cfg["ai_reply_style"] = text
+                await update.message.reply_text("✅ 已保存本机器人在此群的 AI 回复风格。")
+        elif stage == "ai_reply_delay":
+            normalized = text.replace("～", "-").replace("~", "-").replace("至", "-").replace("到", "-")
+            match = re.fullmatch(r"\s*(\d+)\s*[-,， ]\s*(\d+)\s*", normalized)
+            if not match:
+                return await update.message.reply_text("❗ 格式示例：2-8（单位秒）。")
+            delay_min, delay_max = map(int, match.groups())
+            if not (
+                AI_REPLY_DELAY_SEC_MIN <= delay_min <= AI_REPLY_DELAY_SEC_MAX
+                and AI_REPLY_DELAY_SEC_MIN <= delay_max <= AI_REPLY_DELAY_SEC_MAX
+            ):
+                return await update.message.reply_text(
+                    f"❗ 发送等待范围：{AI_REPLY_DELAY_SEC_MIN}-{AI_REPLY_DELAY_SEC_MAX} 秒。"
+                )
+            if delay_min > delay_max:
+                return await update.message.reply_text("❗ 前面的最小秒数不能大于后面的最大秒数。")
+            cfg["ai_reply_delay_min_sec"] = delay_min
+            cfg["ai_reply_delay_max_sec"] = delay_max
+            await update.message.reply_text(f"✅ 已设置 AI 发送等待：{delay_min}-{delay_max} 秒")
         elif stage in {"ai_reply_probability", "ai_reply_hourly_limit", "ai_reply_interval"}:
             if not text or not text.isdigit():
                 return await update.message.reply_text("❗ 请输入有效的非负整数。")

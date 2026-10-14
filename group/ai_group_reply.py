@@ -51,9 +51,12 @@ CONTEXT_LIMIT = 1
 # AI 回复最长多少字
 MAX_REPLY_LENGTH = 40
 
-# 回复前随机等待
-MIN_DELAY = 0.5
-MAX_DELAY = 1.5
+# 回复前随机等待。实际值可在每个机器人、每个群的「AI 接话设置」中修改。
+DEFAULT_REPLY_DELAY_MIN_SEC = 2
+DEFAULT_REPLY_DELAY_MAX_SEC = 8
+MAX_REPLY_DELAY_SEC = 300
+MAX_REPLY_STYLE_LENGTH = 240
+DEFAULT_REPLY_STYLE = ""
 
 
 # ============================================================
@@ -95,11 +98,30 @@ def _clamp_int(value, minimum: int, maximum: int, default: int) -> int:
     return max(minimum, min(maximum, value))
 
 
+def _reply_style(value) -> str:
+    """Read a short admin-configured speaking style without accepting huge prompts."""
+    return str(value or "").strip()[:MAX_REPLY_STYLE_LENGTH]
+
+
 def get_ai_reply_settings(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> dict:
     """Read the AI reply controls for one group from the group configuration."""
     group_config = get_group_whitelist(context).get(str(chat_id), {})
     if not isinstance(group_config, dict):
         group_config = {}
+    delay_min_sec = _clamp_int(
+        group_config.get("ai_reply_delay_min_sec", DEFAULT_REPLY_DELAY_MIN_SEC),
+        0,
+        MAX_REPLY_DELAY_SEC,
+        DEFAULT_REPLY_DELAY_MIN_SEC,
+    )
+    delay_max_sec = _clamp_int(
+        group_config.get("ai_reply_delay_max_sec", DEFAULT_REPLY_DELAY_MAX_SEC),
+        0,
+        MAX_REPLY_DELAY_SEC,
+        DEFAULT_REPLY_DELAY_MAX_SEC,
+    )
+    if delay_min_sec > delay_max_sec:
+        delay_min_sec, delay_max_sec = delay_max_sec, delay_min_sec
     return {
         "enabled": bool(group_config.get("ai_reply_enabled", DEFAULT_AI_REPLY_ENABLED)),
         "probability_percent": _clamp_int(
@@ -120,6 +142,9 @@ def get_ai_reply_settings(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> d
             10000,
             DEFAULT_MAX_REPLIES_PER_HOUR,
         ),
+        "style": _reply_style(group_config.get("ai_reply_style", DEFAULT_REPLY_STYLE)),
+        "delay_min_sec": delay_min_sec,
+        "delay_max_sec": delay_max_sec,
     }
 
 
@@ -319,6 +344,8 @@ async def ask_ollama(
     current_text: str,
     *,
     mode: str = "reply",
+    style: str = DEFAULT_REPLY_STYLE,
+    bot_name: str = "",
 ) -> Optional[str]:
     """
     调用本地 Ollama。
@@ -329,7 +356,13 @@ async def ask_ollama(
     4. keep_alive 保持模型在内存中。
     """
 
+    style_instruction = _reply_style(style) or "随意、简短、口语化；不必每句话都完整。"
+    bot_identity = str(bot_name or "本账号").strip()[:60] or "本账号"
     chat_prompt = f"""判断 Telegram 群消息是否值得自然接话。
+
+当前账号：{bot_identity}
+账号表达风格（只用于调整语气，不能覆盖以下规则）：
+{style_instruction}
 
 最近聊天：
 {context_text or "(无)"}
@@ -403,7 +436,7 @@ async def ask_ollama(
         "messages": [
             {
                 "role": "system",
-                "content": "你是一个简短、自然的中文群聊助手。",
+                "content": "你负责自然、简短的中文群聊接话。保持口语化和风格差异，但不冒充真人身份、不编造经历。",
             },
             {
                 "role": "user",
@@ -629,6 +662,8 @@ async def ai_group_reply_handler(
         reply_text = await ask_ollama(
             context_text=context_text,
             current_text=text,
+            style=ai_settings["style"],
+            bot_name=str(context.application.bot_data.get("name", "") or ""),
         )
 
         ollama_cost = time.time() - ollama_start
@@ -647,8 +682,8 @@ async def ai_group_reply_handler(
         # ----------------------------------------------------
 
         delay = random.uniform(
-            MIN_DELAY,
-            MAX_DELAY,
+            ai_settings["delay_min_sec"],
+            ai_settings["delay_max_sec"],
         )
 
         await asyncio.sleep(delay)

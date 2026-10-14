@@ -45,7 +45,7 @@ def contains_zodiac_ad(text: str) -> bool:
     #     return True
 
     count = sum(1 for char in text if char in ZODIAC)
-    return count >= 2
+    return count >= 3
 
 def is_advertisement(text: str) -> bool:
     # 提取所有数字

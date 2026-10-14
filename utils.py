@@ -551,6 +551,7 @@ GROUP_CONFIG_DEFAULTS = {
     "ad_push_times": "",
     "business_coop_link": "",
     "manor": False,
+    "niuniu_game": False,
     "welcome": False,
     "learning_enabled": False,
     "reply_enabled": False,

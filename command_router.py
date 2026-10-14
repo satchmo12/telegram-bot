@@ -22,6 +22,7 @@ COMMANDS_INFO = {}
 FEATURE_MANOR = "manor"
 FEATURE_WELCOME = "welcome"
 FEATURE_FRIENDS = "friends"  # 群好友功能 key
+FEATURE_NIUNIU = "niuniu_game"  # 牛牛游戏群开关 key
 
 
 def _is_runtime_feature_enabled(
@@ -157,6 +158,27 @@ def feature_required(feature_name: str):
             return await func(update, context)
 
         wrapper.__feature_name__ = (feature_name or "").strip().lower()
+        return wrapper
+
+    return decorator
+
+
+def group_feature_required(feature_name: str, disabled_message: Optional[str] = None):
+    """Restrict a feature to enabled groups without affecting private chats."""
+
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(update, context):
+            chat = update.effective_chat
+            chat_type = (chat.type or "").lower() if chat else ""
+            if chat_type in {"group", "supergroup"}:
+                cfg = get_group_whitelist(context).get(str(chat.id), {})
+                if not isinstance(cfg, dict) or not bool(cfg.get(feature_name, False)):
+                    if disabled_message:
+                        await safe_reply(update, context, disabled_message)
+                    return
+            return await func(update, context)
+
         return wrapper
 
     return decorator
