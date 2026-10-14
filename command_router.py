@@ -174,8 +174,8 @@ def group_feature_required(feature_name: str, disabled_message: Optional[str] = 
             if chat_type in {"group", "supergroup"}:
                 cfg = get_group_whitelist(context).get(str(chat.id), {})
                 if not isinstance(cfg, dict) or not bool(cfg.get(feature_name, False)):
-                    if disabled_message:
-                        await safe_reply(update, context, disabled_message)
+                    # if disabled_message:
+                    #     await safe_reply(update, context, disabled_message)
                     return
             return await func(update, context)
 
