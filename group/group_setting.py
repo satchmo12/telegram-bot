@@ -98,6 +98,7 @@ TOGGLE_FIELDS = [
     ("name_change_notice", "用户名变更提示"),
     ("invite_approval_enabled", "邀请审核"),
     ("active_speak_enabled", "主动说话"),
+    ("online_baby_auto_enabled", "在线宝宝定时调用"),
 ]
 GAME_TOGGLE_FIELDS = [
     ("chengyu_game", "成语接龙"),
@@ -132,6 +133,9 @@ BOT_ADMIN_REQUIRED_FIELDS = {
 ACTIVE_SPEAK_MIN_INTERVAL = 1
 ACTIVE_SPEAK_MAX_INTERVAL = 1440
 ACTIVE_SPEAK_DEFAULT_INTERVAL = 2
+ONLINE_BABY_MIN_INTERVAL = 1
+ONLINE_BABY_MAX_INTERVAL = 1440
+ONLINE_BABY_DEFAULT_INTERVAL = 30
 AI_REPLY_PROBABILITY_MIN = 0
 AI_REPLY_PROBABILITY_MAX = 100
 AI_REPLY_MAX_PER_HOUR_MIN = 1
@@ -1490,6 +1494,9 @@ def _build_group_panel_text(
     username_text = f"@{username}" if username else "未设置"
     spam_limit_value = int(cfg.get("spam_limit_max_per_minute", 10))
     interval = int(cfg.get("active_speak_interval_min", ACTIVE_SPEAK_DEFAULT_INTERVAL))
+    online_baby_interval = int(
+        cfg.get("online_baby_interval_min", ONLINE_BABY_DEFAULT_INTERVAL)
+    )
     group_ads = _get_group_ads(cfg)
     business_coop = (
         _normalize_business_coop_link(cfg.get("business_coop_link", "")) or "未设置"
@@ -1527,6 +1534,8 @@ def _build_group_panel_text(
         lines.append(f"曝光度：{int(cfg.get('exposure', 0))}")
     if bool(cfg.get("active_speak_enabled", False)):
         lines.append(f"主动说话频率：每 {interval} 分钟")
+    if bool(cfg.get("online_baby_auto_enabled", False)):
+        lines.append(f"在线宝宝定时调用：每 {online_baby_interval} 分钟")
     (
         ai_enabled,
         ai_probability,
@@ -1602,12 +1611,23 @@ def _build_group_panel_keyboard(
         rows.append(toggle_buttons[i : i + 3])
         
     interval = int(cfg.get("active_speak_interval_min", ACTIVE_SPEAK_DEFAULT_INTERVAL))
+    online_baby_interval = int(
+        cfg.get("online_baby_interval_min", ONLINE_BABY_DEFAULT_INTERVAL)
+    )
     rows.append(
         [
             InlineKeyboardButton(
                 text=f"⏱ 主动说话频率：{interval}m",
                 callback_data=f"{CALLBACK_PREFIX}:active_speak_interval:{chat_id}",
             ),
+            InlineKeyboardButton(
+                text=f"🟢 在线宝宝间隔：{online_baby_interval}m",
+                callback_data=f"{CALLBACK_PREFIX}:online_baby_interval:{chat_id}",
+            ),
+        ]
+    )
+    rows.append(
+        [
             InlineKeyboardButton(
                 "🎮 游戏功能",
                 callback_data=f"{CALLBACK_PREFIX}:game_menu:{chat_id}",
@@ -2915,6 +2935,26 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             ),
         )
 
+    if action == "online_baby_interval" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        context.user_data["group_setting_stage"] = "online_baby_interval"
+        context.user_data["group_setting_chat_id"] = chat_id_str
+        await query.answer()
+        return await query.edit_message_text(
+            f"请输入在线宝宝自动调用间隔（分钟，{ONLINE_BABY_MIN_INTERVAL}-{ONLINE_BABY_MAX_INTERVAL}）。",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton(
+                    "⬅️ 返回",
+                    callback_data=f"{CALLBACK_PREFIX}:online_baby_interval_back",
+                )]]
+            ),
+        )
+
     if action == "ai_reply_menu" and len(parts) >= 3:
         await query.answer()
         return await _open_ai_reply_settings_panel(
@@ -3520,7 +3560,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         save_json(GROUP_LIST_FILE, data)
         return await _open_group_panel(query, context, chat_id_str, user_id)
 
-    if action == "active_speak_interval_back":
+    if action in {"active_speak_interval_back", "online_baby_interval_back"}:
         context.user_data.pop("group_setting_stage", None)
         chat_id_str = context.user_data.pop("group_setting_chat_id", None)
         await query.answer()
@@ -3895,6 +3935,7 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
         "force_channel",
         "force_channel_add",
         "active_speak_interval",
+        "online_baby_interval",
         "ai_reply_probability",
         "ai_reply_hourly_limit",
         "ai_reply_interval",
@@ -4107,6 +4148,20 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
             cfg["active_speak_interval_min"] = interval
             await update.message.reply_text(
                 f"✅ 已设置主动说话频率：每 {interval} 分钟"
+            )
+        elif stage == "online_baby_interval":
+            if not text:
+                return await update.message.reply_text("❗ 请输入数字分钟。")
+            interval = _parse_positive_int(text)
+            if interval is None:
+                return await update.message.reply_text("❗ 请输入数字分钟。")
+            if interval < ONLINE_BABY_MIN_INTERVAL or interval > ONLINE_BABY_MAX_INTERVAL:
+                return await update.message.reply_text(
+                    f"❗ 间隔范围：{ONLINE_BABY_MIN_INTERVAL}-{ONLINE_BABY_MAX_INTERVAL} 分钟"
+                )
+            cfg["online_baby_interval_min"] = interval
+            await update.message.reply_text(
+                f"✅ 已设置在线宝宝自动调用间隔：每 {interval} 分钟"
             )
         elif stage == "ai_reply_style":
             if text in {"默认", "恢复默认", "清空"}:

@@ -102,6 +102,8 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "voice_reply_enabled": False,
             "active_speak_enabled": False,  # 默认不主动说话
             "active_speak_interval_min": 2,
+            "online_baby_auto_enabled": False,
+            "online_baby_interval_min": 30,
             "ai_reply_enabled": True,
             "ai_reply_probability": 100,
             "ai_reply_max_per_hour": 1000,
@@ -158,6 +160,12 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             changed = True
         if "active_speak_interval_min" not in group:
             group["active_speak_interval_min"] = 2
+            changed = True
+        if "online_baby_auto_enabled" not in group:
+            group["online_baby_auto_enabled"] = False
+            changed = True
+        if "online_baby_interval_min" not in group:
+            group["online_baby_interval_min"] = 30
             changed = True
         if "ai_reply_enabled" not in group:
             group["ai_reply_enabled"] = False

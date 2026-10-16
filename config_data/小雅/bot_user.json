@@ -3,7 +3,7 @@
         "name": "J-Satchmo",
         "username": "iwoai",
         "join_time": 1773327081,
-        "last_active": 1791969182,
+        "last_active": 1792092655,
         "blocked": false
     },
     "6819879789": {
@@ -47,7 +47,7 @@
         "name": "姜伯约（频道招广告业务）",
         "username": "jiangboyue668",
         "join_time": 1774277044,
-        "last_active": 1787750721,
+        "last_active": 1792081803,
         "blocked": false
     },
     "8151171430": {
@@ -366,7 +366,8 @@
         "username": "ls2174",
         "join_time": 1775128321,
         "last_active": 1790686849,
-        "blocked": false
+        "blocked": true,
+        "blocked_at": 1792079581
     },
     "8335993094": {
         "name": "小新",
@@ -411,7 +412,8 @@
         "username": "taiyangchengeq",
         "join_time": 1775406816,
         "last_active": 1777243126,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8327801964": {
         "name": "淡然",
@@ -647,7 +649,8 @@
         "username": "yu7009",
         "join_time": 1775926820,
         "last_active": 1776185653,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "7650049422": {
         "name": "月色",
@@ -734,7 +737,8 @@
         "username": "GroupAnonymousBot",
         "join_time": 1776164789,
         "last_active": 1791342208,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "7638128082": {
         "name": "小呆（与世无争）",
@@ -841,7 +845,8 @@
         "username": "Xingzhe179",
         "join_time": 1776317959,
         "last_active": 1777905493,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6742691918": {
         "name": "长安宁",
@@ -1225,7 +1230,8 @@
         "username": "Lin88u",
         "join_time": 1778275504,
         "last_active": 1783018423,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8094442951": {
         "name": "程咬金",
@@ -1932,7 +1938,8 @@
         "username": "tmuwb645pu",
         "join_time": 1782147272,
         "last_active": 1782147272,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "7582017288": {
         "name": "A. 明宇",
@@ -2243,7 +2250,8 @@
         "username": "aahuihui123",
         "join_time": 1783308112,
         "last_active": 1783308178,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8198758072": {
         "name": "真诚待人",
@@ -2522,10 +2530,10 @@
         "blocked": false
     },
     "8457604587": {
-        "name": "💯এ赶໌ᮨ路🚬人🍶དྷ༗࿐（转账语音确认）",
+        "name": "天道酬勤",
         "username": "jixiang85",
         "join_time": 1784271637,
-        "last_active": 1784271769,
+        "last_active": 1792081660,
         "blocked": false
     },
     "8006701937": {
@@ -2602,7 +2610,8 @@
         "username": "xiaxia777777",
         "join_time": 1784463564,
         "last_active": 1784466699,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "7324448744": {
         "name": "你二大爷",
@@ -2794,7 +2803,8 @@
         "username": "Xp16881688",
         "join_time": 1785215928,
         "last_active": 1791602021,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8615433972": {
         "name": "💲",
@@ -2823,7 +2833,8 @@
         "username": "hzwdd",
         "join_time": 1785475378,
         "last_active": 1785475461,
-        "blocked": false
+        "blocked": true,
+        "blocked_at": 1792079959
     },
     "7062572164": {
         "name": "财神爷",
@@ -2913,7 +2924,8 @@
         "username": "",
         "join_time": 1786630461,
         "last_active": 1790773310,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8964657909": {
         "name": "💛熙熙🌷",
@@ -2934,7 +2946,8 @@
         "username": "aqw_1417",
         "join_time": 1786905955,
         "last_active": 1786905955,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8992584087": {
         "name": "陈先生",
@@ -2986,7 +2999,8 @@
         "username": "",
         "join_time": 1787330807,
         "last_active": 1787330807,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6269268569": {
         "name": "超市🛒拍照，每张8十 ⋆",
@@ -3127,7 +3141,8 @@
         "username": "Blackwood550",
         "join_time": 1787772392,
         "last_active": 1788789645,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8932038623": {
         "name": "晚风小姐✨",
@@ -3382,7 +3397,8 @@
         "username": "",
         "join_time": 1788332947,
         "last_active": 1788332947,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8415016284": {
         "name": "能网.🤣购就能赚钱，←点我z💎i料了解一下",
@@ -3411,7 +3427,8 @@
         "username": "",
         "join_time": 1788419225,
         "last_active": 1788419225,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "5754819988": {
         "name": "Marcus",
@@ -3463,7 +3480,8 @@
         "username": "",
         "join_time": 1788440136,
         "last_active": 1788440136,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "1562334936": {
         "name": "HR鼎记集团",
@@ -3521,7 +3539,8 @@
         "username": "MXQ_888888",
         "join_time": 1788466888,
         "last_active": 1788466899,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6684414836": {
         "name": "📷拍*违*停 🚖一*百/张🧧 ˚",
@@ -3543,7 +3562,8 @@
         "username": "ltvp2uxap8w",
         "join_time": 1788512653,
         "last_active": 1788512653,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "5296317291": {
         "name": "ZZZZ 𓆏ࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩ",
@@ -3586,7 +3606,8 @@
         "username": "",
         "join_time": 1788554181,
         "last_active": 1788554181,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8186334808": {
         "name": "手机📱【拍照1百*每-张】📸 ·",
@@ -3652,13 +3673,14 @@
         "username": "amzepa",
         "join_time": 1788647289,
         "last_active": 1790169614,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "7627844227": {
         "name": "宗介 gg",
         "username": "Zongjie1116",
         "join_time": 1788651591,
-        "last_active": 1788651593,
+        "last_active": 1792081355,
         "blocked": false
     },
     "8523252614": {
@@ -3716,7 +3738,8 @@
         "username": "linbeiLB",
         "join_time": 1788690531,
         "last_active": 1788690533,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8860267438": {
         "name": "A浩（Mx77-接待）",
@@ -3879,7 +3902,8 @@
         "username": "taylordanielu552",
         "join_time": 1788855694,
         "last_active": 1790431694,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8786026559": {
         "name": "秦嫣然",
@@ -4043,7 +4067,8 @@
         "username": "ccsx60xvku78",
         "join_time": 1789051601,
         "last_active": 1789051601,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6728386953": {
         "name": "𓆏ࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩ东少𓆏ࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩࣩ",
@@ -4057,7 +4082,8 @@
         "username": "ttu6869",
         "join_time": 1789052698,
         "last_active": 1789477487,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8506082534": {
         "name": "根深蒂固 ⋆",
@@ -4116,7 +4142,8 @@
         "username": "H00088A111",
         "join_time": 1789079552,
         "last_active": 1789079552,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6576019176": {
         "name": "富贵",
@@ -4145,7 +4172,8 @@
         "username": "tah5gvc3zs",
         "join_time": 1789124961,
         "last_active": 1789124961,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8382149384": {
         "name": "📷拍*违*停 🚘一*百*元/张🧧",
@@ -4166,7 +4194,8 @@
         "username": "v7yzbensii",
         "join_time": 1789154601,
         "last_active": 1789154601,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8321355530": {
         "name": "📷拍*违*停 🚘一*百*元/张🧧 𓂃",
@@ -4298,7 +4327,8 @@
         "username": "",
         "join_time": 1789239922,
         "last_active": 1789241232,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8911200782": {
         "name": "📷拍*违*停 🚘一*百*元/张🧧 ·",
@@ -4341,7 +4371,8 @@
         "username": "",
         "join_time": 1789299306,
         "last_active": 1789299306,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "5292043503": {
         "name": "冯洋",
@@ -4355,7 +4386,8 @@
         "username": "isl1xerlx",
         "join_time": 1789303590,
         "last_active": 1789303590,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8102304520": {
         "name": "📷拍*违*停 🚘一*百*元/张🧧 ˚",
@@ -4384,7 +4416,8 @@
         "username": "",
         "join_time": 1789329094,
         "last_active": 1789329094,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8824431768": {
         "name": "个咖啡 ᯤ",
@@ -4399,7 +4432,8 @@
         "username": "",
         "join_time": 1789350382,
         "last_active": 1789350382,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8894354237": {
         "name": "🧧手机【拍照*一百*-张】📸 ˚",
@@ -4421,7 +4455,8 @@
         "username": "",
         "join_time": 1789365702,
         "last_active": 1789365702,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8779074533": {
         "name": "u收网赌号负盈利号收黑分",
@@ -4443,7 +4478,8 @@
         "username": "",
         "join_time": 1789376100,
         "last_active": 1789376100,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8999689445": {
         "name": "向北 专业收购网du输号",
@@ -4465,14 +4501,16 @@
         "username": "",
         "join_time": 1789376783,
         "last_active": 1789376783,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8748348049": {
         "name": "向北 专业收购网du输号",
         "username": "",
         "join_time": 1789378574,
         "last_active": 1789378574,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "5791353021": {
         "name": "最.新🎨.𝟣𝟩.𝖯 .𝖬.𝖠𝖷..仅..",
@@ -4494,7 +4532,8 @@
         "username": "qehcob8cu",
         "join_time": 1789394804,
         "last_active": 1789394804,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8812298008": {
         "name": "📷拍*违*停 🚘一*百*元/张🧧 ⋆",
@@ -4603,7 +4642,8 @@
         "username": "dtgqwvnxcfsj7457",
         "join_time": 1789454733,
         "last_active": 1789454733,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "7065738726": {
         "name": "最.新🎯𝟣𝟩.𝖯 .𝖬.𝖠 .",
@@ -4632,7 +4672,8 @@
         "username": "w3babvi8_b",
         "join_time": 1789476640,
         "last_active": 1789476640,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8929918743": {
         "name": "m神仙高价收网赌号",
@@ -4647,7 +4688,8 @@
         "username": "ZKNN6888",
         "join_time": 1789480219,
         "last_active": 1789480219,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8824505190": {
         "name": "神仙高价收网赌号j",
@@ -4662,7 +4704,8 @@
         "username": "wc2o8zlj",
         "join_time": 1789486859,
         "last_active": 1789486859,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8953104071": {
         "name": "神仙高价收网赌号q",
@@ -4773,7 +4816,8 @@
         "username": "bbt6eehd2v",
         "join_time": 1789563573,
         "last_active": 1789563573,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8166412529": {
         "name": "🧧手机【拍照*一百*-张】📸 𓂃",
@@ -4787,14 +4831,16 @@
         "username": "RRYL0123",
         "join_time": 1789571738,
         "last_active": 1789571738,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8419495062": {
         "name": "🧧手机【拍照*一百*-张】📸",
         "username": "akj8h03",
         "join_time": 1789573184,
         "last_active": 1789573184,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "5262982141": {
         "name": "东南亚的游戏",
@@ -4899,7 +4945,8 @@
         "username": "",
         "join_time": 1789647511,
         "last_active": 1789647511,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8636125215": {
         "name": "MarieAurora",
@@ -4914,7 +4961,8 @@
         "username": "Taufikk123",
         "join_time": 1789649314,
         "last_active": 1789649314,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6863784894": {
         "name": "茜茜 看我主页",
@@ -4922,7 +4970,8 @@
         "join_time": 1789651970,
         "last_active": 1789651970,
         "blocked": true,
-        "blocked_at": 1789652097
+        "blocked_at": 1789652097,
+        "send_failed": true
     },
     "8438042540": {
         "name": "XO",
@@ -4991,7 +5040,8 @@
         "username": "e_l65wls0",
         "join_time": 1789711679,
         "last_active": 1789711679,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "1934077697": {
         "name": "哈噻 哈噻",
@@ -5055,7 +5105,8 @@
         "username": "",
         "join_time": 1789758813,
         "last_active": 1789758813,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "5605573158": {
         "name": "🧧手机【拍照*一百*-张】📸 ˚",
@@ -5111,7 +5162,8 @@
         "username": "p6mzkux7va",
         "join_time": 1789794523,
         "last_active": 1789794523,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8835698231": {
         "name": "莉莉",
@@ -5170,7 +5222,8 @@
         "username": "bgyly4t",
         "join_time": 1789841163,
         "last_active": 1789841234,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8028799039": {
         "name": "📱手机*拍违停*一百圆*一张🧧 ·",
@@ -5235,14 +5288,16 @@
         "username": "y7iourj1k4",
         "join_time": 1789908357,
         "last_active": 1789908357,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6645599930": {
         "name": "Jisha",
         "username": "",
         "join_time": 1789910759,
         "last_active": 1789910759,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "5499603302": {
         "name": "🦋诗雪😹",
@@ -5302,7 +5357,8 @@
         "username": "g6pz180iv",
         "join_time": 1789980795,
         "last_active": 1789980795,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8921569372": {
         "name": "余生",
@@ -5317,7 +5373,8 @@
         "username": "ktm797",
         "join_time": 1789990338,
         "last_active": 1790682307,
-        "blocked": false
+        "blocked": true,
+        "blocked_at": 1792079596
     },
     "8822914349": {
         "name": "兔兔🐰",
@@ -5331,21 +5388,24 @@
         "username": "",
         "join_time": 1790003232,
         "last_active": 1790003232,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "1911690206": {
         "name": "最.新𝟣8.🎨 .仅. . 需..5",
         "username": "cwikkpphvvom5456",
         "join_time": 1790009673,
         "last_active": 1790009673,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8808633860": {
         "name": "神仙♻高价回收博彩输钱号b",
         "username": "idplt4iq83",
         "join_time": 1790016627,
         "last_active": 1790016627,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8721674924": {
         "name": "大排档（双狮店）",
@@ -5359,14 +5419,16 @@
         "username": "wchlszyolu",
         "join_time": 1790019146,
         "last_active": 1790019146,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8744662620": {
         "name": "📱手机*拍违停*一百圆*一张🧧",
         "username": "",
         "join_time": 1790021755,
         "last_active": 1790021755,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8931404547": {
         "name": "🥇雪儿🔥",
@@ -5382,7 +5444,8 @@
         "username": "",
         "join_time": 1790037101,
         "last_active": 1790037101,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "1640052289": {
         "name": "🎀😄日日进财源🤖🎸",
@@ -5403,7 +5466,8 @@
         "username": "L74830",
         "join_time": 1790042849,
         "last_active": 1790042849,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8978072161": {
         "name": "五五开",
@@ -5418,14 +5482,16 @@
         "username": "zuijfty",
         "join_time": 1790061143,
         "last_active": 1790061143,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8866144335": {
         "name": "📱手机*拍违停*一百圆*一张🧧",
         "username": "",
         "join_time": 1790065719,
         "last_active": 1790065719,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8604336299": {
         "name": "亿亿娱乐",
@@ -5509,7 +5575,8 @@
         "username": "",
         "join_time": 1790104151,
         "last_active": 1790104151,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8825175680": {
         "name": "🔥欣欣❤️",
@@ -5525,7 +5592,8 @@
         "username": "wca4v9jru",
         "join_time": 1790111475,
         "last_active": 1790111475,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8310395958": {
         "name": "📱手机*拍违停*一百圆*一张🧧 ♡",
@@ -5561,7 +5629,8 @@
         "username": "",
         "join_time": 1790144018,
         "last_active": 1790144018,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8240161640": {
         "name": "mpbc",
@@ -5583,70 +5652,80 @@
         "join_time": 1790147505,
         "last_active": 1790147505,
         "blocked": true,
-        "blocked_at": 1790147552
+        "blocked_at": 1790147552,
+        "send_failed": true
     },
     "6458911066": {
         "name": "📱手机*拍违停*一百圆*一张🧧 ˚",
         "username": "hvyo1olu8",
         "join_time": 1790149805,
         "last_active": 1790149805,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8848544990": {
         "name": "u高价收博彩账号 收黑分",
         "username": "c12ntbknm9u",
         "join_time": 1790156429,
         "last_active": 1790156429,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8830961529": {
         "name": "📱手机*拍违停*一百圆*一张🧧 ᯤ",
         "username": "ek46w9bi",
         "join_time": 1790157177,
         "last_active": 1790157177,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6902179094": {
         "name": "VISA卡台",
         "username": "vsv2302",
         "join_time": 1790162615,
         "last_active": 1790162615,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8034967740": {
         "name": "桃花仙女🍀",
         "username": "FCDPXN",
         "join_time": 1790201108,
         "last_active": 1790201119,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8688582272": {
         "name": "冷凝管",
         "username": "waisong9999",
         "join_time": 1790201115,
         "last_active": 1790201128,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "2020500644": {
         "name": "Pradeep Lumbar",
         "username": "",
         "join_time": 1790271353,
         "last_active": 1790271353,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8266661288": {
         "name": "1",
         "username": "",
         "join_time": 1790325026,
         "last_active": 1790325026,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6301786957": {
         "name": "路遥",
         "username": "Sqesy798",
         "join_time": 1790335104,
         "last_active": 1790335193,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "1603275067": {
         "name": "常潮锋",
@@ -5674,7 +5753,8 @@
         "username": "yxfixqdd0xh",
         "join_time": 1790408343,
         "last_active": 1790408343,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "2104963476": {
         "name": "云盈钥",
@@ -5688,7 +5768,8 @@
         "username": "ws0_mch1",
         "join_time": 1790432326,
         "last_active": 1790432326,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "5042441538": {
         "name": "🌈水果专卖店搞",
@@ -5730,21 +5811,24 @@
         "username": "",
         "join_time": 1790466644,
         "last_active": 1790466644,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8647503966": {
         "name": "Belinda",
         "username": "",
         "join_time": 1790494591,
         "last_active": 1790494593,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "5247738948": {
         "name": "😁山月来相访😽",
         "username": "shu_y_221",
         "join_time": 1790498747,
         "last_active": 1790498747,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "7571014278": {
         "name": "看喔竹叶",
@@ -5772,14 +5856,16 @@
         "username": "",
         "join_time": 1790553057,
         "last_active": 1790553137,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "7402878058": {
         "name": "最高点位shou♻网赌账号 黑分x",
         "username": "wxbwef6zhun",
         "join_time": 1790589385,
         "last_active": 1790589385,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "1590820470": {
         "name": "（速球体育送88美金）主页平台",
@@ -5807,7 +5893,8 @@
         "username": "x2ljmdy20g",
         "join_time": 1790594921,
         "last_active": 1790594921,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8660094186": {
         "name": ".七七",
@@ -5821,7 +5908,8 @@
         "username": "i8hz0l7sa95t",
         "join_time": 1790609088,
         "last_active": 1790609088,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6088349341": {
         "name": "🤔如风过境🍂",
@@ -5842,7 +5930,8 @@
         "username": "XiXi1389",
         "join_time": 1790645013,
         "last_active": 1790645108,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "7967413259": {
         "name": "最好的假钞",
@@ -5863,7 +5952,8 @@
         "username": "",
         "join_time": 1790676276,
         "last_active": 1790676276,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8384798901": {
         "name": "阴阳大师",
@@ -5898,7 +5988,8 @@
         "username": "",
         "join_time": 1790715690,
         "last_active": 1790715754,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8792426442": {
         "name": "Danielle",
@@ -5926,7 +6017,8 @@
         "username": "xnfmho00kq",
         "join_time": 1790758263,
         "last_active": 1790758263,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6172891733": {
         "name": "袁京蝶",
@@ -5947,7 +6039,8 @@
         "username": "",
         "join_time": 1790772027,
         "last_active": 1790772027,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8626919868": {
         "name": "六合彩微信收单统计软件",
@@ -5968,7 +6061,8 @@
         "username": "",
         "join_time": 1790790899,
         "last_active": 1790790964,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6315715957": {
         "name": "看喔竹耶",
@@ -5982,7 +6076,8 @@
         "username": "go83gijku0f",
         "join_time": 1790812543,
         "last_active": 1790812543,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8046794877": {
         "name": "快乐",
@@ -6017,7 +6112,8 @@
         "username": "Clziii",
         "join_time": 1790854447,
         "last_active": 1790854486,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "7833186452": {
         "name": "ღ心无旁骛᭄ꦿ࿐",
@@ -6045,35 +6141,40 @@
         "username": "",
         "join_time": 1790882637,
         "last_active": 1790882637,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "1781045169": {
         "name": "Patel",
         "username": "Pragnesh111",
         "join_time": 1790899280,
         "last_active": 1790899280,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8132429581": {
         "name": "景甜",
         "username": "c96f12der",
         "join_time": 1790903596,
         "last_active": 1790903661,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6281405793": {
         "name": "🤩人间宝藏🐦",
         "username": "leooxtkx4",
         "join_time": 1790914293,
         "last_active": 1790914293,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8794982806": {
         "name": "Mary",
         "username": "",
         "join_time": 1790916213,
         "last_active": 1790916213,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8361334733": {
         "name": "Shrawan",
@@ -6087,21 +6188,24 @@
         "username": "g34u1dxp",
         "join_time": 1790925159,
         "last_active": 1790925178,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "2023330251": {
         "name": "guri",
         "username": "",
         "join_time": 1790927153,
         "last_active": 1790927153,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8836118891": {
         "name": "1神仙♻专‍收‍网赌号 黑分​",
         "username": "hdt5qrvsy1",
         "join_time": 1790957303,
         "last_active": 1790957303,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "7961050286": {
         "name": "رابعہ",
@@ -6143,7 +6247,8 @@
         "username": "",
         "join_time": 1791002263,
         "last_active": 1791002263,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8404719341": {
         "name": "Pavi",
@@ -6164,7 +6269,8 @@
         "username": "",
         "join_time": 1791003330,
         "last_active": 1791003330,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8001423960": {
         "name": "Gautam Kumar",
@@ -6192,14 +6298,16 @@
         "username": "HH37405",
         "join_time": 1791074988,
         "last_active": 1791075005,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8976536635": {
         "name": "景甜",
         "username": "",
         "join_time": 1791086196,
         "last_active": 1791086260,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8955309639": {
         "name": "Linda",
@@ -6235,14 +6343,16 @@
         "username": "KolyaDanilov98",
         "join_time": 1791120769,
         "last_active": 1791372074,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "5329467734": {
         "name": "银河系捕手",
         "username": "le84vhlpww",
         "join_time": 1791135019,
         "last_active": 1791135019,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6405045491": {
         "name": "看喔竹耶",
@@ -6270,7 +6380,8 @@
         "username": "g9uypuda",
         "join_time": 1791201395,
         "last_active": 1791201395,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8075634142": {
         "name": "婷",
@@ -6284,14 +6395,16 @@
         "username": "b6pub146",
         "join_time": 1791231255,
         "last_active": 1791231255,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8842912766": {
         "name": "六合彩微信收单统计软件",
         "username": "b6pub148",
         "join_time": 1791232146,
         "last_active": 1791232146,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "1632826581": {
         "name": "虚拟货币搬砖日挣1千U",
@@ -6312,7 +6425,8 @@
         "username": "",
         "join_time": 1791265848,
         "last_active": 1791265848,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8832140269": {
         "name": "六合彩微信收单统计软件",
@@ -6326,7 +6440,8 @@
         "username": "a6pub202",
         "join_time": 1791283683,
         "last_active": 1791283683,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "7695789522": {
         "name": "和事佬",
@@ -6382,7 +6497,8 @@
         "username": "zuo678678",
         "join_time": 1791362437,
         "last_active": 1791362437,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6553696129": {
         "name": "胡",
@@ -6396,14 +6512,16 @@
         "username": "yx87878",
         "join_time": 1791370506,
         "last_active": 1791370506,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6090982339": {
         "name": "烨",
         "username": "Baiye0622",
         "join_time": 1791370639,
         "last_active": 1791422507,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6935924330": {
         "name": "坦途跨境［小路到付］",
@@ -6431,14 +6549,16 @@
         "username": "a6pub237",
         "join_time": 1791398743,
         "last_active": 1791398743,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8990002951": {
         "name": "Karen",
         "username": "",
         "join_time": 1791399495,
         "last_active": 1791399495,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8182618165": {
         "name": "A成『包车、保关、双向解封』",
@@ -6452,7 +6572,8 @@
         "username": "",
         "join_time": 1791425053,
         "last_active": 1791425053,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6747291918": {
         "name": "西港水果大王&鲜花&蛋糕24h下单客服2号",
@@ -6473,14 +6594,16 @@
         "username": "",
         "join_time": 1791460557,
         "last_active": 1791460665,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8960732073": {
         "name": "bajie感谢 信任和支持",
         "username": "",
         "join_time": 1791465275,
-        "last_active": 1791895651,
-        "blocked": false
+        "last_active": 1792068161,
+        "blocked": false,
+        "send_failed": true
     },
     "8774687671": {
         "name": "蔡",
@@ -6494,7 +6617,8 @@
         "username": "",
         "join_time": 1791483871,
         "last_active": 1791483951,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8968473114": {
         "name": "六合彩微信收单统计软件",
@@ -6515,7 +6639,8 @@
         "username": "rxmblzui",
         "join_time": 1791488816,
         "last_active": 1791488816,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6058816327": {
         "name": "salete",
@@ -6550,14 +6675,16 @@
         "username": "degree8169",
         "join_time": 1791529844,
         "last_active": 1791529844,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8924777896": {
         "name": "看喔主页",
         "username": "ax50ro9prax4sh7ln",
         "join_time": 1791531376,
         "last_active": 1791531376,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "2060717621": {
         "name": "侯",
@@ -6571,14 +6698,16 @@
         "username": "xiaoyuyizhi",
         "join_time": 1791548562,
         "last_active": 1791548562,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8628153422": {
         "name": "看喔竹耶",
         "username": "",
         "join_time": 1791549116,
         "last_active": 1791549173,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6587734822": {
         "name": "g高价回收网赌输钱账号 黑分",
@@ -6606,7 +6735,8 @@
         "username": "",
         "join_time": 1791558841,
         "last_active": 1791558841,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "5547475368": {
         "name": "✨月岚💜🤓",
@@ -6627,14 +6757,16 @@
         "username": "",
         "join_time": 1791578797,
         "last_active": 1791578797,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8820012756": {
         "name": "马到功成",
         "username": "GDR888888",
         "join_time": 1791602175,
         "last_active": 1791602175,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8910864012": {
         "name": "六合彩微信收单统计软件",
@@ -6718,7 +6850,8 @@
         "username": "",
         "join_time": 1791650258,
         "last_active": 1791650322,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "7717059950": {
         "name": "Chandraprakash",
@@ -6732,7 +6865,8 @@
         "username": "",
         "join_time": 1791651759,
         "last_active": 1791651759,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6637957093": {
         "name": "拾光",
@@ -6753,7 +6887,8 @@
         "username": "",
         "join_time": 1791675967,
         "last_active": 1791676032,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "7947518109": {
         "name": "【UP集团斗篷部】-思思【开户/斗篷/代投/上架/PWA】 招斗篷代理",
@@ -6802,21 +6937,24 @@
         "username": "",
         "join_time": 1791729066,
         "last_active": 1791729066,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "6896799531": {
         "name": "🎊琴🍀",
         "username": "",
         "join_time": 1791740658,
         "last_active": 1791740658,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8521809097": {
         "name": "可乐",
         "username": "KELES6",
         "join_time": 1791744336,
         "last_active": 1791744336,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "7639480131": {
         "name": "Manuella Cicera Portela Da Silva",
@@ -6857,7 +6995,7 @@
         "name": "Rosemary",
         "username": "",
         "join_time": 1791802498,
-        "last_active": 1791802498,
+        "last_active": 1792080291,
         "blocked": false
     },
     "8832637949": {
@@ -6865,7 +7003,8 @@
         "username": "a6pub315",
         "join_time": 1791809760,
         "last_active": 1791809908,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "7604755166": {
         "name": "可梅",
@@ -6886,13 +7025,14 @@
         "username": "z2d7g4wbhsq9",
         "join_time": 1791839979,
         "last_active": 1791839979,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "8577850500": {
         "name": "Lauren",
         "username": "",
         "join_time": 1791848559,
-        "last_active": 1791848559,
+        "last_active": 1792080292,
         "blocked": false
     },
     "8961927988": {
@@ -6900,7 +7040,8 @@
         "username": "b7kk_dp2x29",
         "join_time": 1791887624,
         "last_active": 1791887624,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "1172213627": {
         "name": "🅰 西港金边 • 外送按摩",
@@ -6920,7 +7061,7 @@
         "name": "Crystal",
         "username": "",
         "join_time": 1791905536,
-        "last_active": 1791905536,
+        "last_active": 1792080292,
         "blocked": false
     },
     "8668220230": {
@@ -6942,7 +7083,8 @@
         "username": "",
         "join_time": 1791919721,
         "last_active": 1791919721,
-        "blocked": false
+        "blocked": false,
+        "send_failed": true
     },
     "7109102123": {
         "name": "竹君子",
@@ -6963,6 +7105,215 @@
         "username": "",
         "join_time": 1791932066,
         "last_active": 1791932066,
+        "blocked": false,
+        "send_failed": true
+    },
+    "8941679617": {
+        "name": "六合彩微信收单统计软件",
+        "username": "a6pub340",
+        "join_time": 1791977407,
+        "last_active": 1791977407,
+        "blocked": false
+    },
+    "7706792508": {
+        "name": "渣渣辉",
+        "username": "NMD68620",
+        "join_time": 1791988372,
+        "last_active": 1791988372,
+        "blocked": false
+    },
+    "8195450976": {
+        "name": "A 汇丰-客服大猫",
+        "username": "HFJR07",
+        "join_time": 1791990785,
+        "last_active": 1791990810,
+        "blocked": false
+    },
+    "8842820458": {
+        "name": "看喔竹耶",
+        "username": "",
+        "join_time": 1791995776,
+        "last_active": 1791995837,
+        "blocked": false
+    },
+    "8397931683": {
+        "name": "小蛋糕(资金来往语音确认)",
+        "username": "xiaodangao112",
+        "join_time": 1791997252,
+        "last_active": 1791997252,
+        "blocked": false
+    },
+    "8781063486": {
+        "name": "Linda",
+        "username": "",
+        "join_time": 1792023544,
+        "last_active": 1792080293,
+        "blocked": false
+    },
+    "8824293821": {
+        "name": "看喔竹耶",
+        "username": "",
+        "join_time": 1792038663,
+        "last_active": 1792038705,
+        "blocked": false,
+        "send_failed": true
+    },
+    "8406547814": {
+        "name": "U8国际-娜娜",
+        "username": "u8gjnana",
+        "join_time": 1792042697,
+        "last_active": 1792114868,
+        "blocked": false
+    },
+    "8911785785": {
+        "name": "看喔竹耶",
+        "username": "",
+        "join_time": 1792044693,
+        "last_active": 1792044732,
+        "blocked": false,
+        "send_failed": true
+    },
+    "8070290440": {
+        "name": "陈八毛",
+        "username": "chenbamao",
+        "join_time": 1792059778,
+        "last_active": 1792059779,
+        "blocked": false
+    },
+    "7880103977": {
+        "name": "yi",
+        "username": "",
+        "join_time": 1792067246,
+        "last_active": 1792067246,
+        "blocked": false
+    },
+    "8829488701": {
+        "name": "luwu",
+        "username": "",
+        "join_time": 1792069890,
+        "last_active": 1792069890,
+        "blocked": false
+    },
+    "8739073149": {
+        "name": "congshu",
+        "username": "",
+        "join_time": 1792070286,
+        "last_active": 1792070286,
+        "blocked": false
+    },
+    "8341095328": {
+        "name": "牛牛TG代发",
+        "username": "tangxin_227cgnoqm",
+        "join_time": 1792073423,
+        "last_active": 1792073423,
+        "blocked": false
+    },
+    "8809266801": {
+        "name": "狗狗",
+        "username": "ross_kathrsze",
+        "join_time": 1792074420,
+        "last_active": 1792074420,
+        "blocked": false,
+        "send_failed": true
+    },
+    "8835234067": {
+        "name": "请勿",
+        "username": "elliotbergnau",
+        "join_time": 1792074464,
+        "last_active": 1792074464,
+        "blocked": false,
+        "send_failed": true
+    },
+    "6544609545": {
+        "name": "程老板",
+        "username": "xiaomeir1",
+        "join_time": 1792075852,
+        "last_active": 1792075856,
+        "blocked": false
+    },
+    "8716577878": {
+        "name": "Zoe",
+        "username": "",
+        "join_time": 1792076265,
+        "last_active": 1792080294,
+        "blocked": false
+    },
+    "8960321137": {
+        "name": "漂泊在远方",
+        "username": "jTh565888",
+        "join_time": 1792077068,
+        "last_active": 1792077099,
+        "blocked": false
+    },
+    "8072154624": {
+        "name": "人生😀小路回国到付",
+        "username": "hf777788",
+        "join_time": 1792077185,
+        "last_active": 1792077292,
+        "blocked": false,
+        "send_failed": true
+    },
+    "6685140106": {
+        "name": "刀痕泪痕",
+        "username": "lbzmvg",
+        "join_time": 1792081651,
+        "last_active": 1792081651,
+        "blocked": false
+    },
+    "8981104793": {
+        "name": "Tide",
+        "username": "",
+        "join_time": 1792085291,
+        "last_active": 1792085291,
+        "blocked": false
+    },
+    "6521625383": {
+        "name": "随便坐",
+        "username": "qoxq3w81sg",
+        "join_time": 1792094203,
+        "last_active": 1792094203,
+        "blocked": false
+    },
+    "8800673922": {
+        "name": "Alyssa Rae De Leon",
+        "username": "",
+        "join_time": 1792109128,
+        "last_active": 1792109128,
+        "blocked": false
+    },
+    "8739378989": {
+        "name": "Gzzfys",
+        "username": "",
+        "join_time": 1792115144,
+        "last_active": 1792115148,
+        "blocked": false
+    },
+    "5253596571": {
+        "name": "gong",
+        "username": "",
+        "join_time": 1792133896,
+        "last_active": 1792133896,
+        "blocked": false
+    },
+    "8730927595": {
+        "name": "U",
+        "username": "Fxxing",
+        "join_time": 1792135232,
+        "last_active": 1792136153,
+        "blocked": false
+    },
+    "8611250439": {
+        "name": "阿凯✨帝豪➕大浪（外送妹子）",
+        "username": "akai8888899999",
+        "join_time": 1792135260,
+        "last_active": 1792135260,
+        "blocked": false
+    },
+    "8595910906": {
+        "name": "看喔竹耶",
+        "username": "",
+        "join_time": 1792135794,
+        "last_active": 1792135830,
         "blocked": false
     }
 }

@@ -3,6 +3,7 @@ from customer.customer_qa import register_customer_qa_handlers
 from admin_permissions import register_admin_permission_handlers
 from customer.editUserInfo import register_customer_edit_handlers
 from forward.message_forward import register_message_forward_handlers
+from format_output import register_format_output_handlers
 from game.virus_game_handler import register_virus_handlers
 from group.ai_group_reply import register_ai_group_reply_handlers
 from group.favorite import register_favorite
@@ -18,6 +19,7 @@ def register_all_handlers(app):
     register_admin_permission_handlers(app)
     register_multi_bot_manager_handlers(app)
     register_reply_keyboard_button_handlers(app)
+    register_format_output_handlers(app)
     register_economy_handlers_group(app)
     register_entertainment_handlers(app)
     register_simulation_handlers(app)

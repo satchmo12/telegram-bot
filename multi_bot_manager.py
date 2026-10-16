@@ -25,6 +25,14 @@ from multi_bot_registry import (
     update_managed_bot_features,
     update_bot_timezone,
 )
+from start_welcome_settings import (
+    START_WELCOME_EDIT_KEY,
+    START_WELCOME_RETURN_TO_SETTINGS_KEY,
+    load_start_welcome_config,
+    reset_start_welcome_text,
+    set_start_reply_keyboard_enabled,
+    start_reply_keyboard_enabled,
+)
 from runtime_bot_manager import (
     get_running_app,
     is_bot_running,
@@ -588,21 +596,77 @@ def _current_bot_config(context: ContextTypes.DEFAULT_TYPE) -> Optional[dict]:
     return get_bot_config_by_name(name) if name else None
 
 
+def _build_current_bot_settings_keyboard() -> InlineKeyboardMarkup:
+    keyboard_status = "✅ 已开启" if start_reply_keyboard_enabled() else "🚫 已关闭"
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🕒 设置时区",
+                    callback_data=f"{CALLBACK_PREFIX}:current_timezone",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "✏️ 欢迎词",
+                    callback_data=f"{CALLBACK_PREFIX}:start_welcome",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    f"⌨️ /start 弹出键盘：{keyboard_status}",
+                    callback_data=f"{CALLBACK_PREFIX}:start_keyboard_toggle",
+                )
+            ],
+            [InlineKeyboardButton("⬅️ 返回主面板", callback_data="start:back")],
+        ]
+    )
+
+
 async def _show_current_bot_settings(query, cfg: dict):
     name = str(cfg.get("name", "")).strip()
     return await query.edit_message_text(
         "⚙️ 机器人设置\n\n"
         f"当前机器人：{html.escape(name)}\n"
         f"时区：{html.escape(_timezone_label(cfg.get('timezone', 'Asia/Shanghai')))}",
+        reply_markup=_build_current_bot_settings_keyboard(),
+        parse_mode="HTML",
+    )
+
+
+def _start_welcome_preview_text() -> str:
+    text = str(load_start_welcome_config().get("text") or "").strip()
+    return text or "（当前使用默认欢迎词）"
+
+
+async def _show_start_welcome_settings(query, cfg: dict):
+    preview = _start_welcome_preview_text()
+    if len(preview) > 900:
+        preview = f"{preview[:900]}…"
+    return await query.edit_message_text(
+        "✏️ <b>/start 欢迎词</b>\n\n"
+        "可使用 <code>{bot_name}</code> 自动代入机器人名称；支持会员表情。\n\n"
+        f"当前内容：\n<blockquote>{html.escape(preview)}</blockquote>",
         reply_markup=InlineKeyboardMarkup(
             [
                 [
                     InlineKeyboardButton(
-                        "🕒 设置时区",
-                        callback_data=f"{CALLBACK_PREFIX}:current_timezone",
+                        "✏️ 修改欢迎词",
+                        callback_data=f"{CALLBACK_PREFIX}:start_welcome_edit",
                     )
                 ],
-                [InlineKeyboardButton("⬅️ 返回主面板", callback_data="start:back")],
+                [
+                    InlineKeyboardButton(
+                        "♻️ 恢复默认欢迎词",
+                        callback_data=f"{CALLBACK_PREFIX}:start_welcome_reset",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬅️ 返回机器人设置",
+                        callback_data=f"{CALLBACK_PREFIX}:settings",
+                    )
+                ],
             ]
         ),
         parse_mode="HTML",
@@ -676,6 +740,64 @@ async def handle_multi_bot_callback(update: Update, context: ContextTypes.DEFAUL
         if not _can_edit_bot(cfg, query.from_user.id):
             return await query.answer("仅机器人所有者或超级管理员可修改设置。", show_alert=True)
         await query.answer()
+        return await _show_current_bot_settings(query, cfg)
+
+    if action in {
+        "start_welcome",
+        "start_welcome_edit",
+        "start_welcome_reset",
+        "start_welcome_cancel",
+        "start_keyboard_toggle",
+    }:
+        cfg = _current_bot_config(context)
+        if not cfg:
+            return await query.answer("未找到当前机器人配置。", show_alert=True)
+        if not _can_edit_bot(cfg, query.from_user.id):
+            return await query.answer("仅机器人所有者或超级管理员可修改设置。", show_alert=True)
+
+        if action == "start_welcome":
+            await query.answer()
+            return await _show_start_welcome_settings(query, cfg)
+
+        if action == "start_welcome_edit":
+            context.user_data[START_WELCOME_EDIT_KEY] = True
+            context.user_data[START_WELCOME_RETURN_TO_SETTINGS_KEY] = True
+            await query.answer()
+            return await query.edit_message_text(
+                "✏️ <b>修改 /start 欢迎词</b>\n\n"
+                "请直接发送新的欢迎词；支持会员表情及 <code>{bot_name}</code> 自动代入机器人名称。\n"
+                "发送“取消”放弃本次修改。",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "⬅️ 返回并取消输入",
+                                callback_data=f"{CALLBACK_PREFIX}:start_welcome_cancel",
+                            )
+                        ]
+                    ]
+                ),
+                parse_mode="HTML",
+            )
+
+        if action == "start_welcome_reset":
+            reset_start_welcome_text()
+            context.user_data.pop(START_WELCOME_EDIT_KEY, None)
+            context.user_data.pop(START_WELCOME_RETURN_TO_SETTINGS_KEY, None)
+            await query.answer("已恢复默认欢迎词。")
+            return await _show_start_welcome_settings(query, cfg)
+
+        if action == "start_welcome_cancel":
+            context.user_data.pop(START_WELCOME_EDIT_KEY, None)
+            context.user_data.pop(START_WELCOME_RETURN_TO_SETTINGS_KEY, None)
+            await query.answer("已取消欢迎词修改。")
+            return await _show_start_welcome_settings(query, cfg)
+
+        enabled = not start_reply_keyboard_enabled()
+        set_start_reply_keyboard_enabled(enabled)
+        await query.answer(
+            "已开启 /start 底部键盘" if enabled else "已关闭 /start 底部键盘"
+        )
         return await _show_current_bot_settings(query, cfg)
 
     if action == "current_timezone":

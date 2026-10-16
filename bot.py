@@ -47,7 +47,6 @@ from channel.telethon_forwarder import start_telethon_forwarder_job, stop_teleth
 from channel.telethon_login import _clear_login_state
 from info.economy import handle_points_log_start_parameter
 from info.storage import ensure_info_migrated
-from channel.channel_config import is_active_subscription
 from channel.publish_setting import (
     handle_comment_start_parameter,
     handle_report_start_parameter,
@@ -60,6 +59,15 @@ from custom_command_templates import (
     visible_reply_labels,
 )
 from reply_keyboard_buttons import visible_reply_keyboard_labels
+from start_welcome_settings import (
+    START_WELCOME_EDIT_KEY,
+    START_WELCOME_RETURN_TO_SETTINGS_KEY,
+    load_start_welcome_config,
+    reset_start_welcome_text,
+    save_start_welcome_text,
+    set_start_reply_keyboard_enabled,
+    start_reply_keyboard_enabled,
+)
 from command_router import get_matched_command
 from admin_permissions import has_admin_permission, is_owner_or_super_admin
 
@@ -634,35 +642,6 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
     # await forward_to_owner(update, context)
 
 
-START_WELCOME_FILE = "config_data/start_welcome.json"
-START_WELCOME_EDIT_KEY = "start_welcome_editing"
-START_REPLY_KEYBOARD_CONFIG_KEY = "show_reply_keyboard"
-
-
-def _load_start_welcome_config() -> dict:
-    data = load_json(START_WELCOME_FILE)
-    return data if isinstance(data, dict) else {}
-
-
-def _start_reply_keyboard_enabled() -> bool:
-    """Whether a normal private /start should send the bottom reply keyboard."""
-    return bool(_load_start_welcome_config().get(START_REPLY_KEYBOARD_CONFIG_KEY, True))
-
-
-def _set_start_reply_keyboard_enabled(enabled: bool) -> None:
-    config = _load_start_welcome_config()
-    config[START_REPLY_KEYBOARD_CONFIG_KEY] = bool(enabled)
-    save_json(START_WELCOME_FILE, config)
-
-
-def _reset_start_welcome_text() -> None:
-    """Restore only the welcome copy, leaving /start keyboard preference intact."""
-    config = _load_start_welcome_config()
-    config.pop("text", None)
-    config.pop("entities", None)
-    save_json(START_WELCOME_FILE, config)
-
-
 def _can_configure_start_welcome(context: ContextTypes.DEFAULT_TYPE, user) -> bool:
     if not user:
         return False
@@ -670,10 +649,9 @@ def _can_configure_start_welcome(context: ContextTypes.DEFAULT_TYPE, user) -> bo
         is_owner = int(user.id) == int(context.application.bot_data.get("owner_id"))
     except (TypeError, ValueError):
         is_owner = False
-    return bool(is_owner)
-
-    # This setting is intentionally stricter than ordinary admin settings.
-    return bool(is_owner and is_active_subscription(user))
+    # Keep this aligned with the robot-settings panel: the bot owner and
+    # super administrators can configure the welcome experience.
+    return bool(is_owner or is_super_admin(user.id))
 
 
 def _utf16_length(value: str) -> int:
@@ -739,7 +717,7 @@ def _render_start_welcome_entities(template: str, raw_entities, bot_name: str):
 
 
 def _configured_start_welcome_payload(bot_name: str):
-    config = _load_start_welcome_config()
+    config = load_start_welcome_config()
     template = str(config.get("text") or "")
     if not template.strip():
         return None
@@ -807,7 +785,7 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         # The bottom ReplyKeyboard is optional. The inline start panel below
         # remains available regardless of this setting.
-        if _start_reply_keyboard_enabled():
+        if start_reply_keyboard_enabled():
             await show_menu(update, context)
     else:
         return
@@ -1025,7 +1003,6 @@ def _build_start_panel_rows(
     if not isinstance(custom_menu_buttons, dict):
         custom_menu_buttons = {}
     is_bot_admin_viewer = bool(user_id and is_owner_or_super_admin(context, int(user_id)))
-    can_config_welcome = _can_configure_start_welcome(context, user)
 
     def can_use(permission: str) -> bool:
         return bool(user_id and has_admin_permission(context, int(user_id), permission))
@@ -1046,6 +1023,24 @@ def _build_start_panel_rows(
     if is_bot_admin_viewer:
         rows.append([InlineKeyboardButton("⚙️机器人设置", callback_data="mbot:settings")])
 
+    # The master bot owner can forward a channel post here and receive a
+    # rule-based, reformatted copy. Rule editing lives in its own panel.
+    is_master_owner = bool(
+        bot_name == MASTER_BOT_NAME and user_id and int(user_id) == owner_id
+    )
+    if is_master_owner:
+        rows.append(
+            [
+                InlineKeyboardButton("📐格式输出", callback_data="fmt:output"),
+                InlineKeyboardButton("⚙️规则设置", callback_data="fmt:rules:1"),
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton("📋生成报告链接", callback_data="fmt:report_link"),
+            ]
+        )
+
     if is_bot_admin_viewer or any(
         can_use(permission) for permission in ("submission_config", "private_forward")
     ):
@@ -1065,15 +1060,6 @@ def _build_start_panel_rows(
             owner_row.append(InlineKeyboardButton("⌨️命令模板", callback_data="ccmd:menu"))
             owner_row.append(InlineKeyboardButton("⌨️键盘按钮", callback_data="rkb:menu"))
             owner_row.append(InlineKeyboardButton("👥多管理员", callback_data="adm:panel"))
-        if can_config_welcome:
-            owner_row.append(InlineKeyboardButton("✏️欢迎词", callback_data="welcome:edit"))
-            keyboard_status = "✅" if _start_reply_keyboard_enabled() else "🚫"
-            owner_row.append(
-                InlineKeyboardButton(
-                    f"⌨️ /start 弹出键盘：{keyboard_status}",
-                    callback_data="welcome:keyboard_toggle",
-                )
-            )
         if owner_row:
             # rows.append(owner_row)
             # 每两个按钮一行
@@ -1145,11 +1131,11 @@ async def start_welcome_callback(update: Update, context: ContextTypes.DEFAULT_T
     if not update.effective_chat or update.effective_chat.type != "private":
         return await query.answer("请在私聊中配置欢迎词。", show_alert=True)
     if not _can_configure_start_welcome(context, update.effective_user):
-        return await query.answer("仅机器人所有者且订阅有效时可以配置欢迎词。", show_alert=True)
+        return await query.answer("仅机器人所有者或超级管理员可以配置欢迎词。", show_alert=True)
     action = query.data.split(":", 1)[1]
     if action == "keyboard_toggle":
-        enabled = not _start_reply_keyboard_enabled()
-        _set_start_reply_keyboard_enabled(enabled)
+        enabled = not start_reply_keyboard_enabled()
+        set_start_reply_keyboard_enabled(enabled)
         await query.answer(
             "已开启 /start 底部键盘" if enabled else "已关闭 /start 底部键盘"
         )
@@ -1160,6 +1146,7 @@ async def start_welcome_callback(update: Update, context: ContextTypes.DEFAULT_T
         )
     if action == "cancel":
         context.user_data.pop(START_WELCOME_EDIT_KEY, None)
+        context.user_data.pop(START_WELCOME_RETURN_TO_SETTINGS_KEY, None)
         await query.answer("已取消当前欢迎词输入。")
         bot_name = context.application.bot_data.get("name", "机器人")
         user_id = update.effective_user.id if update.effective_user else None
@@ -1173,7 +1160,7 @@ async def start_welcome_callback(update: Update, context: ContextTypes.DEFAULT_T
             disable_web_page_preview=True,
         )
     if action == "reset":
-        _reset_start_welcome_text()
+        reset_start_welcome_text()
         context.user_data.pop(START_WELCOME_EDIT_KEY, None)
         await query.answer("已恢复默认欢迎词。")
         bot_name = context.application.bot_data.get("name", "机器人")
@@ -1185,7 +1172,7 @@ async def start_welcome_callback(update: Update, context: ContextTypes.DEFAULT_T
             disable_web_page_preview=True,
         )
     context.user_data[START_WELCOME_EDIT_KEY] = True
-    current = str(_load_start_welcome_config().get("text") or "").strip() or "（当前使用默认欢迎词）"
+    current = str(load_start_welcome_config().get("text") or "").strip() or "（当前使用默认欢迎词）"
     await query.answer()
     return await query.edit_message_text(
         "✏️ <b>配置欢迎词</b>\n\n"
@@ -1212,7 +1199,19 @@ async def start_welcome_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     text_for_command = text.strip()
     if text_for_command in {"取消", "返回"}:
         context.user_data.pop(START_WELCOME_EDIT_KEY, None)
-        await update.message.reply_text("已取消欢迎词修改。")
+        return_to_settings = context.user_data.pop(
+            START_WELCOME_RETURN_TO_SETTINGS_KEY, False
+        )
+        await update.message.reply_text(
+            "已取消欢迎词修改。",
+            reply_markup=(
+                InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⚙️ 返回机器人设置", callback_data="mbot:settings")]]
+                )
+                if return_to_settings
+                else None
+            ),
+        )
         raise ApplicationHandlerStop
     if not text_for_command:
         await update.message.reply_text("欢迎词不能为空，请重新发送。")
@@ -1220,17 +1219,26 @@ async def start_welcome_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     if len(text) > 3500:
         await update.message.reply_text("欢迎词不能超过 3500 个字符，请重新发送。")
         raise ApplicationHandlerStop
-    save_json(
-        START_WELCOME_FILE,
-        {
-            "text": text,
-            "entities": _serialize_start_welcome_entities(update.message),
-        },
+    save_start_welcome_text(
+        text,
+        _serialize_start_welcome_entities(update.message),
     )
     context.user_data.pop(START_WELCOME_EDIT_KEY, None)
+    return_to_settings = context.user_data.pop(
+        START_WELCOME_RETURN_TO_SETTINGS_KEY, False
+    )
     bot_name = context.application.bot_data.get("name", "机器人")
     preview_text, preview_entities = _configured_start_welcome_payload(bot_name)
-    await update.message.reply_text("✅ 欢迎词已保存，预览如下：")
+    await update.message.reply_text(
+        "✅ 欢迎词已保存，预览如下：",
+        reply_markup=(
+            InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⚙️ 返回机器人设置", callback_data="mbot:settings")]]
+            )
+            if return_to_settings
+            else None
+        ),
+    )
     await update.message.reply_text(
         preview_text,
         entities=preview_entities,

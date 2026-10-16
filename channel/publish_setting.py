@@ -2310,9 +2310,93 @@ async def _reply_collection_display(message, context: ContextTypes.DEFAULT_TYPE,
     )
 
 
+def _online_baby_payload(config: dict):
+    """Build the same online-baby roster used by manual group requests."""
+    data = _load_checkin_posts()
+    posts = data.get("posts", {}) if isinstance(data, dict) else {}
+    if not isinstance(posts, dict) or not posts:
+        return None
+
+    online_posts = _current_main_online_checkin_posts(
+        list(posts.values()), config, int(time.time())
+    )
+    if not online_posts:
+        return None
+
+    grouped = _group_online_checkin_posts(
+        online_posts, config, recover_from_keyword_index=False
+    )
+    online_text = _checkin_command_text(config, "checkin_online_text", "在线宝宝")
+    lines = [f"🟢 {online_text}"]
+    link_items = []
+
+    for group, subgrouped_posts in grouped.items():
+        if group:
+            lines.extend(["", f"【{group}】"])
+        for subgroup, group_posts in subgrouped_posts.items():
+            if subgroup:
+                lines.append(f"〔{subgroup}〕")
+            names = []
+            for post in group_posts:
+                channel_id = _as_int(post.get("channel_id"))
+                message_id = _as_int(post.get("message_id"))
+                link = (
+                    _fallback_channel_message_link(channel_id, message_id)
+                    if channel_id is not None and message_id is not None
+                    else None
+                )
+                name_text = _checkin_display_value(
+                    post, config, recover_from_keyword_index=False
+                )
+                names.append(name_text)
+                if link:
+                    link_items.append((name_text, link))
+            if names:
+                lines.append("  ".join(names))
+
+    result_text = "\n".join(lines)
+    entities = []
+    search_start = 0
+    for name_text, link in link_items:
+        offset = result_text.find(name_text, search_start)
+        if offset >= 0:
+            entities.append(
+                MessageEntity(
+                    type=MessageEntity.TEXT_LINK,
+                    offset=offset,
+                    length=len(name_text),
+                    url=link,
+                )
+            )
+            search_start = offset + len(name_text)
+    entities = MessageEntity.adjust_message_entities_to_utf_16(result_text, entities)
+    return result_text, entities, len(online_posts)
+
+
+async def send_online_babies_to_group(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+) -> bool:
+    """Proactively publish the online-baby roster to one configured group."""
+    config = load_publish_config()
+    if not bool(config.get("checkin_enabled", False)):
+        return False
+    payload = _online_baby_payload(config)
+    if not payload:
+        return False
+    text, entities, _ = payload
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        entities=entities or None,
+        disable_web_page_preview=True,
+    )
+    return True
+
+
 async def _handle_checkin_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     msg = update.message
-    if not msg or not msg.text or not update.effective_user:
+    if not msg or not msg.text:
         return False
     chat = update.effective_chat
     if not chat or chat.type not in {"group", "supergroup"}:
@@ -2338,20 +2422,30 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
     if not bool(config.get("checkin_enabled", False)):
         return False
 
-    online_started_at = time.perf_counter() if command == online_command else None
+    if command == online_command:
+        started_at = time.perf_counter()
+        payload = _online_baby_payload(config)
+        if not payload:
+            await msg.reply_text("当前暂无在线宝宝。")
+            return True
+        result_text, entities, online_count = payload
+        await msg.reply_text(
+            result_text,
+            entities=entities or None,
+            disable_web_page_preview=True,
+        )
+        elapsed = time.perf_counter() - started_at
+        if elapsed >= 0.5:
+            print(f"[性能] 在线宝宝响应耗时 {elapsed:.3f}s posts={online_count}")
+        return True
+
+    if not update.effective_user:
+        return False
     data = _load_checkin_posts()
-    # The roster has its own lightweight expiry filter below.  Avoid scanning
-    # and rewriting every saved post whenever somebody asks “在线宝宝”.
-    if command != online_command and _cleanup_expired_checkin_posts(data):
+    if _cleanup_expired_checkin_posts(data):
         _save_checkin_posts(data)
     posts = data.get("posts", {})
     if not posts:
-        # Rebuilding every historical post from the complete keyword index can
-        # take a long time.  An online-roster request only needs active checkins,
-        # so return immediately instead of blocking the group message.
-        if command == online_command:
-            await msg.reply_text("当前暂无在线宝宝。")
-            return True
         _rebuild_checkin_posts_from_keyword_index(config)
         data = _load_checkin_posts()
         posts = data.get("posts", {})
@@ -2413,102 +2507,6 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
         )
         return True
 
-    now_ts = int(time.time())
-    online_posts = _current_main_online_checkin_posts(
-        list(posts.values()),
-        config,
-        now_ts,
-    )
-
-    if not online_posts:
-        await msg.reply_text("当前暂无在线宝宝。")
-        return True
-
-    # Do not perform legacy-field hydration here.  It can issue one sequential
-    # Telethon request per online post, making “在线宝宝” wait many seconds.
-    # Newly registered posts already persist their fields; old incomplete posts
-    # use the lightweight “在线用户” fallback in this fast display path.
-
-    grouped = _group_online_checkin_posts(
-        online_posts,
-        config,
-        recover_from_keyword_index=False,
-    )
-
-    lines = [f"🟢 {online_text}"]
-    link_items = []
-    source_channels = set()
-
-    def checkin_post_link(post: dict):
-        """Use a local private-post link; never wait for Bot API get_chat here."""
-        channel_id = _as_int(post.get("channel_id"))
-        message_id = _as_int(post.get("message_id"))
-        if channel_id is None or message_id is None:
-            return None
-        source_channels.add(channel_id)
-        return _fallback_channel_message_link(channel_id, message_id)
-
-    for group, subgrouped_posts in grouped.items():
-        if group:
-            lines.extend(["", f"【{group}】"])
-
-        for subgroup, group_posts in subgrouped_posts.items():
-            if subgroup:
-                lines.append(f"〔{subgroup}〕")
-
-            names = []
-            for post in group_posts:
-                link = checkin_post_link(post)
-                name_text = _checkin_display_value(
-                    post,
-                    config,
-                    recover_from_keyword_index=False,
-                )
-                names.append(name_text)
-                if link:
-                    link_items.append((name_text, link))
-
-            if names:
-                lines.append("  ".join(names))
-
-    result_text = "\n".join(lines)
-
-    # 根据最终文本重新寻找每个名字的位置
-    text_link_entities = []
-
-    search_start = 0
-    for name_text, link in link_items:
-        offset = result_text.find(name_text, search_start)
-
-        if offset >= 0:
-            text_link_entities.append(
-                MessageEntity(
-                    type=MessageEntity.TEXT_LINK,
-                    offset=offset,
-                    length=len(name_text),
-                    url=link,
-                )
-            )
-            search_start = offset + len(name_text)
-
-    text_link_entities = MessageEntity.adjust_message_entities_to_utf_16(
-        result_text,
-        text_link_entities,
-    )
-
-    await msg.reply_text(
-        result_text,
-        entities=text_link_entities or None,
-        disable_web_page_preview=True,
-    )
-    if online_started_at is not None:
-        elapsed = time.perf_counter() - online_started_at
-        if elapsed >= 0.5:
-            print(
-                "[性能] 在线宝宝响应耗时 "
-                f"{elapsed:.3f}s posts={len(online_posts)} "
-                f"channels={len(source_channels)}"
-            )
     return True
 
 
@@ -3067,6 +3065,115 @@ def _report_subject_entries(entries: Optional[list[dict]]) -> list[dict]:
     return subjects
 
 
+def _report_post_key(channel_id, message_id) -> tuple[Optional[int], Optional[int]]:
+    return _as_int(channel_id), _as_int(message_id)
+
+
+def _report_post_refs(report: dict) -> list[dict]:
+    """Return every source post ever associated with one username report.
+
+    Older records stored only the latest ``channel_id`` / ``message_id``.  Keep
+    that record as the first source reference so existing reports migrate
+    automatically when they are opened or updated.
+    """
+    if not isinstance(report, dict):
+        return []
+    refs = []
+    seen = set()
+    candidates = list(report.get("posts", []) or [])
+    candidates.insert(
+        0,
+        {
+            "channel_id": report.get("channel_id"),
+            "message_id": report.get("message_id"),
+            "subjects": report.get("subjects", []),
+            "created_at": report.get("created_at", 0),
+        },
+    )
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        channel_id, message_id = _report_post_key(
+            item.get("channel_id"), item.get("message_id")
+        )
+        if channel_id is None or message_id is None:
+            continue
+        key = (channel_id, message_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        subjects = item.get("subjects", [])
+        refs.append(
+            {
+                "channel_id": channel_id,
+                "message_id": message_id,
+                "subjects": _report_subject_entries(subjects),
+                "created_at": int(item.get("created_at", 0) or 0),
+            }
+        )
+    return refs
+
+
+def _store_report_post_refs(report: dict, refs: list[dict]) -> bool:
+    """Save normalized source references and report whether storage changed."""
+    normalized = _report_post_refs({"posts": refs})
+    previous = report.get("posts") if isinstance(report, dict) else None
+    if previous == normalized:
+        return False
+    report["posts"] = normalized
+    return True
+
+
+def _add_report_post_ref(
+    report: dict,
+    channel_id,
+    message_id,
+    *,
+    subjects: Optional[list[dict]] = None,
+    created_at=None,
+) -> bool:
+    """Add/update a source post while retaining every older publication."""
+    channel_id, message_id = _report_post_key(channel_id, message_id)
+    if channel_id is None or message_id is None:
+        return False
+    refs = _report_post_refs(report)
+    normalized_subjects = _report_subject_entries(subjects)
+    for ref in refs:
+        if _report_post_key(ref.get("channel_id"), ref.get("message_id")) != (
+            channel_id,
+            message_id,
+        ):
+            continue
+        changed = False
+        if normalized_subjects and ref.get("subjects") != normalized_subjects:
+            ref["subjects"] = normalized_subjects
+            changed = True
+        if created_at and not ref.get("created_at"):
+            ref["created_at"] = int(created_at)
+            changed = True
+        if changed:
+            _store_report_post_refs(report, refs)
+        return changed
+    refs.append(
+        {
+            "channel_id": channel_id,
+            "message_id": message_id,
+            "subjects": normalized_subjects,
+            "created_at": int(created_at or time.time()),
+        }
+    )
+    _store_report_post_refs(report, refs)
+    return True
+
+
+def _report_has_post_ref(report: dict, channel_id, message_id) -> bool:
+    key = _report_post_key(channel_id, message_id)
+    return key in {
+        _report_post_key(ref.get("channel_id"), ref.get("message_id"))
+        for ref in _report_post_refs(report)
+    }
+
+
 def _create_comment_report(
     channel_id: int, message_id: int, report_id: str, subject_entries: Optional[list[dict]] = None
 ) -> None:
@@ -3077,9 +3184,18 @@ def _create_comment_report(
     if not isinstance(comments, list):
         comments = []
 
-    # A republish keeps the report's comments, but its displayed collection
-    # fields are replaced by the fields extracted from this current post only.
+    # A republish keeps the report's comments *and* every original post.  One
+    # report ID represents one username, so its public report must aggregate
+    # comments from all publications of that username rather than only the
+    # latest post.
     report = dict(existing) if isinstance(existing, dict) else {}
+    _add_report_post_ref(
+        report,
+        channel_id,
+        message_id,
+        subjects=subject_entries,
+        created_at=int(time.time()),
+    )
     report.update({
         "channel_id": int(channel_id),
         "message_id": message_id,
@@ -3088,12 +3204,14 @@ def _create_comment_report(
         "subjects": _report_subject_entries(subject_entries),
         "comments": comments,
     })
-    # Collection fields are intentionally current-post-only; remove metadata
-    # introduced by earlier history-based behavior.
+    # Retain the current fields for compatibility while ``posts`` preserves
+    # the complete publication history.
     report.pop("previous_channel_id", None)
     report.pop("previous_message_id", None)
-    report.pop("subject_post_refs", None)
     data["reports"][report_id] = report
+    # The report record may be created after approved comments already exist
+    # for this post. Recover them from the durable review queue at creation.
+    _backfill_report_comments(report, report_id)
     _save_comment_reports(data)
 
 
@@ -3143,7 +3261,17 @@ def _get_comment_report(report_id: str):
     data = _load_comment_reports()
     resolved_id = _resolve_report_id(data, report_id)
     report = data.get("reports", {}).get(resolved_id)
-    return report if isinstance(report, dict) else None
+    if not isinstance(report, dict):
+        return None
+
+    # Migrate legacy single-post records and restore approved comments from
+    # every publication that belongs to this username report.
+    changed = _store_report_post_refs(report, _report_post_refs(report))
+    if _backfill_report_comments(report, resolved_id):
+        changed = True
+    if changed:
+        _save_comment_reports(data)
+    return report
 
 
 def _find_report_id_by_username(username: str) -> str:
@@ -3627,6 +3755,152 @@ async def _send_report_link_companion(
     )
 
 
+def _report_comment_from_submission(
+    submission: dict,
+    *,
+    forward_message_id=None,
+    created_at=None,
+) -> dict:
+    """Build the durable public-report record for one approved comment."""
+    if forward_message_id is None:
+        forward_message_id = submission.get("channel_message_id")
+    target = _comment_target_from_submission(submission)
+    comment = {
+        "author": str(submission.get("report_author") or "用户"),
+        "content": str(submission.get("report_content") or "[评论内容]"),
+        "forward_channel_id": _as_int(submission.get("forward_channel_id")),
+        "forward_message_id": _as_int(forward_message_id),
+        "main_discussion_chat_id": _as_int(submission.get("main_discussion_chat_id")),
+        "main_discussion_message_id": _as_int(submission.get("main_discussion_message_id")),
+        "backup_discussion_chat_id": _as_int(submission.get("backup_discussion_chat_id")),
+        "backup_discussion_message_id": _as_int(submission.get("backup_discussion_message_id")),
+        # Bind the comment to the source publication so a username report can
+        # show comments from each of its historical posts separately.
+        "source_channel_id": _as_int(target.get("channel_id")),
+        "source_message_id": _as_int(target.get("message_id")),
+        "created_at": int(
+            created_at
+            or submission.get("reviewed_at")
+            or submission.get("submitted_at")
+            or time.time()
+        ),
+    }
+    button_config = submission.get("comment_button_config")
+    if isinstance(button_config, dict):
+        comment["comment_button_config"] = button_config
+    return comment
+
+
+def _report_comment_identity(comment: dict) -> tuple:
+    """Stable identity used to make normal writes and recovery idempotent."""
+    forward_channel_id = _as_int(comment.get("forward_channel_id"))
+    forward_message_id = _as_int(comment.get("forward_message_id"))
+    if forward_channel_id is not None and forward_message_id is not None:
+        return ("forward", forward_channel_id, forward_message_id)
+    return (
+        "fallback",
+        _as_int(comment.get("main_discussion_chat_id")),
+        _as_int(comment.get("main_discussion_message_id")),
+        str(comment.get("author") or ""),
+        str(comment.get("content") or ""),
+    )
+
+
+def _add_report_comment_if_missing(report: dict, comment: dict) -> bool:
+    comments = report.setdefault("comments", [])
+    if not isinstance(comments, list):
+        comments = []
+        report["comments"] = comments
+    identity = _report_comment_identity(comment)
+    for existing in comments:
+        if not isinstance(existing, dict) or _report_comment_identity(existing) != identity:
+            continue
+        # Older stored comments did not record which source post they belong
+        # to. Merge that metadata during recovery without duplicating them.
+        changed = False
+        for key in ("source_channel_id", "source_message_id"):
+            if existing.get(key) is None and comment.get(key) is not None:
+                existing[key] = comment[key]
+                changed = True
+        return changed
+    comments.append(comment)
+    if len(comments) > 1000:
+        del comments[:-1000]
+    return True
+
+
+def _report_usernames(report: dict, report_id: str = "") -> set[str]:
+    usernames = {_normalize_report_username(report_id)}
+    for subject in report.get("subjects", []) if isinstance(report, dict) else []:
+        if not isinstance(subject, dict):
+            continue
+        value = str(subject.get("value") or "")
+        for username in re.findall(r"@([A-Za-z0-9_]{5,32})", value):
+            usernames.add(_normalize_report_username(username))
+    return {username for username in usernames if username}
+
+
+def _submission_mentions_report_username(submission: dict, usernames: set[str]) -> bool:
+    if not usernames or not isinstance(submission, dict):
+        return False
+    content = str(submission.get("report_content") or "")
+    mentioned = {
+        _normalize_report_username(username)
+        for username in re.findall(r"@([A-Za-z0-9_]{5,32})", content)
+    }
+    return bool(usernames & mentioned)
+
+
+def _backfill_report_comments(report: dict, report_id: str = "") -> int:
+    """Recover approved comments from every historical post of one username."""
+    if not isinstance(report, dict):
+        return 0
+    refs = _report_post_refs(report)
+    known_post_keys = {
+        _report_post_key(ref.get("channel_id"), ref.get("message_id")) for ref in refs
+    }
+    known_channels = {channel_id for channel_id, _ in known_post_keys if channel_id is not None}
+    if not known_channels:
+        return 0
+    usernames = _report_usernames(report, report_id)
+
+    restored = 0
+    for submission in _load_pending_submissions().values():
+        if not isinstance(submission, dict):
+            continue
+        if submission.get("status") != "approved" or submission.get("submission_kind") != "comment":
+            continue
+        target = _comment_target_from_submission(submission)
+        target_key = _report_post_key(target.get("channel_id"), target.get("message_id"))
+        if target_key[0] is None or target_key[1] is None:
+            continue
+        if target_key not in known_post_keys:
+            # Legacy records kept only the most recent source post.  Approved
+            # comments mentioning the same report username reveal older posts
+            # and let us recover their complete history on first opening.
+            if target_key[0] not in known_channels or not _submission_mentions_report_username(
+                submission, usernames
+            ):
+                continue
+            source_created_at = int(
+                submission.get("reviewed_at")
+                or submission.get("submitted_at")
+                or time.time()
+            )
+            if _add_report_post_ref(
+                report,
+                target_key[0],
+                target_key[1],
+                created_at=source_created_at,
+            ):
+                refs = _report_post_refs(report)
+                known_post_keys.add(target_key)
+        comment = _report_comment_from_submission(submission)
+        if _add_report_comment_if_missing(report, comment):
+            restored += 1
+    return restored
+
+
 def _append_report_comment(submission: dict, forwarded_message) -> None:
     target = _comment_target_from_submission(submission)
     channel_id = _as_int(target.get("channel_id"))
@@ -3636,37 +3910,22 @@ def _append_report_comment(submission: dict, forwarded_message) -> None:
     data = _load_comment_reports()
     report = None
     for item in data["reports"].values():
-        if (
-            isinstance(item, dict)
-            and _as_int(item.get("channel_id")) == channel_id
-            and _as_int(item.get("message_id")) == message_id
-        ):
+        if isinstance(item, dict) and _report_has_post_ref(item, channel_id, message_id):
             report = item
             break
     if report is None:
         return
-    comments = report.setdefault("comments", [])
-    # Persist every public copy of the comment.  The administrator's report
+
+    # Persist every public copy of the comment. The administrator's report
     # editor needs these exact IDs to edit the forwarding-channel copy and the
     # replies below the main/backup channel posts in place.
-    comment = {
-        "author": str(submission.get("report_author") or "用户"),
-        "content": str(submission.get("report_content") or "[评论内容]"),
-        "forward_channel_id": _as_int(submission.get("forward_channel_id")),
-        "forward_message_id": _as_int(getattr(forwarded_message, "message_id", None)),
-        "main_discussion_chat_id": _as_int(submission.get("main_discussion_chat_id")),
-        "main_discussion_message_id": _as_int(submission.get("main_discussion_message_id")),
-        "backup_discussion_chat_id": _as_int(submission.get("backup_discussion_chat_id")),
-        "backup_discussion_message_id": _as_int(submission.get("backup_discussion_message_id")),
-        "created_at": int(time.time()),
-    }
-    button_config = submission.get("comment_button_config")
-    if isinstance(button_config, dict):
-        comment["comment_button_config"] = button_config
-    comments.append(comment)
-    if len(comments) > 1000:
-        del comments[:-1000]
-    _save_comment_reports(data)
+    comment = _report_comment_from_submission(
+        submission,
+        forward_message_id=getattr(forwarded_message, "message_id", None),
+        created_at=int(time.time()),
+    )
+    if _add_report_comment_if_missing(report, comment):
+        _save_comment_reports(data)
 
 
 def _count_migratable_report_comments(target_channel_id: int) -> int:
@@ -4296,6 +4555,7 @@ def _report_comments_newest_first(report: dict) -> list[tuple[int, dict]]:
 def _report_list_view(report_id: str, report: dict, page: int):
     ordered_comments = _report_comments_newest_first(report)
     total = len(ordered_comments)
+    post_refs = _report_post_refs(report)
     pages = max(1, (total + REPORT_PAGE_SIZE - 1) // REPORT_PAGE_SIZE)
     page = max(1, min(page, pages))
     start = (page - 1) * REPORT_PAGE_SIZE
@@ -4303,12 +4563,20 @@ def _report_list_view(report_id: str, report: dict, page: int):
     lines = [
         "📋 帖子评论报告",
         "",
+        f"关联帖子：{len(post_refs)} 条",
         f"报告总数：{total} 条评论（最新评论在前）",
         f"当前页：{page}/{pages}",
         _report_subject_text(report),
         "",
         "请选择下方评论查看详情：",
     ]
+    # if post_refs:
+    #     rows.append([
+    #         InlineKeyboardButton(
+    #             f"📄 查看关联帖子（{len(post_refs)}）",
+    #             callback_data=f"publish:report_posts:{report_id}:1",
+    #         )
+    #     ])
     for position, (index, comment) in enumerate(
         ordered_comments[start : start + REPORT_PAGE_SIZE],
         start=start,
@@ -4330,6 +4598,83 @@ def _report_list_view(report_id: str, report: dict, page: int):
         nav.append(InlineKeyboardButton("➡️ 下一页", callback_data=f"publish:report_page:{report_id}:{page + 1}"))
     if nav:
         rows.append(nav)
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _report_post_comment_count(report: dict, post: dict) -> int:
+    channel_id, message_id = _report_post_key(
+        post.get("channel_id"), post.get("message_id")
+    )
+    return sum(
+        1
+        for comment in report.get("comments", []) or []
+        if isinstance(comment, dict)
+        and _report_post_key(
+            comment.get("source_channel_id"), comment.get("source_message_id")
+        )
+        == (channel_id, message_id)
+    )
+
+
+def _report_post_label(post: dict, position: int) -> str:
+    for subject in post.get("subjects", []) or []:
+        if not isinstance(subject, dict):
+            continue
+        value = str(subject.get("value") or "").strip()
+        if value:
+            return value[:35]
+    return f"历史帖子 #{post.get('message_id', position)}"
+
+
+def _report_posts_view(report_id: str, report: dict, page: int):
+    """Paginate every source post belonging to the same report username."""
+    refs = _report_post_refs(report)
+    refs.sort(key=lambda post: int(post.get("created_at", 0) or 0), reverse=True)
+    total = len(refs)
+    pages = max(1, (total + REPORT_PAGE_SIZE - 1) // REPORT_PAGE_SIZE)
+    page = max(1, min(page, pages))
+    start = (page - 1) * REPORT_PAGE_SIZE
+    rows = []
+    lines = [
+        "📄 该用户名的全部关联帖子",
+        "",
+        f"共 {total} 条帖子，所有帖子的评论已汇总到报告页。",
+        f"当前页：{page}/{pages}",
+        "",
+        "点击下方按钮可打开对应原帖：",
+    ]
+    for position, post in enumerate(refs[start : start + REPORT_PAGE_SIZE], start=start + 1):
+        label = _report_post_label(post, position)
+        comment_count = _report_post_comment_count(report, post)
+        link = _fallback_channel_message_link(
+            post.get("channel_id"), post.get("message_id")
+        )
+        button_text = f"📄 {position}. {label} · {comment_count} 条评论"[:64]
+        if link:
+            rows.append([InlineKeyboardButton(button_text, url=link)])
+    nav = []
+    if page > 1:
+        nav.append(
+            InlineKeyboardButton(
+                "⬅️ 上一页",
+                callback_data=f"publish:report_posts:{report_id}:{page - 1}",
+            )
+        )
+    if page < pages:
+        nav.append(
+            InlineKeyboardButton(
+                "➡️ 下一页",
+                callback_data=f"publish:report_posts:{report_id}:{page + 1}",
+            )
+        )
+    if nav:
+        rows.append(nav)
+    rows.append([
+        InlineKeyboardButton(
+            "⬅️ 返回全部评论",
+            callback_data=f"publish:report_page:{report_id}:1",
+        )
+    ])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 def _can_manage_report_comments(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
@@ -4359,16 +4704,27 @@ def _report_comment_detail_view(
     except ValueError:
         return None, None
 
+    source_channel_id = _as_int(comment.get("source_channel_id"))
+    source_message_id = _as_int(comment.get("source_message_id"))
+    source_post_text = (
+        f"所属帖子：#{source_message_id}"
+        if source_channel_id is not None and source_message_id is not None
+        else "所属帖子：历史记录未关联"
+    )
     text = "\n".join([
         "💬 评论详情",
         "",
         _report_subject_text(report),
+        source_post_text,
         f"评论日期：{_comment_date(comment)}",
         f"作者：{comment.get('author') or '用户'}",
         "",
         str(comment.get("content") or "[媒体评论]"),
     ])
     rows = []
+    source_link = _fallback_channel_message_link(source_channel_id, source_message_id)
+    if source_link:
+        rows.append([InlineKeyboardButton("📄 打开所属原帖", url=source_link)])
     link = _fallback_channel_message_link(comment.get("forward_channel_id"), comment.get("forward_message_id"))
     if link:
         rows.append([InlineKeyboardButton("🔗 打开转发频道评论", url=link)])
@@ -7521,6 +7877,25 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "comment":
         return await _start_comment_submission(query, context, config)
+
+    if action == "report_posts":
+        parts = query.data.split(":")
+        if len(parts) != 4:
+            return await query.answer("关联帖子参数无效。", show_alert=True)
+        try:
+            page = int(parts[3])
+        except ValueError:
+            page = 1
+        report = _get_comment_report(parts[2])
+        if not report:
+            return await query.answer("该报告不存在或已过期。", show_alert=True)
+        text, markup = _report_posts_view(parts[2], report, page)
+        await query.answer()
+        return await query.edit_message_text(
+            text,
+            reply_markup=markup,
+            disable_web_page_preview=True,
+        )
 
     if action == "report_page":
         parts = query.data.split(":")

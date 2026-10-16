@@ -558,6 +558,8 @@ GROUP_CONFIG_DEFAULTS = {
     "voice_reply_enabled": False,
     "active_speak_enabled": False,
     "active_speak_interval_min": 2,
+    "online_baby_auto_enabled": False,
+    "online_baby_interval_min": 30,
     "ai_reply_enabled": True,
     "ai_reply_probability": 50,
     "ai_reply_max_per_hour": 100,

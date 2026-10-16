@@ -1,0 +1,50 @@
+{
+    "next_id": 3,
+    "rules": [
+        {
+            "id": 1,
+            "enabled": true,
+            "channel_id": "-1001951594315",
+            "output_template": "{content}",
+            "output_entities": [],
+            "cut_words": [
+                "中转平台"
+            ],
+            "cut_includes_word": false,
+            "personal_report_link_enabled": true,
+            "replacements": [
+                {
+                    "id": 1,
+                    "from": "助推频道",
+                    "to": ""
+                },
+                {
+                    "id": 2,
+                    "from": "绅士Vip群",
+                    "to": ""
+                },
+                {
+                    "id": 3,
+                    "from": "点击返回工兵区",
+                    "to": ""
+                },
+                {
+                    "id": 4,
+                    "from": "艺术展览会",
+                    "to": "找老师群"
+                }
+            ]
+        },
+        {
+            "id": 2,
+            "enabled": true,
+            "channel_id": "",
+            "output_template": "{content}",
+            "output_entities": [],
+            "cut_words": [],
+            "cut_includes_word": true,
+            "personal_report_link_enabled": false,
+            "replacements": []
+        }
+    ]
+}
