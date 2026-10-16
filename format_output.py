@@ -250,7 +250,7 @@ def _append_personal_report_link(
     report_link: str,
 ) -> tuple[str, list[MessageEntity]]:
     """Append a clickable personal-report deep link below formatted content."""
-    prefix = "\n\n📋 个人报告："
+    prefix = "📋 个人报告："
     link_offset = _utf16_length(output_text + prefix)
     output_text = f"{output_text}{prefix}{report_link}"
     return output_text, [
@@ -1012,6 +1012,7 @@ async def format_output_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("请转发一条频道消息给我，或发送“取消”退出格式输出。")
         raise ApplicationHandlerStop
     if (update.message.text is None) and not update.message.caption:
+        pass
         raise ApplicationHandlerStop
 
     channel_id = _source_channel_id(update.message)

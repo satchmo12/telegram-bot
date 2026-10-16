@@ -3610,16 +3610,17 @@ async def _finalize_queued_main_publication(
                 report_id,
                 subject_entries=entries or publication.get("keyword_entries", []),
             )
-            if report_url and not bool(publication.get("report_link_embedded", False)):
-                embedded = await _append_report_link_to_original_post(
-                    context,
-                    source_message,
-                    channel_id,
-                    first_message_id,
-                    report_url,
-                )
-                if not embedded:
-                    await _send_report_link_companion(context, channel_id, report_url)
+            
+            # if report_url and not bool(publication.get("report_link_embedded", False)):
+            #     embedded = await _append_report_link_to_original_post(
+            #         context,
+            #         source_message,
+            #         channel_id,
+            #         first_message_id,
+            #         report_url,
+            #     )
+            #     if not embedded:
+            #         await _send_report_link_companion(context, channel_id, report_url)
 
         if bool(publication.get("mirror_to_backup", False)):
             await _mirror_main_post_to_backup(
@@ -10105,15 +10106,16 @@ async def _handle_wall_publish_message(
                 published.message_id,
                 report_url,
             )
-            if not embedded:
-                try:
-                    await _send_report_link_companion(
-                        context, int(target_channel_id), report_url
-                    )
-                except Exception as exc:
-                    # The report remains available by deep link; failure to
-                    # send the fallback companion must not roll back the post.
-                    print(f"发送评论报告入口失败: {exc}")
+            # 单独发一条 不需要先注释掉
+            # if not embedded:
+            #     try:
+            #         await _send_report_link_companion(
+            #             context, int(target_channel_id), report_url
+            #         )
+            #     except Exception as exc:
+            #         # The report remains available by deep link; failure to
+            #         # send the fallback companion must not roll back the post.
+            #         print(f"发送评论报告入口失败: {exc}")
         if submission_kind == "main":
             await _mirror_main_post_to_backup(
                 context,
