@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from datetime import datetime, timedelta
+import asyncio
 from types import SimpleNamespace
 import html
 from typing import Optional
@@ -18,7 +19,7 @@ from telegram import (
     Update,
 )
 from telegram.ext import ApplicationHandlerStop, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, TypeHandler, filters
-from telegram.error import BadRequest, Forbidden
+from telegram.error import BadRequest, Forbidden, RetryAfter
 
 from datetime import datetime, timedelta, timezone
 import io
@@ -88,6 +89,38 @@ USER_MARK_COMMAND = "帅哥"
 MASTER_BOT_NAME = str(os.getenv("MASTER_BOT_NAME", "")).strip()
 COLLECTION_DISPLAY_SETTING_KEY = "publish_collection_display_setting_field"
 TEMPLATE_KEY_PATTERN = re.compile(r"\{([\w\-一-鿿]+)\}")
+
+# Telegram asks the client to retry after a precise delay when a bot exceeds a
+# sending/copying rate limit. Retrying the original request is safe because a
+# ``RetryAfter`` response means Telegram rejected it before publishing it.
+FLOOD_RETRY_MAX_ATTEMPTS = 3
+
+
+def _retry_after_seconds(exc: RetryAfter) -> float:
+    value = getattr(exc, "retry_after", 0)
+    try:
+        seconds = value.total_seconds()
+    except AttributeError:
+        seconds = float(value)
+    return max(0.0, float(seconds))
+
+
+async def _retry_flood_control(operation, *, action: str):
+    """Run one Bot API operation, waiting and retrying Telegram flood limits."""
+    for attempt in range(1, FLOOD_RETRY_MAX_ATTEMPTS + 1):
+        try:
+            return await operation()
+        except RetryAfter as exc:
+            if attempt >= FLOOD_RETRY_MAX_ATTEMPTS:
+                raise
+            wait_seconds = _retry_after_seconds(exc)
+            print(
+                f"Telegram 限流，{action} 将在 {wait_seconds:g} 秒后重试 "
+                f"({attempt}/{FLOOD_RETRY_MAX_ATTEMPTS - 1})"
+            )
+            # A small buffer avoids retrying exactly on Telegram's boundary.
+            await asyncio.sleep(wait_seconds + 0.25)
+
 
 # Telegram will send each item of a selected photo/video album as an individual
 # update. Buffer them briefly so a 投稿 album is reviewed and copied as one post.
@@ -631,16 +664,22 @@ async def _mirror_main_post_to_backup(
                 main_message_ids=source_message_ids,
             )
         elif len(source_message_ids) == 1:
-            copied = await context.bot.copy_message(
-                chat_id=backup_channel_id,
-                from_chat_id=main_channel_id,
-                message_id=source_message_ids[0],
+            copied = await _retry_flood_control(
+                lambda: context.bot.copy_message(
+                    chat_id=backup_channel_id,
+                    from_chat_id=main_channel_id,
+                    message_id=source_message_ids[0],
+                ),
+                action="同步主频道到备用频道",
             )
         else:
-            copied = await context.bot.copy_messages(
-                chat_id=backup_channel_id,
-                from_chat_id=main_channel_id,
-                message_ids=source_message_ids,
+            copied = await _retry_flood_control(
+                lambda: context.bot.copy_messages(
+                    chat_id=backup_channel_id,
+                    from_chat_id=main_channel_id,
+                    message_ids=source_message_ids,
+                ),
+                action="同步主频道相册到备用频道",
             )
         copied_items = list(copied) if isinstance(copied, (list, tuple)) else [copied]
         backup_message_ids = _copied_message_ids(copied_items)
@@ -1670,8 +1709,49 @@ def _latest_collection_posts_by_contact(posts: list[dict], config: dict) -> list
     return selected_posts
 
 
+def _collection_checkin_field_fallbacks(config: dict) -> dict[tuple[int, int], dict[str, list[str]]]:
+    """Return saved post fields keyed by the primary channel/message pair.
+
+    ``publish_keyword_map.json`` is rebuilt wholesale after a Telegram edit.
+    The check-in store also records the extracted fields, and is therefore a
+    useful fallback when an edit update omits one field (for example ``城市``)
+    even though the original post had already been indexed correctly.
+    """
+    target_channel_id = _as_int((config or {}).get("channel_id"))
+    fallbacks: dict[tuple[int, int], dict[str, list[str]]] = {}
+    for saved_post in _load_checkin_posts().get("posts", {}).values():
+        if not isinstance(saved_post, dict):
+            continue
+        channel_id = _as_int(saved_post.get("channel_id"))
+        message_id = _as_int(saved_post.get("message_id"))
+        if channel_id is None or message_id is None or message_id <= 0:
+            continue
+        if target_channel_id is not None and channel_id != target_channel_id:
+            continue
+        saved_fields = saved_post.get("fields")
+        if not isinstance(saved_fields, dict):
+            continue
+        fields: dict[str, list[str]] = {}
+        for raw_label, raw_values in saved_fields.items():
+            label = str(raw_label or "").strip()
+            if not label or not isinstance(raw_values, list):
+                continue
+            values = [str(value).strip() for value in raw_values if str(value).strip()]
+            if values:
+                fields[label] = values
+        if fields:
+            fallbacks[(channel_id, message_id)] = fields
+    return fallbacks
+
+
 def _load_collection_display_posts(config: dict) -> list[dict]:
-    """Rebuild the newest collected record for every current-channel contact."""
+    """Rebuild the newest collected record for every current-channel contact.
+
+    Keyword records remain authoritative.  Saved check-in fields only fill
+    labels absent from the keyword index, so a deliberately changed city in an
+    edited post still takes effect while a transiently omitted ``城市`` field no
+    longer moves the teacher into ``未分类``.
+    """
     target_channel_id = _as_int((config or {}).get("channel_id"))
     posts: dict[tuple[int, int], dict] = {}
     for records in _load_keyword_map().values():
@@ -1707,6 +1787,15 @@ def _load_collection_display_posts(config: dict) -> list[dict]:
                 )
             except (TypeError, ValueError):
                 pass
+
+    checkin_field_fallbacks = _collection_checkin_field_fallbacks(config)
+    for key, post in posts.items():
+        for label, fallback_values in checkin_field_fallbacks.get(key, {}).items():
+            # Do not overwrite fields parsed from the current keyword records.
+            # This is intentionally a fallback for a missing field only.
+            if post["fields"].get(label):
+                continue
+            post["fields"][label] = list(fallback_values)
     return _latest_collection_posts_by_contact(list(posts.values()), config)
 
 
@@ -4724,8 +4813,9 @@ def _report_comment_detail_view(
     ])
     rows = []
     source_link = _fallback_channel_message_link(source_channel_id, source_message_id)
-    if source_link:
-        rows.append([InlineKeyboardButton("📄 打开所属原帖", url=source_link)])
+    # 原来的帖子删掉了会跳不过去
+    # if source_link:
+    #     rows.append([InlineKeyboardButton("📄 打开所属原帖", url=source_link)])
     link = _fallback_channel_message_link(comment.get("forward_channel_id"), comment.get("forward_message_id"))
     if link:
         rows.append([InlineKeyboardButton("🔗 打开转发频道评论", url=link)])
@@ -6230,16 +6320,22 @@ async def _forward_submission_messages(
     if not message_ids:
         raise RuntimeError("投稿缺少原始消息 ID")
     if len(message_ids) == 1:
-        await context.bot.forward_message(
-            chat_id=chat_id,
-            from_chat_id=submission["user_chat_id"],
-            message_id=message_ids[0],
+        await _retry_flood_control(
+            lambda: context.bot.forward_message(
+                chat_id=chat_id,
+                from_chat_id=submission["user_chat_id"],
+                message_id=message_ids[0],
+            ),
+            action="转发投稿给审核管理员",
         )
         return
-    await context.bot.forward_messages(
-        chat_id=chat_id,
-        from_chat_id=submission["user_chat_id"],
-        message_ids=message_ids,
+    await _retry_flood_control(
+        lambda: context.bot.forward_messages(
+            chat_id=chat_id,
+            from_chat_id=submission["user_chat_id"],
+            message_ids=message_ids,
+        ),
+        action="转发投稿相册给审核管理员",
     )
 
 
@@ -6291,10 +6387,13 @@ async def _send_submission_for_review(
     failures = []
     for reviewer_id in reviewer_ids:
         try:
-            await context.bot.send_message(
-                chat_id=reviewer_id,
-                text=prompt,
-                reply_markup=_review_keyboard(submission_id),
+            await _retry_flood_control(
+                lambda: context.bot.send_message(
+                    chat_id=reviewer_id,
+                    text=prompt,
+                    reply_markup=_review_keyboard(submission_id),
+                ),
+                action="发送审核通知",
             )
         except Exception as exc:
             failures.append(str(exc))
@@ -6648,6 +6747,152 @@ async def handle_comment_start_parameter(
     return True
 
 
+def _serialize_format_output(
+    output_text: str,
+    entities: list[MessageEntity],
+    rule: dict,
+) -> dict:
+    """Store formatter output in a review-safe, JSON-serializable shape."""
+    return {
+        "text": output_text,
+        "entities": [entity.to_dict() for entity in entities],
+        "rule_id": rule.get("id"),
+    }
+
+
+def _format_output_entities(context: ContextTypes.DEFAULT_TYPE, payload: dict) -> list[MessageEntity]:
+    """Restore persisted PTB entities before publishing a formatted 投稿."""
+    return [
+        MessageEntity.de_json(entity, context.bot)
+        for entity in payload.get("entities", [])
+        if isinstance(entity, dict)
+    ]
+
+
+async def _format_submission_once(
+    context: ContextTypes.DEFAULT_TYPE,
+    message,
+) -> Optional[dict]:
+    """Format a forwarded channel submission when its source has a rule.
+
+    Plain user messages and forwarded channels without a format rule deliberately
+    retain the existing copy-to-channel behavior.
+    """
+    from format_output import format_message_for_publish
+
+    formatted = await format_message_for_publish(context, message)
+    if not formatted:
+        return None
+    output_text, entities, rule = formatted
+    if not output_text:
+        raise ValueError("格式化后的输出内容为空，请检查格式输出规则。")
+    if len(output_text) > 4096:
+        raise ValueError("格式化后的输出超过 Telegram 4096 字符限制，请调整格式输出规则。")
+    if message.text is None and len(output_text) > 1024:
+        raise ValueError(
+            "格式化后的媒体说明超过 Telegram 1024 字符限制，请调整格式输出规则。"
+        )
+    return _serialize_format_output(output_text, entities, rule)
+
+
+async def _copy_formatted_submission_to_channel(
+    context: ContextTypes.DEFAULT_TYPE,
+    submission: dict,
+    target_channel_id,
+    reply_markup,
+):
+    """Publish one saved format-output result while retaining attached media."""
+    formatted = submission.get("format_output")
+    if not isinstance(formatted, dict):
+        return None
+
+    output_text = str(formatted.get("text", ""))
+    if not output_text:
+        raise RuntimeError("格式化投稿缺少输出内容")
+    entities = _format_output_entities(context, formatted)
+    message_ids = _submission_message_ids(submission)
+    if not message_ids:
+        raise RuntimeError("投稿缺少原始消息 ID")
+
+    # Text submissions are sent as the rendered output, just like the
+    # standalone “格式输出” action.
+    if len(message_ids) == 1 and submission.get("format_output_is_text", False):
+        published = await _retry_flood_control(
+            lambda: context.bot.send_message(
+                chat_id=target_channel_id,
+                text=output_text,
+                entities=entities or None,
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
+            ),
+            action="发送格式化投稿",
+        )
+        return SimpleNamespace(
+            message_id=published.message_id,
+            message_ids=[published.message_id],
+            scheduled=False,
+        )
+
+    # ``copy_message`` can replace a media caption at copy time, preserving the
+    # media itself and avoiding a brief unformatted post in the target channel.
+    if len(message_ids) == 1:
+        copied = await _retry_flood_control(
+            lambda: context.bot.copy_message(
+                chat_id=target_channel_id,
+                from_chat_id=submission["user_chat_id"],
+                message_id=message_ids[0],
+                caption=output_text,
+                caption_entities=entities or None,
+                reply_markup=reply_markup,
+            ),
+            action="复制格式化投稿",
+        )
+        published_message_id = _published_message_id_or_scheduled(
+            copied, "复制格式化投稿到频道"
+        )
+        if published_message_id is None:
+            return SimpleNamespace(message_id=None, message_ids=[], scheduled=True)
+        return SimpleNamespace(
+            message_id=published_message_id,
+            message_ids=[published_message_id],
+            scheduled=False,
+        )
+
+    # Bot API does not allow overriding an album caption in ``copy_messages``.
+    # Copy the album first (to preserve its grouping), then update its first
+    # item, where Telegram stores the submission caption.
+    copied_ids = await _retry_flood_control(
+        lambda: context.bot.copy_messages(
+            chat_id=target_channel_id,
+            from_chat_id=submission["user_chat_id"],
+            message_ids=message_ids,
+        ),
+        action="复制格式化投稿相册",
+    )
+    if not copied_ids:
+        raise RuntimeError("格式化投稿相册复制失败")
+    published_message_ids = [
+        _published_message_id_or_scheduled(item, "复制格式化投稿相册到频道")
+        for item in copied_ids
+    ]
+    if any(message_id is None for message_id in published_message_ids):
+        return SimpleNamespace(message_id=None, message_ids=[], scheduled=True)
+    await _retry_flood_control(
+        lambda: context.bot.edit_message_caption(
+            chat_id=target_channel_id,
+            message_id=published_message_ids[0],
+            caption=output_text,
+            caption_entities=entities or None,
+        ),
+        action="更新格式化投稿相册说明",
+    )
+    return SimpleNamespace(
+        message_id=published_message_ids[0],
+        message_ids=published_message_ids,
+        scheduled=False,
+    )
+
+
 async def _copy_submission_to_channel(
     context: ContextTypes.DEFAULT_TYPE,
     submission: dict,
@@ -6670,16 +6915,26 @@ async def _copy_submission_to_channel(
             button_key=button_key,
         )
 
-    message_ids = _submission_message_ids(submission)
+    formatted_published = await _copy_formatted_submission_to_channel(
+        context, submission, target_channel_id, reply_markup
+    )
+    if formatted_published is not None:
+        published = formatted_published
+        message_ids = _submission_message_ids(submission)
+    else:
+        message_ids = _submission_message_ids(submission)
     if not message_ids:
         raise RuntimeError("投稿缺少原始消息 ID")
 
-    if len(message_ids) == 1:
-        copied = await context.bot.copy_message(
-            chat_id=target_channel_id,
-            from_chat_id=submission["user_chat_id"],
-            message_id=message_ids[0],
-            reply_markup=reply_markup,
+    if formatted_published is None and len(message_ids) == 1:
+        copied = await _retry_flood_control(
+            lambda: context.bot.copy_message(
+                chat_id=target_channel_id,
+                from_chat_id=submission["user_chat_id"],
+                message_id=message_ids[0],
+                reply_markup=reply_markup,
+            ),
+            action="复制投稿到频道",
         )
         published_message_id = _published_message_id_or_scheduled(
             copied, "复制投稿到频道"
@@ -6691,14 +6946,17 @@ async def _copy_submission_to_channel(
             message_ids=[],
             scheduled=False,
         )
-    else:
+    elif formatted_published is None:
         # copy_messages preserves Telegram's media-album grouping. The Bot API
         # does not allow reply_markup on this endpoint, so album posts retain
         # all media and deliberately omit the optional bottom button row.
-        copied_ids = await context.bot.copy_messages(
-            chat_id=target_channel_id,
-            from_chat_id=submission["user_chat_id"],
-            message_ids=message_ids,
+        copied_ids = await _retry_flood_control(
+            lambda: context.bot.copy_messages(
+                chat_id=target_channel_id,
+                from_chat_id=submission["user_chat_id"],
+                message_ids=message_ids,
+            ),
+            action="复制投稿相册到频道",
         )
         if not copied_ids:
             raise RuntimeError("投稿相册复制失败")
@@ -6799,13 +7057,16 @@ async def _copy_submission_to_discussion(
         raise RuntimeError("投稿缺少原始消息 ID")
     first_copied = None
     for index, message_id in enumerate(message_ids):
-        copied = await context.bot.copy_message(
-            chat_id=discussion_chat_id,
-            from_chat_id=submission["user_chat_id"],
-            message_id=message_id,
-            reply_to_message_id=discussion_message_id,
-            # An inline keyboard can only be attached once for an album reply.
-            reply_markup=reply_markup if index == 0 else None,
+        copied = await _retry_flood_control(
+            lambda: context.bot.copy_message(
+                chat_id=discussion_chat_id,
+                from_chat_id=submission["user_chat_id"],
+                message_id=message_id,
+                reply_to_message_id=discussion_message_id,
+                # An inline keyboard can only be attached once for an album reply.
+                reply_markup=reply_markup if index == 0 else None,
+            ),
+            action="发布投稿评论",
         )
         if first_copied is None:
             first_copied = copied
@@ -9773,7 +10034,11 @@ async def publish_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     enabled = context.user_data.get("post_no_name", True)
 
-    help_text = "📣 请发送您要投稿的内容。\n\n支持文字、图片、视频等消息。"
+    help_text = (
+        "📣 请发送您要投稿的内容。\n\n"
+        "支持文字、图片、视频等消息。\n"
+        "转发频道消息时，若该来源频道已启用格式输出规则，发布时会自动套用一次。"
+    )
 
     context.user_data["post_no_name"] = enabled
 
@@ -9968,6 +10233,13 @@ async def _handle_wall_publish_message(
             await msg.reply_text("❌ 未设置转发频道，暂时无法提交投稿。")
             return
 
+    try:
+        format_output = await _format_submission_once(context, msg)
+    except Exception as exc:
+        print("投稿格式化失败:", exc)
+        await msg.reply_text(f"❌ 投稿格式化失败：{exc}")
+        return
+
     # Non-owner submissions use review when it is enabled.
     if bool(config.get("review_enabled", False)) and not is_owner_submission:
         if owner_id is None:
@@ -9995,6 +10267,8 @@ async def _handle_wall_publish_message(
             "submitted_at": int(time.time()),
             "submission_kind": submission_kind,
             "target_channel_id": target_channel_id,
+            "format_output": format_output,
+            "format_output_is_text": msg.text is not None,
         }
         if comment_target:
             submission["comment_target"] = comment_target
@@ -10034,6 +10308,8 @@ async def _handle_wall_publish_message(
         "source_message_ids": source_message_ids,
         "report_author": _comment_author(msg),
         "report_content": _comment_content(msg),
+        "format_output": format_output,
+        "format_output_is_text": msg.text is not None,
         "keyword_entries": (
             _extract_routing_keywords(msg, config)
             if (
@@ -10126,7 +10402,10 @@ async def _handle_wall_publish_message(
             )
         _append_published_submission(msg, published.message_id, target_channel_id)
         _finish_submission_if_needed(context, config)
-        await msg.reply_text("✅ 发送成功")
+        await _retry_flood_control(
+            lambda: msg.reply_text("✅ 发送成功"),
+            action="发送投稿成功通知",
+        )
     except Exception as exc:
         print("投稿失败:", exc)
         await msg.reply_text(f"❌ 发送失败：{exc}")

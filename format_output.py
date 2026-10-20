@@ -244,6 +244,45 @@ def format_forwarded_message(message, rule: dict) -> tuple[str, list[MessageEnti
     return final_text, entities
 
 
+async def format_message_for_publish(
+    context: ContextTypes.DEFAULT_TYPE,
+    message,
+) -> Optional[tuple[str, list[MessageEntity], dict]]:
+    """Apply the enabled source-channel rule to a 投稿 message once.
+
+    Returns ``None`` when the message is not a forwarded channel post or no
+    enabled formatter rule matches its source channel.  Keeping the rule
+    lookup here makes 投稿 and the standalone “格式输出” entry use exactly the
+    same source-channel matching, template, replacement and report-link logic.
+    """
+    if (message.text is None) and not message.caption:
+        return None
+
+    channel_id = _source_channel_id(message)
+    if not channel_id:
+        return None
+
+    config = load_format_output_config()
+    rule = next(
+        (
+            item
+            for item in config["rules"]
+            if item.get("enabled", True) and item.get("channel_id") == channel_id
+        ),
+        None,
+    )
+    if not rule:
+        return None
+
+    output_text, entities = format_forwarded_message(message, rule)
+    report_link = await _personal_report_link(context, rule, message)
+    if report_link:
+        output_text, entities = _append_personal_report_link(
+            output_text, entities, report_link
+        )
+    return output_text, entities, rule
+
+
 def _append_personal_report_link(
     output_text: str,
     entities: list[MessageEntity],
@@ -1019,16 +1058,9 @@ async def format_output_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not channel_id:
         await update.message.reply_text("无法识别转发来源频道，请确认消息是直接从频道转发而来。")
         raise ApplicationHandlerStop
-    config = load_format_output_config()
-    rule = next(
-        (
-            item
-            for item in config["rules"]
-            if item.get("enabled", True) and item.get("channel_id") == channel_id
-        ),
-        None,
-    )
-    if not rule:
+
+    formatted = await format_message_for_publish(context, update.message)
+    if not formatted:
         await update.message.reply_text(
             f"未找到来源频道 <code>{channel_id}</code> 的已开启规则。",
             parse_mode="HTML",
@@ -1043,12 +1075,7 @@ async def format_output_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     # continuing through the normal channel-submission flow.
     context.user_data.pop(OUTPUT_STATE_KEY, None)
 
-    output_text, entities = format_forwarded_message(update.message, rule)
-    report_link = await _personal_report_link(context, rule, update.message)
-    if report_link:
-        output_text, entities = _append_personal_report_link(
-            output_text, entities, report_link
-        )
+    output_text, entities, _rule = formatted
     if not output_text:
         await update.message.reply_text("处理后的输出内容为空。")
         raise ApplicationHandlerStop

@@ -653,7 +653,7 @@ async def top_slaves(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # /slaveHelp 简易帮助
-@register_command("奴隶系统")
+@register_command("奴隶系统", "奴隶买卖")
 @feature_required(FEATURE_FRIENDS)
 async def slave_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = f"""💡 奴隶系统指令菜单（快收藏，不迷路！）

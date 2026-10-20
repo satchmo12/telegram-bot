@@ -460,13 +460,13 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
                     else msg.message_id
                 )
 
-                print(
-                    f"[private_forward_router] 转发频道消息："
-                    f"channel_id={channel_id}, "
-                    f"message_id={msg_id_val}, "
-                    f"username={username}, "
-                    f"title={title}"
-                )
+                # print(
+                #     f"[private_forward_router] 转发频道消息："
+                #     f"channel_id={channel_id}, "
+                #     f"message_id={msg_id_val}, "
+                #     f"username={username}, "
+                #     f"title={title}"
+                # )
 
                 channel_id_text = f"<code>{channel_id}</code>"
                 msg_id_text = f"<code>{msg_id_val}</code>"

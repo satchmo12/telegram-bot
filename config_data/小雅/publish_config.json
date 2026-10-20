@@ -71,7 +71,7 @@
         "课费",
         "城市"
     ],
-    "continuous_submission_enabled": false,
+    "continuous_submission_enabled": true,
     "custom_bot_button_visible": true,
     "custom_menu_buttons": {
         "channel_clone": false,

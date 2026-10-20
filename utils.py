@@ -540,6 +540,8 @@ GROUP_CONFIG_DEFAULTS = {
     "exposure": 0,
     "recommend_last_ts": 0,
     "verify": False,
+    # Require a 100-within addition/subtraction answer after opening the verification link.
+    "verify_math": False,
     # Handle Telegram join requests only when this per-group switch is enabled.
     "join_request_enabled": False,
     "silent": False,

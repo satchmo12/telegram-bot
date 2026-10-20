@@ -87,6 +87,7 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "exposure": 0,
             "recommend_last_ts": 0,
             "verify": False,
+            "verify_math": False,
             "silent": False,
             "ad_filter": False,
             "ad_push_enabled": False,

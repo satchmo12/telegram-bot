@@ -38,13 +38,46 @@
         {
             "id": 2,
             "enabled": true,
-            "channel_id": "",
+            "channel_id": "-1001357865503",
             "output_template": "{content}",
             "output_entities": [],
-            "cut_words": [],
-            "cut_includes_word": true,
-            "personal_report_link_enabled": false,
-            "replacements": []
+            "cut_words": [
+                "🔰#点击下方查看详情⬇️"
+            ],
+            "cut_includes_word": false,
+            "personal_report_link_enabled": true,
+            "replacements": [
+                {
+                    "id": 1,
+                    "from": "昵称",
+                    "to": "艺名"
+                },
+                {
+                    "id": 2,
+                    "from": "地区",
+                    "to": "区域"
+                },
+                {
+                    "id": 3,
+                    "from": "电报",
+                    "to": "联系"
+                },
+                {
+                    "id": 4,
+                    "from": "水费",
+                    "to": "课费"
+                },
+                {
+                    "id": 5,
+                    "from": "点击浏览频道👀",
+                    "to": ""
+                },
+                {
+                    "id": 6,
+                    "from": "📤课表查看图📤",
+                    "to": ""
+                }
+            ]
         }
     ]
 }

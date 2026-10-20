@@ -3,7 +3,9 @@
 import asyncio
 import logging
 import random
+import re
 import time
+from difflib import SequenceMatcher
 from collections import defaultdict, deque
 from typing import Any
 
@@ -22,11 +24,16 @@ DEFAULT_SETTINGS = {
     "probability_percent": 50,
     "min_interval_sec": 10,
     "max_replies_per_hour": 1000,
+    # Delayed sends and a group-specific speaking style make replies less
+    # mechanical, and can be adjusted from the protocol-account group panel.
+    "delay_min_sec": 2,
+    "delay_max_sec": 8,
+    "style": "",
 }
 CONTEXT_LIMIT = 1
 MAX_MESSAGE_LENGTH = 500
-MIN_DELAY = 0.5
-MAX_DELAY = 1.5
+MAX_REPLY_DELAY_SEC = 300
+MAX_REPLY_STYLE_LENGTH = 240
 
 _message_history = defaultdict(lambda: deque(maxlen=CONTEXT_LIMIT))
 _last_reply_time = defaultdict(float)
@@ -45,6 +52,26 @@ def _clamp_int(value: Any, minimum: int, maximum: int, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(minimum, min(maximum, value))
+
+
+def _reply_style(value: Any) -> str:
+    return str(value or "").strip()[:MAX_REPLY_STYLE_LENGTH]
+
+
+def _delay_range(raw: dict) -> tuple[int, int]:
+    delay_min = _clamp_int(
+        raw.get("delay_min_sec", DEFAULT_SETTINGS["delay_min_sec"]),
+        0,
+        MAX_REPLY_DELAY_SEC,
+        DEFAULT_SETTINGS["delay_min_sec"],
+    )
+    delay_max = _clamp_int(
+        raw.get("delay_max_sec", DEFAULT_SETTINGS["delay_max_sec"]),
+        0,
+        MAX_REPLY_DELAY_SEC,
+        DEFAULT_SETTINGS["delay_max_sec"],
+    )
+    return (delay_min, delay_max) if delay_min <= delay_max else (delay_max, delay_min)
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -80,6 +107,7 @@ def get_group_settings(bot_name: str, session_name: str, group_id: int) -> dict:
     raw = groups.get(str(group_id), {}) if isinstance(groups, dict) else {}
     if not isinstance(raw, dict):
         raw = {}
+    delay_min, delay_max = _delay_range(raw)
     return {
         "enabled": _as_bool(raw.get("enabled"), DEFAULT_SETTINGS["enabled"]),
         "channel_comment_enabled": _as_bool(
@@ -104,51 +132,52 @@ def get_group_settings(bot_name: str, session_name: str, group_id: int) -> dict:
             10000,
             DEFAULT_SETTINGS["max_replies_per_hour"],
         ),
+        "delay_min_sec": delay_min,
+        "delay_max_sec": delay_max,
+        "style": _reply_style(raw.get("style", DEFAULT_SETTINGS["style"])),
     }
+
+
+def update_group_ai_settings(
+    bot_name: str, session_name: str, group_id: int, **updates: Any
+) -> dict:
+    """Persist validated AI controls for one protocol-account group."""
+    data = _load_config(bot_name)
+    sessions = data.setdefault("sessions", {})
+    session = sessions.setdefault(str(session_name), {})
+    if not isinstance(session, dict):
+        session = {}
+        sessions[str(session_name)] = session
+    groups = session.setdefault("groups", {})
+    if not isinstance(groups, dict):
+        groups = {}
+        session["groups"] = groups
+
+    current = get_group_settings(bot_name, session_name, group_id)
+    current.update(updates)
+    groups[str(group_id)] = current
+    _save_config(bot_name, data)
+    # Re-read through the public accessor so persisted data always receives
+    # the same bounds/normalisation as legacy JSON configuration.
+    return get_group_settings(bot_name, session_name, group_id)
 
 
 def set_group_ai_enabled(
     bot_name: str, session_name: str, group_id: int, enabled: bool
 ) -> dict:
     """Persist the AI switch for a single session/group pair."""
-    data = _load_config(bot_name)
-    sessions = data.setdefault("sessions", {})
-    session = sessions.setdefault(str(session_name), {})
-    if not isinstance(session, dict):
-        session = {}
-        sessions[str(session_name)] = session
-    groups = session.setdefault("groups", {})
-    if not isinstance(groups, dict):
-        groups = {}
-        session["groups"] = groups
-
-    current = get_group_settings(bot_name, session_name, group_id)
-    current["enabled"] = bool(enabled)
-    groups[str(group_id)] = current
-    _save_config(bot_name, data)
-    return current
+    return update_group_ai_settings(
+        bot_name, session_name, group_id, enabled=bool(enabled)
+    )
 
 
 def set_group_ai_comment_enabled(
     bot_name: str, session_name: str, group_id: int, enabled: bool
 ) -> dict:
     """Persist the automatic channel-comment switch for one session/group."""
-    data = _load_config(bot_name)
-    sessions = data.setdefault("sessions", {})
-    session = sessions.setdefault(str(session_name), {})
-    if not isinstance(session, dict):
-        session = {}
-        sessions[str(session_name)] = session
-    groups = session.setdefault("groups", {})
-    if not isinstance(groups, dict):
-        groups = {}
-        session["groups"] = groups
-
-    current = get_group_settings(bot_name, session_name, group_id)
-    current["channel_comment_enabled"] = bool(enabled)
-    groups[str(group_id)] = current
-    _save_config(bot_name, data)
-    return current
+    return update_group_ai_settings(
+        bot_name, session_name, group_id, channel_comment_enabled=bool(enabled)
+    )
 
 
 def get_enabled_sessions(bot_name: str) -> set[str]:
@@ -201,6 +230,34 @@ def _context_text(key: tuple[str, str, int]) -> str:
     return "\n".join(
         f"用户{item['sender_id']}: {item['text']}" for item in _message_history[key]
     )
+
+
+def _normalise_reply_text(value: str) -> str:
+    """Normalise text enough to catch copied or near-copied replies."""
+    return re.sub(r"[\W_]+", "", str(value or "").lower(), flags=re.UNICODE)
+
+
+def _looks_like_echo(reply_text: str, source_text: str) -> bool:
+    """Reject replies that merely repeat the most recent speaker's words.
+
+    The model prompt asks for fresh content, but this deterministic guard keeps
+    occasional paraphrase/copy failures from being sent to the group.
+    """
+    reply = _normalise_reply_text(reply_text)
+    source = _normalise_reply_text(source_text)
+    if not reply or not source:
+        return False
+    if reply == source:
+        return True
+    # Short greetings and reactions are often echoed with one extra particle
+    # (for example “你好” -> “你好呀”); those are not meaningful new replies.
+    if len(source) >= 2 and (reply.startswith(source) or source.startswith(reply)):
+        return True
+    if min(len(reply), len(source)) >= 6 and (reply in source or source in reply):
+        return True
+    if min(len(reply), len(source)) >= 10:
+        return SequenceMatcher(None, reply, source).ratio() >= 0.78
+    return False
 
 
 def _is_channel_post_message(message: Any, sender: Any = None) -> bool:
@@ -292,11 +349,18 @@ async def handle_protocol_group_message(bot_name: str, session_name: str, client
             _context_text(key),
             text,
             mode="channel_comment" if should_comment else "reply",
+            style=settings["style"],
+            bot_name=session_name,
         )
         if not reply_text:
             return
+        if _looks_like_echo(reply_text, text):
+            print(f"[协议号AI][SKIP] 疑似复述原话 session={session_name} group={chat_id}")
+            return
 
-        await asyncio.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
+        await asyncio.sleep(
+            random.uniform(settings["delay_min_sec"], settings["delay_max_sec"])
+        )
         # The switches may have changed while Ollama was generating content.
         send_settings = get_group_settings(bot_name, session_name, int(chat_id))
         still_enabled = (

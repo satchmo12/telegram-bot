@@ -34,6 +34,7 @@ from channel.telethon_ai_reply import (
     remove_session_config as remove_protocol_ai_session_config,
     set_group_ai_enabled,
     set_group_ai_comment_enabled,
+    update_group_ai_settings,
 )
 
 HISTORY_RANGE_FILE = os.path.join("data", "history_forward_range.json")
@@ -43,6 +44,7 @@ SESSION_OWNERS_FILE = "data/telethon_session_owners.json"
 LOGIN_STEP_PHONE = "await_phone"
 LOGIN_STEP_CODE = "await_code"
 LOGIN_STEP_PASSWORD = "await_password"
+LOGIN_STEP_PROTOCOL_AI_SETTINGS = "protocol_ai_settings"
 
 _LOGIN_STATE = {}
 CALLBACK_PREFIX = "tlogin"
@@ -472,6 +474,11 @@ def _build_group_list_page(
     return text, InlineKeyboardMarkup(keyboard_rows)
 
 
+def _protocol_ai_style_summary(style: str) -> str:
+    style = str(style or "").strip()
+    return style if style else "默认自然口语"
+
+
 def _build_group_manage_text(session_name: str, group: dict, settings: dict) -> str:
     return (
         "👥 协议号群组管理\n"
@@ -480,7 +487,7 @@ def _build_group_manage_text(session_name: str, group: dict, settings: dict) -> 
         f"AI 回复：{'✅ 已开启' if settings['enabled'] else '🚫 已关闭'}\n"
         f"AI 评论（频道信息）：{'✅ 已开启' if settings['channel_comment_enabled'] else '🚫 已关闭'}\n\n"
         "AI 评论开启后，会对本群内转发或同步的频道消息以回复形式自动评论。\n"
-        "两个开关只作用于当前协议号的当前群组。"
+        "开关和 AI 设置均只作用于当前协议号的当前群组。"
     )
 
 
@@ -501,11 +508,72 @@ def _build_group_manage_keyboard(session_name: str, group_id: int, settings: dic
             ],
             [
                 InlineKeyboardButton(
+                    "⚙️ AI 回复设置",
+                    callback_data=f"{CALLBACK_PREFIX}:aimenu:{session_name}|{group_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     "✉️ 向本群发送消息",
                     callback_data=f"{CALLBACK_PREFIX}:sendgroup:{session_name}|{group_id}",
                 )
             ],
             [InlineKeyboardButton("⬅️ 返回群组列表", callback_data=f"{CALLBACK_PREFIX}:groups:{session_name}")],
+        ]
+    )
+
+
+def _build_protocol_ai_settings_text(session_name: str, group: dict, settings: dict) -> str:
+    return (
+        "⚙️ 协议号 AI 回复设置\n"
+        f"协议号：{_get_cached_session_label(session_name)}\n"
+        f"群组：{_truncate_display_text(_group_display_name(group))}\n\n"
+        f"回复概率：{settings['probability_percent']}%\n"
+        f"每小时上限：{settings['max_replies_per_hour']} 次\n"
+        f"最短间隔：{settings['min_interval_sec']} 秒\n"
+        f"发送等待：{settings['delay_min_sec']}-{settings['delay_max_sec']} 秒\n"
+        f"回复风格：{_protocol_ai_style_summary(settings['style'])}\n\n"
+        "回复/评论共用以上限额、等待和风格设置；AI 回复开关关闭时不会发送普通接话。"
+    )
+
+
+def _build_protocol_ai_settings_keyboard(
+    session_name: str, group_id: int, settings: dict
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    f"🎲 回复概率：{settings['probability_percent']}%",
+                    callback_data=f"{CALLBACK_PREFIX}:aip:{session_name}|{group_id}",
+                ),
+                InlineKeyboardButton(
+                    f"📊 每小时上限：{settings['max_replies_per_hour']}",
+                    callback_data=f"{CALLBACK_PREFIX}:aih:{session_name}|{group_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    f"⏱ 最短间隔：{settings['min_interval_sec']}s",
+                    callback_data=f"{CALLBACK_PREFIX}:aii:{session_name}|{group_id}",
+                ),
+                InlineKeyboardButton(
+                    f"⌛ 发送等待：{settings['delay_min_sec']}-{settings['delay_max_sec']}s",
+                    callback_data=f"{CALLBACK_PREFIX}:aid:{session_name}|{group_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🎭 回复风格",
+                    callback_data=f"{CALLBACK_PREFIX}:aif:{session_name}|{group_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅️ 返回群组管理",
+                    callback_data=f"{CALLBACK_PREFIX}:aiback:{session_name}|{group_id}",
+                )
+            ],
         ]
     )
 
@@ -805,6 +873,84 @@ async def telethon_login_cancel(update: Update, context: ContextTypes.DEFAULT_TY
     await _plain_reply(update, context, "当前没有进行中的登录流程。")
 
 
+async def _handle_protocol_ai_settings_input(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, uid: str, state: dict, text: str
+) -> bool:
+    """Validate and save one private-message AI setting from the group panel."""
+    session_name = str(state.get("session_name") or "")
+    field = str(state.get("field") or "")
+    try:
+        group_id = int(state.get("group_id"))
+    except (TypeError, ValueError):
+        group_id = 0
+
+    if not session_name or not group_id or not field:
+        _LOGIN_STATE.pop(uid, None)
+        await _plain_reply(update, context, "❗ AI 设置状态已失效，请重新打开群组设置。")
+        return True
+    if not _require_active_subscription(context, update.effective_user):
+        _LOGIN_STATE.pop(uid, None)
+        await _plain_reply(update, context, "🚫 订阅已到期，无法修改 AI 设置。")
+        return True
+    if not _can_access_session(context, update.effective_user, session_name):
+        _LOGIN_STATE.pop(uid, None)
+        await _plain_reply(update, context, "🚫 无权管理该协议号的群组。")
+        return True
+    if text in {"取消", "返回"}:
+        _LOGIN_STATE.pop(uid, None)
+        await _plain_reply(update, context, "已取消本次 AI 设置。")
+        return True
+
+    updates = {}
+    try:
+        if field == "probability_percent":
+            if not text.isdigit() or not 0 <= int(text) <= 100:
+                raise ValueError("回复概率请输入 0-100 的整数。")
+            updates[field] = int(text)
+        elif field == "max_replies_per_hour":
+            if not text.isdigit() or not 1 <= int(text) <= 10000:
+                raise ValueError("每小时上限请输入 1-10000 的整数。")
+            updates[field] = int(text)
+        elif field == "min_interval_sec":
+            if not text.isdigit() or not 0 <= int(text) <= 3600:
+                raise ValueError("最短间隔请输入 0-3600 的整数秒。")
+            updates[field] = int(text)
+        elif field == "delay":
+            normalized = text.replace("～", "-").replace("~", "-").replace("至", "-").replace("到", "-")
+            match = re.fullmatch(r"\s*(\d+)\s*[-,， ]\s*(\d+)\s*", normalized)
+            if not match:
+                raise ValueError("发送等待格式示例：2-8（单位秒）。")
+            delay_min, delay_max = map(int, match.groups())
+            if not (0 <= delay_min <= 300 and 0 <= delay_max <= 300):
+                raise ValueError("发送等待范围为 0-300 秒。")
+            if delay_min > delay_max:
+                raise ValueError("前面的最小秒数不能大于后面的最大秒数。")
+            updates = {"delay_min_sec": delay_min, "delay_max_sec": delay_max}
+        elif field == "style":
+            if text in {"默认", "恢复默认", "清空"}:
+                updates[field] = ""
+            elif len(text) > 240:
+                raise ValueError("回复风格最多 240 个字符。")
+            else:
+                updates[field] = text
+        else:
+            raise ValueError("未知 AI 设置项。")
+    except ValueError as exc:
+        await _plain_reply(update, context, f"❗ {exc}")
+        return True
+
+    bot_name = str(context.application.bot_data.get("name", "") or "")
+    settings = update_group_ai_settings(bot_name, session_name, group_id, **updates)
+    _LOGIN_STATE.pop(uid, None)
+    await _plain_reply(
+        update,
+        context,
+        "✅ 已保存 AI 设置。",
+        reply_markup=_build_protocol_ai_settings_keyboard(session_name, group_id, settings),
+    )
+    return True
+
+
 async def handle_telethon_login_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not update.message:
         return False
@@ -849,6 +995,9 @@ async def handle_telethon_login_text(update: Update, context: ContextTypes.DEFAU
     if not update.message.text:
         return False
     text = update.message.text.strip()
+    if state and state.get("step") == LOGIN_STEP_PROTOCOL_AI_SETTINGS:
+        return await _handle_protocol_ai_settings_input(update, context, uid, state, text)
+
     api_id, api_hash = _get_api_creds()
     if not api_id or not api_hash:
         await _clear_login_state(uid, context)
@@ -1391,7 +1540,11 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
             reply_markup=keyboard,
         )
 
-    if action in {"gmenu", "aitoggle", "aicommenttoggle"}:
+    protocol_ai_actions = {
+        "gmenu", "aitoggle", "aicommenttoggle", "aimenu", "aiback",
+        "aip", "aih", "aii", "aid", "aif",
+    }
+    if action in protocol_ai_actions:
         await _clear_login_state(uid, context)
         try:
             session_name, group_id_raw = payload.rsplit("|", 1)
@@ -1408,6 +1561,39 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
 
         bot_name = str(context.application.bot_data.get("name", "") or "")
         settings = get_protocol_ai_group_settings(bot_name, session_name, group_id)
+        if action == "aimenu":
+            return await query.edit_message_text(
+                _build_protocol_ai_settings_text(session_name, group, settings),
+                reply_markup=_build_protocol_ai_settings_keyboard(session_name, group_id, settings),
+            )
+        if action == "aiback":
+            return await query.edit_message_text(
+                _build_group_manage_text(session_name, group, settings),
+                reply_markup=_build_group_manage_keyboard(session_name, group_id, settings),
+            )
+
+        input_prompts = {
+            "aip": ("probability_percent", "请输入 AI 回复概率（0-100）。"),
+            "aih": ("max_replies_per_hour", "请输入每小时最多回复次数（1-10000）。"),
+            "aii": ("min_interval_sec", "请输入两次 AI 回复最短间隔秒数（0-3600，0 表示不设间隔）。"),
+            "aid": ("delay", "请输入发送等待区间，例如 2-8（单位秒，0-300）。"),
+            "aif": ("style", "请输入回复风格，例如：随意简短，偶尔用“哈哈”，不使用表情包。\n发送“默认”可恢复默认自然口语风格。"),
+        }
+        if action in input_prompts:
+            field, prompt = input_prompts[action]
+            _LOGIN_STATE[uid] = {
+                "step": LOGIN_STEP_PROTOCOL_AI_SETTINGS,
+                "session_name": session_name,
+                "group_id": group_id,
+                "field": field,
+            }
+            return await query.edit_message_text(
+                prompt + "\n\n请直接在私聊中发送设置值；发送“取消”可放弃本次修改。",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ 返回 AI 回复设置", callback_data=f"{CALLBACK_PREFIX}:aimenu:{session_name}|{group_id}")]]
+                ),
+            )
+
         if action == "aitoggle":
             settings = set_group_ai_enabled(
                 bot_name, session_name, group_id, not settings["enabled"]

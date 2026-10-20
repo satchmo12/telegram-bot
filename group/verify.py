@@ -2,6 +2,8 @@ import asyncio
 import html
 from datetime import datetime, timedelta
 import logging
+import random
+import secrets
 import time
 
 from telegram import (
@@ -42,7 +44,10 @@ from utils import (
 pending_verification = {}
 # 映射用户 ID 到验证群 ID
 override_chat_map = {}
+# 数字验证题： (chat_id, user_id) -> {"answer": int, "options": set[int], "expires_at": datetime}
+math_verification_challenges = {}
 
+VERIFICATION_TIMEOUT = timedelta(minutes=2)
 JOIN_EVENT_DEDUP_SECONDS = 15
 _recent_join_events = {}
 
@@ -84,6 +89,118 @@ async def _send_join_message(
         reply_markup=reply_markup,
         parse_mode=ParseMode.HTML,
     )
+
+
+def _verification_key(chat_id, user_id: int) -> tuple[str, int]:
+    return str(chat_id), int(user_id)
+
+
+def _clear_pending_verification(chat_id, user_id: int):
+    """Remove all in-memory state associated with a completed/expired verification."""
+    chat_id = str(chat_id)
+    user_id = int(user_id)
+    pending_verification.get(chat_id, {}).pop(user_id, None)
+    math_verification_challenges.pop(_verification_key(chat_id, user_id), None)
+    if override_chat_map.get(user_id) == chat_id:
+        override_chat_map.pop(user_id, None)
+
+
+def _is_verification_active(chat_id, user_id: int) -> bool:
+    expires_at = pending_verification.get(str(chat_id), {}).get(int(user_id))
+    return bool(expires_at and datetime.utcnow() <= expires_at)
+
+
+def _create_math_challenge(chat_id, user_id: int, expires_at: datetime):
+    """Create one addition/subtraction challenge whose operands and answer are 0..100."""
+    if random.choice((True, False)):
+        left = random.randint(1, 99)
+        right = random.randint(1, 100 - left)
+        operator = "+"
+        answer = left + right
+    else:
+        left = random.randint(1, 100)
+        right = random.randint(1, left)
+        operator = "-"
+        answer = left - right
+
+    options = {answer}
+    while len(options) < 4:
+        options.add(random.randint(0, 100))
+    options = list(options)
+    random.shuffle(options)
+
+    chat_id = str(chat_id)
+    user_id = int(user_id)
+    challenge_token = secrets.token_hex(4)
+    math_verification_challenges[_verification_key(chat_id, user_id)] = {
+        "answer": answer,
+        "options": set(options),
+        "expires_at": expires_at,
+        "token": challenge_token,
+    }
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    str(option),
+                    callback_data=(
+                        f"verify_math|{chat_id}|{user_id}|{challenge_token}|{option}"
+                    ),
+                )
+                for option in options[index : index + 2]
+            ]
+            for index in range(0, len(options), 2)
+        ]
+    )
+    return f"{left} {operator} {right} = ?", keyboard
+
+
+async def _restore_member_permissions(
+    context: ContextTypes.DEFAULT_TYPE, chat_id, user_id: int
+):
+    """Restore the group default permissions after a member passes verification."""
+    try:
+        chat = await context.bot.get_chat(chat_id)
+        permissions = chat.permissions
+    except Exception as exc:
+        logging.warning(
+            "[入群验证] 获取群默认权限失败 chat=%s user=%s: %s",
+            chat_id,
+            user_id,
+            exc,
+        )
+        permissions = None
+
+    if permissions is None:
+        permissions = ChatPermissions(
+            can_send_messages=True,
+            can_send_audios=True,
+            can_send_documents=True,
+            can_send_photos=True,
+            can_send_videos=True,
+            can_send_video_notes=True,
+            can_send_voice_notes=True,
+            can_send_polls=True,
+            can_send_other_messages=True,
+            can_add_web_page_previews=True,
+            can_change_info=False,
+            can_invite_users=True,
+            can_pin_messages=False,
+            can_manage_topics=False,
+        )
+
+    await context.bot.restrict_chat_member(
+        chat_id=chat_id,
+        user_id=user_id,
+        permissions=permissions,
+    )
+
+
+async def _complete_verification(
+    context: ContextTypes.DEFAULT_TYPE, chat_id, user_id: int
+):
+    await _restore_member_permissions(context, chat_id, user_id)
+    _clear_pending_verification(chat_id, user_id)
 
 
 async def _process_new_members(
@@ -148,7 +265,7 @@ async def _process_new_members(
                 )
                 pending_verification.setdefault(chat_id, {})[
                     user_id
-                ] = datetime.utcnow() + timedelta(minutes=2)
+                ] = datetime.utcnow() + VERIFICATION_TIMEOUT
                 override_chat_map[user_id] = chat_id
                 tip_msg = await _send_join_message(
                     chat_id,
@@ -229,27 +346,43 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 私聊验证逻辑
     if args and args[0].startswith("verify_"):
-        verify_id = int(args[0].split("_")[1])
+        try:
+            verify_id = int(args[0].split("_", 1)[1])
+        except (IndexError, ValueError):
+            await update.message.reply_text("⛔ 无效验证请求。")
+            return
 
         if user_id != verify_id:
             await update.message.reply_text("⛔ 无效验证请求。")
             return
 
         chat_id = override_chat_map.get(user_id)
-        if not chat_id:
+        if not chat_id or not _is_verification_active(chat_id, user_id):
+            if chat_id:
+                _clear_pending_verification(chat_id, user_id)
             await update.message.reply_text("⚠️ 验证已过期或无效。")
             return
 
-        # 解禁该用户
-        await context.bot.restrict_chat_member(
-            chat_id, user_id, permissions=ChatPermissions(can_send_messages=True)
-        )
+        group_config = get_group_whitelist(context).get(str(chat_id), {})
+        if bool(group_config.get("verify_math", False)):
+            expires_at = pending_verification[str(chat_id)][user_id]
+            question, keyboard = _create_math_challenge(chat_id, user_id, expires_at)
+            await update.message.reply_text(
+                f"🧮 请完成数字验证（100 以内加减法）\n\n题目：{question}\n请选择正确答案：",
+                reply_markup=keyboard,
+            )
+            return
 
-        # 清除记录
-        pending_verification.get(chat_id, {}).pop(user_id, None)
-        override_chat_map.pop(user_id, None)
+        try:
+            await _complete_verification(context, chat_id, user_id)
+        except Exception as exc:
+            logging.exception(
+                "[入群验证] 解禁失败 chat=%s user=%s: %s", chat_id, user_id, exc
+            )
+            await update.message.reply_text("❌ 验证失败，请稍后重新点击验证链接。")
+            return
 
-        await update.message.reply_text("✅ 验证成功！你现在可以在群里发言了。")
+        await update.message.reply_text("✅ 验证成功！你现在可以在群里正常发言了。")
         #  群提醒 关掉
         # await context.bot.send_message(
         #     chat_id,
@@ -271,6 +404,80 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #         )
 
 
+async def verify_math_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle a private-chat answer to the optional numerical verification question."""
+    query = update.callback_query
+    if not query or not query.data or not query.from_user:
+        return
+
+    try:
+        _, chat_id, target_user_id, challenge_token, selected_answer = query.data.split(
+            "|", 4
+        )
+        target_user_id = int(target_user_id)
+        selected_answer = int(selected_answer)
+    except (TypeError, ValueError):
+        await query.answer("验证题无效，请重新打开验证链接。", show_alert=True)
+        return
+
+    if query.from_user.id != target_user_id:
+        await query.answer("这不是你的验证题。", show_alert=True)
+        return
+
+    if override_chat_map.get(target_user_id) != str(chat_id) or not _is_verification_active(
+        chat_id, target_user_id
+    ):
+        _clear_pending_verification(chat_id, target_user_id)
+        await query.answer("验证已过期或无效。", show_alert=True)
+        return
+
+    challenge = math_verification_challenges.get(
+        _verification_key(chat_id, target_user_id)
+    )
+    if (
+        not isinstance(challenge, dict)
+        or challenge.get("expires_at") is None
+        or datetime.utcnow() > challenge["expires_at"]
+    ):
+        _clear_pending_verification(chat_id, target_user_id)
+        await query.answer("验证已过期，请重新打开验证链接。", show_alert=True)
+        return
+
+    if challenge.get("token") != challenge_token:
+        await query.answer("这道题已失效，请使用最新题目作答。", show_alert=True)
+        return
+
+    if selected_answer not in challenge.get("options", set()):
+        _clear_pending_verification(chat_id, target_user_id)
+        await query.answer("验证已过期，请重新打开验证链接。", show_alert=True)
+        return
+
+    if selected_answer != challenge.get("answer"):
+        await query.answer("答案不正确，请重新选择。", show_alert=True)
+        return
+
+    try:
+        await _complete_verification(context, chat_id, target_user_id)
+    except Exception as exc:
+        logging.exception(
+            "[入群验证] 数字验证解禁失败 chat=%s user=%s: %s",
+            chat_id,
+            target_user_id,
+            exc,
+        )
+        await query.answer("验证失败，请稍后再试。", show_alert=True)
+        return
+
+    await query.answer("验证成功！")
+    try:
+        await query.edit_message_text("✅ 验证成功！你现在可以在群里正常发言了。")
+    except Exception:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text="✅ 验证成功！你现在可以在群里正常发言了。",
+        )
+
+
 # 自动踢出未验证用户
 async def auto_kick_if_not_verified(chat_id, user_id, context):
     await asyncio.sleep(120)  # 等 2 分钟
@@ -285,8 +492,7 @@ async def auto_kick_if_not_verified(chat_id, user_id, context):
         except:
             pass
         finally:
-            pending_verification.get(chat_id, {}).pop(user_id, None)
-            override_chat_map.pop(user_id, None)
+            _clear_pending_verification(chat_id, user_id)
 
 
 async def handle_user_left(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -425,6 +631,7 @@ def register_verification_handlers(app):
 
     app.add_handler(ChatJoinRequestHandler(handle_join_request))
     app.add_handler(CallbackQueryHandler(verify_callback, pattern=r"^verify_group\|"))
+    app.add_handler(CallbackQueryHandler(verify_math_callback, pattern=r"^verify_math\|"))
 
     app.add_handler(
         MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_member_verify),

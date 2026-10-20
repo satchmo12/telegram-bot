@@ -18,6 +18,7 @@ from utils import (
 )
 import datetime
 from group.mute_registry import add_mute, remove_mute, list_mutes
+from group.grouplist import load_users
 
 
 def get_warnings_data() -> dict:
@@ -98,10 +99,49 @@ def _resolve_reply_user_for_id(update: Update):
     return int(user.id), name
 
 
+_USERNAME_PATTERN = re.compile(r"@?([A-Za-z0-9_]{5,32})$")
+
+
+def _resolve_group_username(chat_id: int, raw_username: str):
+    """Resolve a current @username from the bot's per-group member records.
+
+    Telegram's Bot API cannot turn an arbitrary user @username into a numeric
+    user ID.  ``group_users`` records IDs for members who joined or spoke in
+    the group, which makes the lookup safe and scoped to the current group.
+    """
+    match = _USERNAME_PATTERN.fullmatch(str(raw_username or "").strip())
+    if not match:
+        return None
+    wanted = match.group(1).casefold()
+    matches = []
+    for raw_user_id, info in load_users(chat_id).items():
+        if not isinstance(info, dict):
+            continue
+        username = str(info.get("username") or "").strip().lstrip("@")
+        if username.casefold() != wanted:
+            continue
+        try:
+            user_id = int(raw_user_id)
+        except (TypeError, ValueError):
+            continue
+        full_name = str(info.get("full_name") or "").strip() or f"用户 {user_id}"
+        matches.append((user_id, f"{full_name} (@{username})"))
+
+    # A stale local record should never make an @username target ambiguous.
+    return matches[0] if len(matches) == 1 else None
+
+
 @register_command("群管")
 async def start_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await safe_reply(update, context,
-        f"📖 群管功能！\n  '踢' 踢人，选择要踢的人回复 \n '移除黑名单' 从黑名单移除\n '禁言' 禁言+时间\n '解除禁言'解除禁言 \n /警告，警号三次踢出 \n"
+    await safe_reply(
+        update,
+        context,
+        "📖 群管功能！\n"
+        "  踢：回复用户，或发送“踢 @用户名”\n"
+        "  移除黑名单：从黑名单移除\n"
+        "  禁言：禁言 + 时间\n"
+        "  解除禁言：解除禁言\n"
+        "  /警告：警告三次踢出\n",
     )
 
 
@@ -110,30 +150,47 @@ async def start_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_admin(update, context):
         return
-        # return await safe_reply(update, context,"你没有权限。")
 
-    # bot_member = await context.bot.get_chat_member(
-    #     update.effective_chat.id, context.bot.id
-    # )
-    # if not bot_member.can_restrict_members:
-    #     return f"⚠ 我没有“限制用户权限”的权限，无法操作成员。"
-
-    if not update.message.reply_to_message:
+    message = update.effective_message
+    chat = update.effective_chat
+    if not message or not chat:
         return
-        return await safe_reply(update, context,"请回复需要踢出的人。")
 
-    target_user = update.message.reply_to_message.from_user
-    if target_user and is_super_admin(target_user.id):
+    target_user = getattr(message.reply_to_message, "from_user", None)
+    target_name = ""
+    if target_user is None:
+        if len(context.args or []) != 1:
+            return await safe_reply(
+                update, context, "请回复需要踢出的用户，或发送：踢 @用户名"
+            )
+        resolved = _resolve_group_username(chat.id, context.args[0])
+        if resolved is None:
+            return await safe_reply(
+                update,
+                context,
+                "未在本群记录中找到该用户名。请让对方先在群里发言后重试，或直接回复对方的消息。",
+            )
+        target_user_id, target_name = resolved
+    else:
+        target_user_id = int(target_user.id)
+        target_name = target_user.full_name
+        if getattr(target_user, "username", None):
+            target_name = f"{target_name} (@{target_user.username})"
+
+    if is_super_admin(target_user_id):
         return
-        # return await safe_reply(update, context, "⚠️ 目标是超级管理员，不能踢出。")
+        # return await safe_reply(update, context, "⚠️ 不能踢出超级管理员。")
+    if not await check_can_restrict(update, context):
+        return
+        # return await safe_reply(update, context, "⚠️ 我没有限制成员权限，无法踢出用户。")
 
     try:
-        await context.bot.ban_chat_member(
-            update.effective_chat.id, target_user.id
-        )
-        await safe_reply(update, context,"✅ 用户已被踢出。")
-    except Exception as e:
-        await safe_reply(update, context,f"❌ 失败：{e}")
+        await context.bot.ban_chat_member(chat.id, target_user_id)
+        await safe_reply(update, context, f"✅ 已踢出 {target_name}。")
+    except (BadRequest, Forbidden) as exc:
+        await safe_reply(update, context, f"❌ 踢出失败：{exc}")
+    except Exception as exc:
+        await safe_reply(update, context, f"❌ 踢出失败：{exc}")
 
 
 @group_enabled_only

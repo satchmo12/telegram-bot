@@ -90,6 +90,7 @@ TOGGLE_FIELDS = [
     ("reply_enabled", "开启回复"),
     ("voice_reply_enabled", "语音回复"),
     ("verify", "身份验证"),
+    ("verify_math", "数字验证"),
     ("join_request_enabled", "处理入群申请"),
     ("welcome", "入群欢迎"),
     ("silent", "隐私模式"),
@@ -124,6 +125,7 @@ TALK_LOTTERY_TOGGLE_FIELDS = [
 LOTTERY_TOGGLE_KEYS = {item[0] for item in LOTTERY_TOGGLE_FIELDS}
 BOT_ADMIN_REQUIRED_FIELDS = {
     "verify",
+    "verify_math",
     "join_request_enabled",
     "ad_filter",
     "spam_limit",
