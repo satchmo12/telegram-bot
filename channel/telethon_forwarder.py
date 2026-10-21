@@ -68,6 +68,24 @@ SESSION_RULES_BY_BOT: Dict[str, Dict[str, List[dict]]] = {}
 FORWARD_TASKS: Dict[str, asyncio.Task] = {}
 REFRESH_EVENTS: Dict[str, asyncio.Event] = {}
 DEBUG_FORWARD = False
+
+
+def get_active_session_client(bot_name: str, session_name: str):
+    """Return a running protocol client for read-only management operations.
+
+    The login panel uses this to list dialogs without opening a second
+    Telethon/SQLite session for the same account.
+    """
+    client = SESSION_CLIENTS_BY_BOT.get(str(bot_name or ""), {}).get(str(session_name))
+    if client is None:
+        return None
+    try:
+        connected = client.is_connected()
+    except Exception:
+        return None
+    return client if connected else None
+
+
 HISTORY_REQUESTS_FILE = "data/history_forward_requests.json"
 HISTORY_STATE_FILE = "data/history_forward_state.json"
 PUBLISH_CONFIG_FILE = "config_data/publish_config.json"

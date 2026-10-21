@@ -1833,7 +1833,12 @@ def _collection_display_command_text(config: dict) -> str:
 
 TEACHER_LIST_CALLBACK_PREFIX = "teacher_list"
 TEACHER_LIST_BUTTONS_PER_ROW = 3
+# Keep every message comfortably below Telegram's text limit while preserving
+# every teacher link through callback pagination.
 TEACHER_LIST_PAGE_SIZE = 20
+TEACHER_LIST_FILTER_CACHE_TTL_SEC = 600
+TEACHER_LIST_FILTER_CACHE_MAX_ENTRIES = 100
+_TEACHER_LIST_FILTER_CACHE: dict[str, dict] = {}
 
 
 def _teacher_list_button_rows(buttons: list[InlineKeyboardButton]) -> list[list[InlineKeyboardButton]]:
@@ -1927,6 +1932,177 @@ def _teacher_list_secondary_keyboard(catalog: list[dict], primary_index: int) ->
     rows = _teacher_list_button_rows(buttons)
     rows.append([InlineKeyboardButton("⬅️ 返回一级分类", callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:primary")])
     return InlineKeyboardMarkup(rows)
+
+
+def _collection_display_category_labels(config: dict) -> tuple[str, str]:
+    """Return the configured first- and second-level filter fields."""
+    return (
+        str((config or {}).get("collection_display_group_label") or "").strip(),
+        str((config or {}).get("collection_display_subgroup_label") or "").strip(),
+    )
+
+
+def _collection_display_post_categories(post: dict, config: dict) -> tuple[str, str]:
+    """Read only the configured category values for command filtering."""
+    primary_label, secondary_label = _collection_display_category_labels(config)
+    primary = (
+        _checkin_group_value_for_label(
+            post, primary_label, recover_from_keyword_index=False
+        )
+        if primary_label
+        else "全部"
+    )
+    secondary = (
+        _checkin_group_value_for_label(
+            post, secondary_label, recover_from_keyword_index=False
+        )
+        if secondary_label
+        else "全部"
+    )
+    return primary or "未分类", secondary or "未分类"
+
+
+def _filter_collection_display_posts(
+    posts: list[dict], config: dict, filter_text: str
+) -> list[dict]:
+    """Filter by configured first/second category values, never by post text."""
+    keyword = str(filter_text or "").strip().casefold()
+    matched = []
+    for post in posts:
+        primary, secondary = _collection_display_post_categories(post, config)
+        if keyword and keyword not in primary.casefold() and keyword not in secondary.casefold():
+            continue
+        matched.append({"primary": primary, "secondary": secondary, "post": post})
+    return matched
+
+
+def _purge_teacher_filter_cache() -> None:
+    now = time.monotonic()
+    for token, state in list(_TEACHER_LIST_FILTER_CACHE.items()):
+        if float(state.get("expires_at", 0) or 0) <= now:
+            _TEACHER_LIST_FILTER_CACHE.pop(token, None)
+
+
+def _store_teacher_filter_result(
+    config: dict, filter_text: str, items: list[dict]
+) -> str:
+    _purge_teacher_filter_cache()
+    while len(_TEACHER_LIST_FILTER_CACHE) >= TEACHER_LIST_FILTER_CACHE_MAX_ENTRIES:
+        oldest_token = min(
+            _TEACHER_LIST_FILTER_CACHE,
+            key=lambda key: float(_TEACHER_LIST_FILTER_CACHE[key].get("expires_at", 0) or 0),
+        )
+        _TEACHER_LIST_FILTER_CACHE.pop(oldest_token, None)
+    token = uuid.uuid4().hex[:12]
+    primary_label, secondary_label = _collection_display_category_labels(config)
+    _TEACHER_LIST_FILTER_CACHE[token] = {
+        "expires_at": time.monotonic() + TEACHER_LIST_FILTER_CACHE_TTL_SEC,
+        "filter_text": str(filter_text or "").strip(),
+        "items": items,
+        "primary_label": primary_label,
+        "secondary_label": secondary_label,
+    }
+    return token
+
+
+def _get_teacher_filter_result(token: str) -> Optional[dict]:
+    _purge_teacher_filter_cache()
+    state = _TEACHER_LIST_FILTER_CACHE.get(str(token or ""))
+    return state if isinstance(state, dict) else None
+
+
+def _teacher_list_filtered_payload(
+    config: dict, token: str, state: dict, page: int
+) -> tuple[str, list[MessageEntity], InlineKeyboardMarkup]:
+    """Render one safe, paginated page of command-filtered roster links."""
+    items = state.get("items") if isinstance(state.get("items"), list) else []
+    page_count = max(1, (len(items) + TEACHER_LIST_PAGE_SIZE - 1) // TEACHER_LIST_PAGE_SIZE)
+    page = max(0, min(int(page), page_count - 1))
+    start = page * TEACHER_LIST_PAGE_SIZE
+    visible_items = items[start : start + TEACHER_LIST_PAGE_SIZE]
+
+    title = _checkin_command_text(config, "collection_display_text", "收录老师")
+    filter_text = str(state.get("filter_text") or "").strip()
+    if filter_text:
+        primary_label = str(state.get("primary_label") or "一级分类")
+        secondary_label = str(state.get("secondary_label") or "二级分类")
+        subtitle = f"筛选：{filter_text}（{primary_label} / {secondary_label}）"
+    else:
+        subtitle = "全部收录"
+    lines = [f"📚 {title}", subtitle, f"共 {len(items)} 条", ""]
+    link_items: list[tuple[str, int, int, str]] = []
+    previous_primary = None
+    previous_secondary = None
+    for offset, item in enumerate(visible_items, start=start + 1):
+        primary = str(item.get("primary") or "未分类")
+        secondary = str(item.get("secondary") or "未分类")
+        if primary != previous_primary:
+            if previous_primary is not None:
+                lines.append("")
+            lines.append(f"【{primary}】")
+            previous_primary = primary
+            previous_secondary = None
+        if secondary != previous_secondary:
+            lines.append(f"〔{secondary}〕")
+            previous_secondary = secondary
+
+        post = item.get("post") if isinstance(item.get("post"), dict) else {}
+        name_text = _collection_display_value(post, config)
+        line = f"{offset}. {name_text}"
+        lines.append(line)
+        link = _fallback_channel_message_link(
+            _as_int(post.get("channel_id")), _as_int(post.get("message_id"))
+        )
+        if link:
+            link_items.append((line, len(str(offset)) + 2, len(name_text), link))
+
+    if page_count > 1:
+        lines.extend(["", f"第 {page + 1}/{page_count} 页"])
+    result_text = "\n".join(lines)
+    entities: list[MessageEntity] = []
+    cursor = 0
+    for line, name_offset, name_length, link in link_items:
+        line_start = result_text.find(line, cursor)
+        if line_start < 0:
+            continue
+        entities.append(
+            MessageEntity(
+                type=MessageEntity.TEXT_LINK,
+                offset=line_start + name_offset,
+                length=name_length,
+                url=link,
+            )
+        )
+        cursor = line_start + len(line)
+
+    rows: list[list[InlineKeyboardButton]] = []
+    if page_count > 1:
+        pager = []
+        if page > 0:
+            pager.append(
+                InlineKeyboardButton(
+                    "◀️ 上一页",
+                    callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:filter:{token}:{page - 1}",
+                )
+            )
+        if page < page_count - 1:
+            pager.append(
+                InlineKeyboardButton(
+                    "下一页 ▶️",
+                    callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:filter:{token}:{page + 1}",
+                )
+            )
+        if pager:
+            rows.append(pager)
+    rows.append([
+        InlineKeyboardButton("📂 分类浏览", callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:primary"),
+        InlineKeyboardButton("❌ 关闭", callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:close"),
+    ])
+    return (
+        result_text,
+        MessageEntity.adjust_message_entities_to_utf_16(result_text, entities),
+        InlineKeyboardMarkup(rows),
+    )
 
 
 def _teacher_list_content_payload(
@@ -2188,6 +2364,31 @@ async def handle_teacher_list_callback(
             await query.edit_message_text("老师列表已关闭。")
         return
 
+    if stage == "filter":
+        try:
+            if len(parts) != 4:
+                raise ValueError
+            token = parts[2]
+            page = int(parts[3])
+            if page < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            await query.answer("筛选分页参数无效，请重新发送老师命令。", show_alert=True)
+            return
+        state = _get_teacher_filter_result(token)
+        if state is None:
+            await query.answer("筛选结果已过期，请重新发送老师命令。", show_alert=True)
+            return
+        text, entities, keyboard = _teacher_list_filtered_payload(config, token, state, page)
+        await query.answer()
+        await query.edit_message_text(
+            text,
+            entities=entities or None,
+            disable_web_page_preview=True,
+            reply_markup=keyboard,
+        )
+        return
+
     if stage == "primary":
         await query.answer()
         await query.edit_message_text(
@@ -2347,55 +2548,43 @@ async def handle_teacher_list_callback(
     await query.answer("无效的老师列表操作。", show_alert=True)
 
 
-async def _reply_collection_display(message, context: ContextTypes.DEFAULT_TYPE, config: dict) -> None:
+async def _reply_collection_display(
+    message,
+    context: ContextTypes.DEFAULT_TYPE,
+    config: dict,
+    *,
+    filter_text: str = "",
+) -> None:
+    """Reply to ``老师 [一级/二级分类]`` with a paginated linked roster."""
     posts = _load_collection_display_posts(config)
     if not posts:
         await message.reply_text("当前暂无收录内容。")
         return
 
-    grouped = _group_collection_display_posts(posts, config)
-    title = _checkin_command_text(config, "collection_display_text", "收录老师")
-    lines = [f"📚 {title}"]
-    link_items = []
+    filter_text = str(filter_text or "").strip()
+    primary_label, secondary_label = _collection_display_category_labels(config)
+    if filter_text and not primary_label and not secondary_label:
+        await message.reply_text("当前未配置一级或二级分类字段，暂不支持按参数筛选。")
+        return
 
-    for primary, subgrouped_posts in grouped.items():
-        if primary:
-            lines.extend(["", f"【{primary}】"])
-        for secondary, group_posts in subgrouped_posts.items():
-            if secondary:
-                lines.append(f"〔{secondary}〕")
-            names = []
-            for post in group_posts:
-                name_text = _collection_display_value(post, config)
-                names.append(name_text)
-                link = _fallback_channel_message_link(
-                    _as_int(post.get("channel_id")), _as_int(post.get("message_id"))
-                )
-                if link:
-                    link_items.append((name_text, link))
-            if names:
-                lines.append("  ".join(names))
+    items = _filter_collection_display_posts(posts, config, filter_text)
+    if not items:
+        labels = " / ".join(label for label in (primary_label, secondary_label) if label)
+        labels = labels or "一级/二级分类"
+        await message.reply_text(
+            f"未找到 {labels} 中包含“{filter_text}”的收录老师。"
+        )
+        return
 
-    result_text = "\n".join(lines)
-    entities = []
-    search_start = 0
-    for name_text, link in link_items:
-        offset = result_text.find(name_text, search_start)
-        if offset >= 0:
-            entities.append(
-                MessageEntity(
-                    type=MessageEntity.TEXT_LINK,
-                    offset=offset,
-                    length=len(name_text),
-                    url=link,
-                )
-            )
-            search_start = offset + len(name_text)
-    entities = MessageEntity.adjust_message_entities_to_utf_16(result_text, entities)
+    token = _store_teacher_filter_result(config, filter_text, items)
+    result_text, entities, keyboard = _teacher_list_filtered_payload(
+        config, token, _TEACHER_LIST_FILTER_CACHE[token], page=0
+    )
     await message.reply_text(
         result_text,
         entities=entities or None,
         disable_web_page_preview=True,
+        reply_markup=keyboard,
     )
 
 
@@ -2483,6 +2672,38 @@ async def send_online_babies_to_group(
     return True
 
 
+async def send_teachers_to_group(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+) -> bool:
+    """Proactively publish the same teacher roster shown by the ``老师`` command."""
+    config = load_publish_config()
+    if not _is_master_bot_context(context) or not bool(
+        config.get("collection_display_enabled", False)
+    ):
+        return False
+
+    posts = _load_collection_display_posts(config)
+    if not posts:
+        return False
+    items = _filter_collection_display_posts(posts, config, "")
+    if not items:
+        return False
+
+    token = _store_teacher_filter_result(config, "", items)
+    text, entities, keyboard = _teacher_list_filtered_payload(
+        config, token, _TEACHER_LIST_FILTER_CACHE[token], page=0
+    )
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        entities=entities or None,
+        disable_web_page_preview=True,
+        reply_markup=keyboard,
+    )
+    return True
+
+
 async def _handle_checkin_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     msg = update.message
     if not msg or not msg.text:
@@ -2498,12 +2719,26 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
     online_text = _checkin_command_text(config, "checkin_online_text", "在线宝宝")
     collection_command = _collection_display_command_text(config)
 
+    collection_filter = ""
     if command == collection_command:
+        collection_filter = ""
+    elif command.startswith(collection_command) and len(command) > len(collection_command):
+        suffix = command[len(collection_command):]
+        if suffix[:1].isspace():
+            collection_filter = suffix.strip()
+        else:
+            collection_filter = None
+    else:
+        collection_filter = None
+
+    if collection_filter is not None:
         if not _is_master_bot_context(context) or not bool(
             config.get("collection_display_enabled", False)
         ):
             return False
-        await _reply_collection_display(msg, context, config)
+        await _reply_collection_display(
+            msg, context, config, filter_text=collection_filter
+        )
         return True
 
     if command not in {checkin_command, cancel_command, online_command}:
@@ -2694,7 +2929,7 @@ def _collection_display_settings_text(config: dict) -> str:
         f"一级分组字段：{group_label}",
         f"二级分组字段：{subgroup_label}",
         "",
-        "在群内发送触发文案（例如“老师”）即可按已收录频道帖子展示。",
+        "在群内发送触发文案（例如“老师”）即可分页展示；可加一级/二级分类参数，例如“老师 成都”。",
     ])
 
 

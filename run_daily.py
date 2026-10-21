@@ -4,7 +4,7 @@ from telegram.ext import CommandHandler, ContextTypes
 from farm.farm_manager import auto_farm_tasks
 
 from chat.my_bot import ad_push_to, cleaned_word, speaking_to
-from group.online_baby_scheduler import schedule_online_babies
+from group.online_baby_scheduler import schedule_online_babies, schedule_teachers
 from slave.guard_system import charge_guard_fees
 from game.red_packet import send_system_packet
 
@@ -22,6 +22,7 @@ async def ten_minute_master_job(context: ContextTypes.DEFAULT_TYPE):
     await speaking_to(context)
     await ad_push_to(context)
     await schedule_online_babies(context)
+    await schedule_teachers(context)
     
 async def five_minute_master_job(bot):
     # 管家

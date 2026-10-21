@@ -4,8 +4,9 @@ import re
 import sqlite3
 import asyncio
 import tempfile
+import time
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from command_router import register_command
 from admin_permissions import has_admin_permission
@@ -51,10 +52,15 @@ CALLBACK_PREFIX = "tlogin"
 _JOIN_STATE = {}
 _SESSION_LABEL_CACHE = {}
 _CHANNEL_LIST_CACHE = {}
+# Cached dialog data prevents repeatedly opening a Telethon connection each time
+# an operator returns to the group-management panel.
 _GROUP_LIST_CACHE = {}
+_GROUP_LIST_CACHE_AT = {}
+_GROUP_FETCH_TASKS = {}
 _BROADCAST_STATE = {}
 
 GROUP_LIST_PAGE_SIZE = 15
+GROUP_LIST_CACHE_TTL_SEC = 300
 
 
 async def _plain_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None):
@@ -465,6 +471,9 @@ def _build_group_list_page(
         if nav:
             keyboard_rows.append(nav)
     keyboard_rows.append(
+        [InlineKeyboardButton("🔄 刷新群组", callback_data=f"{CALLBACK_PREFIX}:grefresh:{session_name}")]
+    )
+    keyboard_rows.append(
         [InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:menu:{session_name}")]
     )
     text = (
@@ -578,12 +587,82 @@ def _build_protocol_ai_settings_keyboard(
     )
 
 
+def _group_cache_key(uid: str, session_name: str) -> tuple[str, str]:
+    return str(uid), str(session_name)
+
+
+def _get_cached_groups(uid: str, session_name: str, *, allow_stale: bool = False):
+    key = _group_cache_key(uid, session_name)
+    groups = _GROUP_LIST_CACHE.get(key)
+    if not isinstance(groups, list):
+        return None
+    cached_at = _GROUP_LIST_CACHE_AT.get(key, 0)
+    if allow_stale or time.monotonic() - cached_at <= GROUP_LIST_CACHE_TTL_SEC:
+        return groups
+    return None
+
+
+def _cache_groups(uid: str, session_name: str, groups: list[dict]) -> list[dict]:
+    key = _group_cache_key(uid, session_name)
+    _GROUP_LIST_CACHE[key] = groups
+    _GROUP_LIST_CACHE_AT[key] = time.monotonic()
+    return groups
+
+
+async def _get_or_fetch_account_groups(
+    context: ContextTypes.DEFAULT_TYPE,
+    uid: str,
+    session_name: str,
+    *,
+    force_refresh: bool = False,
+) -> Tuple[Optional[List[dict]], bool]:
+    """Return cached groups when possible and coalesce concurrent refreshes.
+
+    The second return value marks whether a stale cache was used after a
+    refresh failure, so the UI can be honest while remaining usable.
+    """
+    cached = _get_cached_groups(uid, session_name)
+    if cached is not None and not force_refresh:
+        return cached, False
+
+    bot_name = str(context.application.bot_data.get("name", "") or "")
+    task_key = bot_name, str(session_name)
+    task = _GROUP_FETCH_TASKS.get(task_key)
+    if task is None or task.done():
+        task = asyncio.create_task(
+            _fetch_account_groups(context, session_name),
+            name=f"telethon-group-list:{bot_name}:{session_name}",
+        )
+        _GROUP_FETCH_TASKS[task_key] = task
+        task.add_done_callback(
+            lambda done, key=task_key: _GROUP_FETCH_TASKS.pop(key, None)
+            if _GROUP_FETCH_TASKS.get(key) is done
+            else None
+        )
+
+    try:
+        groups = await asyncio.shield(task)
+    except Exception as exc:
+        print(f"⚠️ 获取协议号群组列表异常 session={session_name}: {exc}")
+        groups = None
+    if groups is not None:
+        return _cache_groups(uid, session_name, groups), False
+
+    stale_groups = _get_cached_groups(uid, session_name, allow_stale=True)
+    return stale_groups, stale_groups is not None
+
+
 async def _get_account_group(context: ContextTypes.DEFAULT_TYPE, uid: str, session_name: str, group_id: int):
-    groups = _GROUP_LIST_CACHE.get((uid, session_name))
+    # Clicking an individual group must be instant.  A group shown in the
+    # preceding list remains valid for this UI flow, even if its cache TTL
+    # expired before the operator pressed it.
+    groups = _get_cached_groups(uid, session_name, allow_stale=True)
     if groups is None:
-        groups = await _fetch_account_groups(context, session_name)
-        _GROUP_LIST_CACHE[(uid, session_name)] = groups
-    return next((group for group in groups if int(group.get("id", 0)) == int(group_id)), None)
+        groups, _ = await _get_or_fetch_account_groups(context, uid, session_name)
+    return next(
+        (group for group in (groups or []) if int(group.get("id", 0)) == int(group_id)),
+        None,
+    )
 
 
 def _build_single_group_send_markup(session_name: str) -> InlineKeyboardMarkup:
@@ -1319,23 +1398,68 @@ async def _fetch_account_channels(
 
 async def _fetch_account_groups(
     context: ContextTypes.DEFAULT_TYPE, session_name: str
-) -> list[dict]:
+) -> Optional[List[dict]]:
+    """Fetch groups, preferring the already-running protocol client.
+
+    Reusing the forwarder's client avoids a second SQLite session connection,
+    which was both slow and occasionally failed with a locked session file.
+    ``None`` means retrieval failed; an empty list is a successful result with
+    no joined groups.
+    """
     api_id, api_hash = _get_api_creds()
     if not api_id or not api_hash:
-        return []
+        return None
     try:
         from telethon import TelegramClient, utils as telethon_utils
     except Exception:
-        return []
+        return None
 
-    client = TelegramClient(get_session_path(context, session_name), api_id, api_hash)
+    bot_name = str(context.application.bot_data.get("name", "") or "")
+    client = None
+    owns_client = False
     try:
-        await client.connect()
-    except sqlite3.OperationalError:
-        return []
+        # Import lazily because telethon_forwarder imports this module for API
+        # credentials; importing it at module level would create a cycle.
+        from channel.telethon_forwarder import get_active_session_client
+
+        client = get_active_session_client(bot_name, session_name)
+    except Exception:
+        client = None
+
+    if client is None:
+        owns_client = True
+        try:
+            client = TelegramClient(get_session_path(context, session_name), api_id, api_hash)
+            # A short retry handles brief session-file contention while another
+            # protocol operation is completing.
+            for attempt in range(2):
+                try:
+                    await client.connect()
+                    break
+                except sqlite3.OperationalError:
+                    if attempt:
+                        raise
+                    await asyncio.sleep(0.35)
+        except sqlite3.OperationalError as exc:
+            print(f"⚠️ 协议号群组列表连接被占用 session={session_name}: {exc}")
+            try:
+                if client is not None:
+                    await client.disconnect()
+            except Exception:
+                pass
+            return None
+        except Exception as exc:
+            print(f"⚠️ 协议号群组列表连接失败 session={session_name}: {exc}")
+            try:
+                if client is not None:
+                    await client.disconnect()
+            except Exception:
+                pass
+            return None
+
     try:
         if not await client.is_user_authorized():
-            return []
+            return None
         groups = []
         async for dialog in client.iter_dialogs():
             entity = dialog.entity
@@ -1357,18 +1481,22 @@ async def _fetch_account_groups(
             if len(groups) >= 100:
                 break
         return groups
+    except Exception as exc:
+        print(f"⚠️ 获取协议号群组列表失败 session={session_name}: {exc}")
+        return None
     finally:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        if owns_client:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
 
 
 async def _fetch_account_group_ids(
     context: ContextTypes.DEFAULT_TYPE, session_name: str
 ) -> list[int]:
     groups = await _fetch_account_groups(context, session_name)
-    return [group["id"] for group in groups if group.get("id") is not None]
+    return [group["id"] for group in (groups or []) if group.get("id") is not None]
 
 
 async def _get_session_label(context: ContextTypes.DEFAULT_TYPE, session_name: str) -> str:
@@ -1492,6 +1620,13 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
         if not _can_access_session(context, query.from_user, session_name):
             return await query.edit_message_text("🚫 无权查看该账号。")
         label = _get_cached_session_label(session_name)
+        # Warm the dialog cache in the background while the operator is on the
+        # account menu, so opening “群组管理” is normally instant.
+        if _get_cached_groups(uid, session_name) is None:
+            asyncio.create_task(
+                _get_or_fetch_account_groups(context, uid, session_name),
+                name=f"telethon-group-cache-warm:{session_name}",
+            )
         keyboard = _build_account_menu_keyboard(session_name)
         if context.user_data.get("start_panel"):
             rows = list(keyboard.inline_keyboard)
@@ -1628,8 +1763,10 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
             return await query.edit_message_text("🚫 订阅已到期，无法发送消息。")
         if not _can_access_session(context, query.from_user, session_name):
             return await query.edit_message_text("🚫 无权使用该协议号发送消息。")
-        groups = await _fetch_account_groups(context, session_name)
-        if group_id not in {group.get("id") for group in groups}:
+        groups = _get_cached_groups(uid, session_name, allow_stale=True)
+        if groups is None:
+            groups, _ = await _get_or_fetch_account_groups(context, uid, session_name)
+        if group_id not in {group.get("id") for group in (groups or [])}:
             return await query.edit_message_text("群组已不存在或协议号不在该群内，请重新查看群组列表。")
         _BROADCAST_STATE[uid] = {
             "mode": "group",
@@ -1759,14 +1896,51 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
             return await query.edit_message_text("🚫 订阅已到期，无法查看小号。")
         if not _can_access_session(context, query.from_user, session_name):
             return await query.edit_message_text("🚫 无权查看该账号。")
-        groups = await _fetch_account_groups(context, session_name)
-        if not groups:
+        cached_groups = _get_cached_groups(uid, session_name)
+        if cached_groups is None:
+            await query.edit_message_text("正在读取协议号群组列表，请稍候…")
+        groups, used_stale_cache = await _get_or_fetch_account_groups(context, uid, session_name)
+        if groups is None:
             return await query.edit_message_text(
-                "未获取到群组列表（可能未加入群）。",
+                "暂时无法读取群组列表，请稍后点击“群组管理”重试。",
                 reply_markup=_build_account_menu_keyboard(session_name),
             )
-        _GROUP_LIST_CACHE[(uid, session_name)] = groups
+        if not groups:
+            return await query.edit_message_text(
+                "未获取到群组列表（该协议号可能尚未加入群）。",
+                reply_markup=_build_account_menu_keyboard(session_name),
+            )
         text, keyboard = _build_group_list_page(session_name, groups, page=1)
+        if used_stale_cache:
+            text += "\n\n⚠️ 列表刷新失败，当前显示上次缓存；可点击“刷新群组”重试。"
+        return await query.edit_message_text(text, reply_markup=keyboard)
+
+    if action == "grefresh":
+        await _clear_login_state(uid, context)
+        session_name = payload
+        if not session_name:
+            return await query.edit_message_text("账号无效。")
+        if not _require_active_subscription(context, query.from_user):
+            return await query.edit_message_text("🚫 订阅已到期，无法查看小号。")
+        if not _can_access_session(context, query.from_user, session_name):
+            return await query.edit_message_text("🚫 无权查看该账号。")
+        await query.edit_message_text("正在刷新协议号群组列表，请稍候…")
+        groups, used_stale_cache = await _get_or_fetch_account_groups(
+            context, uid, session_name, force_refresh=True
+        )
+        if groups is None:
+            return await query.edit_message_text(
+                "暂时无法读取群组列表，请稍后重试。",
+                reply_markup=_build_account_menu_keyboard(session_name),
+            )
+        if not groups:
+            return await query.edit_message_text(
+                "未获取到群组列表（该协议号可能尚未加入群）。",
+                reply_markup=_build_account_menu_keyboard(session_name),
+            )
+        text, keyboard = _build_group_list_page(session_name, groups, page=1)
+        if used_stale_cache:
+            text += "\n\n⚠️ 刷新失败，当前显示上次缓存。"
         return await query.edit_message_text(text, reply_markup=keyboard)
 
     if action == "gpage":
@@ -1780,13 +1954,17 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
             return await query.edit_message_text("🚫 订阅已到期，无法查看小号。")
         if not _can_access_session(context, query.from_user, session_name):
             return await query.edit_message_text("🚫 无权查看该账号。")
-        groups = _GROUP_LIST_CACHE.get((uid, session_name))
-        if not groups:
-            groups = await _fetch_account_groups(context, session_name)
-            _GROUP_LIST_CACHE[(uid, session_name)] = groups
+        groups = _get_cached_groups(uid, session_name, allow_stale=True)
+        if groups is None:
+            groups, _ = await _get_or_fetch_account_groups(context, uid, session_name)
+        if groups is None:
+            return await query.edit_message_text(
+                "暂时无法读取群组列表，请稍后点击“群组管理”重试。",
+                reply_markup=_build_account_menu_keyboard(session_name),
+            )
         if not groups:
             return await query.edit_message_text(
-                "未获取到群组列表（可能未加入群）。",
+                "未获取到群组列表（该协议号可能尚未加入群）。",
                 reply_markup=_build_account_menu_keyboard(session_name),
             )
         text, keyboard = _build_group_list_page(session_name, groups, page)
