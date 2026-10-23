@@ -12,5 +12,13 @@
         "join_time": 1788496095,
         "last_active": 1788496108,
         "blocked": false
+    },
+    "8538961504": {
+        "name": "Rodney",
+        "username": "",
+        "join_time": 1792610875,
+        "last_active": 1792610875,
+        "blocked": true,
+        "blocked_at": 1792654674
     }
 }

@@ -22,6 +22,7 @@ from utils import GROUP_LIST_FILE, QA_FILE, RE_FILE, load_json, safe_reply, save
 # 确保 data 目录存在
 os.makedirs("data", exist_ok=True)
 FUZZY_MATCH_THRESHOLD = 0.82
+CUSTOM_QA_ENABLED_KEY = "custom_qa_enabled"
 
 
 def _log_background_error(task: asyncio.Task):
@@ -64,6 +65,12 @@ def _set_group_bot_muted(chat_id: str, muted: bool):
     cfg["bot_muted"] = bool(muted)
     groups[str(chat_id)] = cfg
     save_json(GROUP_LIST_FILE, groups)
+
+
+def _is_custom_qa_enabled(group_cfg: dict) -> bool:
+    """Return the per-group custom Q&A switch, enabled for legacy groups."""
+    value = group_cfg.get(CUSTOM_QA_ENABLED_KEY, True)
+    return value if isinstance(value, bool) else True
 
 
 def _normalize_text(text: str) -> str:
@@ -168,6 +175,11 @@ async def handle_qa_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     groups = load_json(GROUP_LIST_FILE)
     group_cfg = groups.get(chat_id, {}) if isinstance(groups, dict) else {}
+    if not isinstance(group_cfg, dict):
+        group_cfg = {}
+    if not _is_custom_qa_enabled(group_cfg):
+        return
+
     voice_reply_enabled = bool(group_cfg.get("voice_reply_enabled", False))
 
     data = load_qa_data()

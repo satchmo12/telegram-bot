@@ -1,5 +1,5 @@
 {
-    "next_id": 3,
+    "next_id": 4,
     "rules": [
         {
             "id": 1,
@@ -75,6 +75,30 @@
                 {
                     "id": 6,
                     "from": "📤课表查看图📤",
+                    "to": ""
+                }
+            ]
+        },
+        {
+            "id": 3,
+            "enabled": true,
+            "channel_id": "-1002298630178",
+            "output_template": "{content}",
+            "output_entities": [],
+            "cut_words": [
+                "📝【作业"
+            ],
+            "cut_includes_word": false,
+            "personal_report_link_enabled": true,
+            "replacements": [
+                {
+                    "id": 1,
+                    "from": "学院推荐",
+                    "to": "找老师群推荐"
+                },
+                {
+                    "id": 2,
+                    "from": "进VIP群",
                     "to": ""
                 }
             ]

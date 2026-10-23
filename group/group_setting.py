@@ -88,6 +88,7 @@ GLOBAL_AD_PUSH_MESSAGE_KEY = "global_ad_push_message"
 TOGGLE_FIELDS = [
     ("bot_enabled", "启用机器人"),
     ("reply_enabled", "开启回复"),
+    ("custom_qa_enabled", "自定义问答"),
     ("voice_reply_enabled", "语音回复"),
     ("verify", "身份验证"),
     ("verify_math", "数字验证"),
@@ -239,6 +240,19 @@ def _mark_force_subscribe_set_ts(chat_id: str, ts: Optional[int] = None):
 
 def _toggle_text(enabled: bool) -> str:
     return "✅ 开启" if enabled else "🚫 关闭"
+
+
+# New groups inherit the default from their saved config.  Existing groups must
+# keep their previous custom-Q&A behavior until an admin explicitly disables it.
+TOGGLE_DEFAULTS = {
+    "custom_qa_enabled": True,
+}
+
+
+def _toggle_value(cfg: dict, key: str) -> bool:
+    default = TOGGLE_DEFAULTS.get(key, False)
+    value = cfg.get(key, default)
+    return value if isinstance(value, bool) else default
 
 
 def _visible_toggle_fields(bot_is_admin: bool) -> list[tuple[str, str]]:
@@ -1529,7 +1543,7 @@ def _build_group_panel_text(
     enabled_toggles = [
         (key, label)
         for key, label in _visible_toggle_fields(bot_is_admin)
-        if bool(cfg.get(key, False))
+        if _toggle_value(cfg, key)
     ]
     if enabled_toggles:
         lines.append("")
@@ -1611,7 +1625,7 @@ def _build_group_panel_keyboard(
     rows = []
     toggle_button_map = {}
     for key, label in _visible_toggle_fields(bot_is_admin):
-        is_on = bool(cfg.get(key, False))
+        is_on = _toggle_value(cfg, key)
         toggle_button_map[key] = InlineKeyboardButton(
             text=f"{'✅' if is_on else '🚫'} {label}",
             callback_data=f"{CALLBACK_PREFIX}:toggle:{chat_id}:{key}",
@@ -2651,7 +2665,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             |  {"points_enabled" }
         ):
             await query.answer("处理中...", show_alert=False)
-            new_value = not bool(cfg.get(feature_key, False))
+            new_value = not _toggle_value(cfg, feature_key)
             cfg[feature_key] = new_value
             if feature_key == "force_subscribe" and new_value:
                 cfg["force_subscribe_set_ts"] = int(time.time())

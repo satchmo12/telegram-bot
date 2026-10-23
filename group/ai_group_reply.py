@@ -9,6 +9,7 @@ import httpx
 
 from telegram import Update
 from telegram.constants import ChatType
+from telegram.error import BadRequest, Forbidden
 from utils import get_group_whitelist, load_json, save_json
 
 from telegram.ext import (
@@ -57,6 +58,10 @@ DEFAULT_REPLY_DELAY_MAX_SEC = 8
 MAX_REPLY_DELAY_SEC = 300
 MAX_REPLY_STYLE_LENGTH = 240
 DEFAULT_REPLY_STYLE = ""
+
+# Telegram returns a BadRequest (rather than Forbidden) for some muted/restricted
+# bots. Avoid repeatedly calling Ollama and then failing to send in those chats.
+SEND_PERMISSION_RETRY_SEC = 600
 
 
 # ============================================================
@@ -161,6 +166,10 @@ reply_history = defaultdict(deque)
 # 正在处理的群
 processing_chats = set()
 
+# 群内机器人无发言权限时的临时静默截止时间。仅保存在内存中，
+# 管理员恢复权限后，最多等待 10 分钟便会自动重试。
+send_permission_blocked_until = defaultdict(float)
+
 
 # ============================================================
 # 基础判断
@@ -180,6 +189,26 @@ def cleanup_reply_history(chat_id: int):
             history.popleft()
         else:
             break
+
+
+def is_send_permission_error(error: BadRequest) -> bool:
+    """Return whether Telegram rejected a send because the bot cannot speak."""
+    message = str(error).lower()
+    return (
+        "not enough rights to send" in message
+        or "have no rights to send" in message
+    )
+
+
+def block_ai_sends_for_missing_permission(chat_id: int, error: Exception) -> None:
+    """Temporarily stop AI work after Telegram reports missing send permissions."""
+    send_permission_blocked_until[chat_id] = time.time() + SEND_PERMISSION_RETRY_SEC
+    print(
+        f"[AI][SKIP] 群 {chat_id} 中机器人没有发送文字消息的权限；"
+        f"{SEND_PERMISSION_RETRY_SEC} 秒内不再调用 AI。"
+        f"请在 Telegram 群权限中解除对机器人的禁言或授予发言权限。"
+        f" error={error!r}"
+    )
 
 
 def can_reply(chat_id: int, settings: dict) -> bool:
@@ -620,6 +649,13 @@ async def ai_group_reply_handler(
 
 
     # ========================================================
+    # 发言权限失败后的临时静默
+    # ========================================================
+
+    if time.time() < send_permission_blocked_until[chat_id]:
+        return
+
+    # ========================================================
     # 冷却检查
     # ========================================================
 
@@ -752,6 +788,30 @@ async def ai_group_reply_handler(
             f"[AI][SUCCESS] 群 {chat_id} AI 回复完成："
             f"{reply_text!r}"
         )
+
+    except Forbidden as e:
+        # 机器人被禁言、踢出或没有群内发言权限时，Telegram 可能返回
+        # Forbidden；这不是 AI/Ollama 的运行异常。
+        block_ai_sends_for_missing_permission(chat_id, e)
+
+    except BadRequest as e:
+        # 对于 “Not enough rights to send text messages to the chat”，
+        # python-telegram-bot 会抛 BadRequest，而不是 Forbidden。
+        if is_send_permission_error(e):
+            block_ai_sends_for_missing_permission(chat_id, e)
+        else:
+            print(
+                f"[AI][ERROR] 群 {chat_id} 处理失败"
+            )
+            print(
+                f"[AI][ERROR] exception_type={type(e).__name__}"
+            )
+            print(
+                f"[AI][ERROR] exception={e!r}"
+            )
+            logging.exception(
+                "[AI] 群聊 AI 回复发生异常"
+            )
 
     except Exception as e:
         print(

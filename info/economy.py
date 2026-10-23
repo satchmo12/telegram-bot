@@ -294,7 +294,8 @@ def change_points(
         )
 
     old_balance = _normalize_points(user_data.get("points"))
-    new_balance = max(0, min(old_balance + requested_delta, 999999))
+    # new_balance = max(0, min(old_balance + requested_delta, 999999))
+    new_balance = old_balance + requested_delta
     actual_delta = new_balance - old_balance
     user_data["points"] = new_balance
 

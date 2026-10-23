@@ -248,15 +248,21 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     bot_username = str(getattr(context.bot, "username", "") or "").strip().lstrip("@")
     bot_name = str(context.application.bot_data.get("name", "") or "").strip() or "机器人"
     display_bot = f"@{bot_username}" if bot_username else bot_name
-
+    
+    # 固定返回内容   
+    result_text = (
+        "找老师机器人：{bot}\n"
+        '<a href="https://t.me/zhaolaoshiqun">加入群组</a>\n'
+    ).format(bot=display_bot)
+    
     results = [
         InlineQueryResultArticle(
             id=str(uuid.uuid4()),
-            title=f"当前机器人：{display_bot}",
+            title=f"找老师机器人：{display_bot}",
             description=f"收到的 inline 请求来自 {display_bot}",
             input_message_content=InputTextMessageContent(
-                f"🤖 当前监听到该 inline 请求的机器人：{display_bot}\n"
-                f"查询内容：{query or '（空）'}"
+                result_text,
+                parse_mode="HTML",
             ),
         )
     ]

@@ -306,5 +306,20 @@
         "join_time": 1792387889,
         "last_active": 1792387898,
         "blocked": false
+    },
+    "7595576890": {
+        "name": "Kairos",
+        "username": "",
+        "join_time": 1792610873,
+        "last_active": 1792610873,
+        "blocked": false
+    },
+    "7057402748": {
+        "name": "Sona",
+        "username": "",
+        "join_time": 1792648757,
+        "last_active": 1792648757,
+        "blocked": true,
+        "blocked_at": 1792654789
     }
 }

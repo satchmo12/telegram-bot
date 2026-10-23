@@ -1,13 +1,13 @@
 {
-    "channel_id": null,
+    "channel_id": -1004455955066,
     "review_enabled": false,
     "daily_limit": 0,
     "ads_enabled": false,
     "ads": [],
     "buttons": [],
     "submission_enabled": false,
-    "random_view_enabled": false,
-    "bottom_buttons_enabled": true,
+    "random_view_enabled": true,
+    "bottom_buttons_enabled": false,
     "proof_required": false,
     "reject_reason_required": false,
     "comment_forward_enabled": false,
@@ -25,8 +25,18 @@
     "report_link_enabled": false,
     "template_publish_enabled": false,
     "publish_templates": [],
-    "pending_history_post_migration": null,
-    "channel_change_history": [],
+    "pending_history_post_migration": {
+        "old_channel_id": 1,
+        "new_channel_id": -1004455955066,
+        "changed_at": 1792602352
+    },
+    "channel_change_history": [
+        {
+            "old_channel_id": 1,
+            "new_channel_id": -1004455955066,
+            "changed_at": 1792602352
+        }
+    ],
     "keyword_group_reply_enabled": false,
     "keyword_group_reply_rules": [],
     "backup_channel_id": null,
