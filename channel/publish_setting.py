@@ -4176,20 +4176,87 @@ def _submission_mentions_report_username(submission: dict, usernames: set[str]) 
     return bool(usernames & mentioned)
 
 
+def _keyword_post_refs_for_report_usernames(usernames: set[str]) -> list[dict]:
+    """Find every indexed post whose fields contain one of ``usernames``.
+
+    Report IDs are derived from Telegram usernames, while a user can republish
+    the same profile after changing the primary channel.  The keyword index is
+    the durable source that links those otherwise separate posts together.
+    """
+    if not usernames:
+        return []
+
+    posts = {}
+    for records in _load_keyword_map().values():
+        for record in records or []:
+            if not isinstance(record, dict):
+                continue
+            channel_id, message_id = _report_post_key(
+                record.get("channel_id"), record.get("channel_message_id")
+            )
+            if channel_id is None or message_id is None:
+                continue
+
+            raw = str(record.get("raw") or record.get("key") or "").strip()
+            record_usernames = {
+                _normalize_report_username(username)
+                for username in re.findall(r"@([A-Za-z0-9_]{5,32})", raw)
+            }
+            key = (channel_id, message_id)
+            post = posts.setdefault(
+                key,
+                {
+                    "channel_id": channel_id,
+                    "message_id": message_id,
+                    "subjects": [],
+                    "created_at": 0,
+                    "matches_username": False,
+                },
+            )
+            label = str(record.get("label") or "").strip()
+            if label and raw:
+                post["subjects"].append({"label": label, "value": raw})
+            post["created_at"] = max(
+                int(post["created_at"] or 0), int(record.get("created_at", 0) or 0)
+            )
+            if usernames & record_usernames:
+                post["matches_username"] = True
+
+    result = []
+    for post in posts.values():
+        if not post.pop("matches_username", False):
+            continue
+        post["subjects"] = _report_subject_entries(post["subjects"])
+        result.append(post)
+    return result
+
+
 def _backfill_report_comments(report: dict, report_id: str = "") -> int:
-    """Recover approved comments from every historical post of one username."""
+    """Recover posts and approved comments for every publication of a username."""
     if not isinstance(report, dict):
         return 0
-    refs = _report_post_refs(report)
-    known_post_keys = {
-        _report_post_key(ref.get("channel_id"), ref.get("message_id")) for ref in refs
-    }
-    known_channels = {channel_id for channel_id, _ in known_post_keys if channel_id is not None}
-    if not known_channels:
-        return 0
     usernames = _report_usernames(report, report_id)
+    if not usernames:
+        return 0
 
-    restored = 0
+    changed = 0
+    # Discover every historical/current post with this exact username first.
+    # Unlike the previous channel-scoped recovery, this also covers posts from
+    # an old primary channel after a channel migration.
+    for post in _keyword_post_refs_for_report_usernames(usernames):
+        if _add_report_post_ref(
+            report,
+            post["channel_id"],
+            post["message_id"],
+            subjects=post["subjects"],
+            created_at=post["created_at"],
+        ):
+            changed += 1
+
+    known_post_keys = {
+        _report_post_key(ref.get("channel_id"), ref.get("message_id"))
+        for ref in _report_post_refs(report)
+    }
     for submission in _load_pending_submissions().values():
         if not isinstance(submission, dict):
             continue
@@ -4200,12 +4267,9 @@ def _backfill_report_comments(report: dict, report_id: str = "") -> int:
         if target_key[0] is None or target_key[1] is None:
             continue
         if target_key not in known_post_keys:
-            # Legacy records kept only the most recent source post.  Approved
-            # comments mentioning the same report username reveal older posts
-            # and let us recover their complete history on first opening.
-            if target_key[0] not in known_channels or not _submission_mentions_report_username(
-                submission, usernames
-            ):
+            # Some legacy indexed posts no longer retain their keyword record.
+            # Their approved comment still gives a safe, exact username match.
+            if not _submission_mentions_report_username(submission, usernames):
                 continue
             source_created_at = int(
                 submission.get("reviewed_at")
@@ -4218,12 +4282,12 @@ def _backfill_report_comments(report: dict, report_id: str = "") -> int:
                 target_key[1],
                 created_at=source_created_at,
             ):
-                refs = _report_post_refs(report)
+                changed += 1
                 known_post_keys.add(target_key)
         comment = _report_comment_from_submission(submission)
         if _add_report_comment_if_missing(report, comment):
-            restored += 1
-    return restored
+            changed += 1
+    return changed
 
 
 def _append_report_comment(submission: dict, forwarded_message) -> None:
@@ -4895,6 +4959,7 @@ def _report_list_view(report_id: str, report: dict, page: int):
         "",
         "请选择下方评论查看详情：",
     ]
+    # 仅调试的时候打开
     # if post_refs:
     #     rows.append([
     #         InlineKeyboardButton(
@@ -5078,7 +5143,7 @@ def _report_comment_detail_view(
         next_index = ordered_indexes[next_position]
         next_page = next_position // REPORT_PAGE_SIZE + 1
         nav_row.append(InlineKeyboardButton(
-            "➡️ 吓一条",
+            "➡️ 下一条",
             callback_data=f"publish:report_detail:{report_id}:{next_page}:{next_index}",
         ))
     rows.append(nav_row)
@@ -5396,6 +5461,71 @@ def _publish_failure_detail(exc: Exception) -> str:
 def _comment_target_from_submission(submission: dict):
     target = submission.get("comment_target")
     return target if isinstance(target, dict) else {}
+
+
+def _comment_target_recipient_text(target: dict) -> str:
+    """Return the person/keyword represented by a comment target post."""
+    if not isinstance(target, dict):
+        return "未指定"
+
+    channel_id = _as_int(target.get("channel_id"))
+    message_id = _as_int(target.get("message_id"))
+    if channel_id is None or message_id is None:
+        return "未指定"
+
+    matches = []
+    for records in _load_keyword_map().values():
+        for record in records or []:
+            if not isinstance(record, dict):
+                continue
+            if (
+                _as_int(record.get("channel_id")) == channel_id
+                and _as_int(record.get("channel_message_id")) == message_id
+            ):
+                raw = str(record.get("raw") or "").lstrip("#").strip()
+                if raw:
+                    matches.append((str(record.get("label") or "关键词").strip(), raw))
+
+    # A post can be found via contact details, location, or tags. Include both
+    # its stage name and contact details so reviewers can identify the recipient
+    # immediately, regardless of which keyword the user searched for.
+    artist_names = []
+    contacts = []
+    for label, raw in matches:
+        if label == "艺名" and raw not in artist_names:
+            artist_names.append(raw)
+        elif label in {"联系", "联系方式"} and raw not in contacts:
+            contacts.append(raw)
+
+    details = []
+    if artist_names:
+        details.append(f"艺名：{'、'.join(artist_names)}")
+    if contacts:
+        details.append(f"联系方式：{'、'.join(contacts)}")
+    if details:
+        return "；".join(details)
+    if matches:
+        label, raw = matches[0]
+        return f"{label}：{raw}"
+    return f"对应帖子（频道 {channel_id} / 消息 {message_id}）"
+
+
+def _submission_recipient_text(submission: dict) -> str:
+    """Describe where/who a submission is intended for in review notices."""
+    saved_recipient = str(submission.get("recipient") or "").strip()
+    target = _comment_target_from_submission(submission)
+    if target:
+        # Re-resolve existing queue entries as well, so older pending records
+        # gain the contact details added to the review notice format.
+        recipient = _comment_target_recipient_text(target)
+        if not recipient.startswith("对应帖子（"):
+            return recipient
+    if saved_recipient:
+        return saved_recipient
+
+    if submission.get("submission_kind") == "forward":
+        return "转发频道"
+    return "主频道"
 
 
 def _keyword_labels(config: dict) -> list[str]:
@@ -6399,13 +6529,36 @@ async def _handle_group_keyword_reply(update: Update, context: ContextTypes.DEFA
     return True
 
 
+def _submission_mode_button_text(config: dict, *, anonymous: bool) -> str:
+    """Build a submission-mode label and expose its approved-comment reward."""
+    emoji = "🙈" if anonymous else "👤"
+    mode = "匿名投稿" if anonymous else "实名投稿"
+    if not bool((config or {}).get("submission_reward_enabled", False)):
+        return f"{emoji} {mode}投稿"
+
+    points_key = (
+        "submission_reward_anonymous_points"
+        if anonymous
+        else "submission_reward_real_points"
+    )
+    points = _submission_reward_points((config or {}).get(points_key))
+    return f"{emoji} {mode}+{points}分" if points > 0 else f"{emoji} {mode}投稿"
+
+
 def _keyword_submission_mode_keyboard(route: dict, link: str) -> InlineKeyboardMarkup:
+    config = load_publish_config()
     rows = []
     if link:
         rows.append([InlineKeyboardButton("🔗 查看对应帖子", url=link)])
     rows.append([
-        InlineKeyboardButton("🙈 匿名投稿", callback_data="publish:keyword_submit_mode:anonymous"),
-        InlineKeyboardButton("👤 实名投稿", callback_data="publish:keyword_submit_mode:real"),
+        InlineKeyboardButton(
+            _submission_mode_button_text(config, anonymous=True),
+            callback_data="publish:keyword_submit_mode:anonymous",
+        ),
+        InlineKeyboardButton(
+            _submission_mode_button_text(config, anonymous=False),
+            callback_data="publish:keyword_submit_mode:real",
+        ),
     ])
     rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
     return InlineKeyboardMarkup(rows)
@@ -6507,12 +6660,12 @@ def _review_prompt_text(submission: dict) -> str:
         and submission.get("proof_message_id") is not None
     )
     proof_status = "已上传" if has_proof else "未要求"
-    
-    
-    
+    recipient = _submission_recipient_text(submission)
+
     return (
         f"📝 收到新的{'匿名' if submission.get('anonymous') else '实名'}投稿，请审核。\n"
         f"投稿人：{submission.get('author', '未知用户')}\n"
+        f"投稿对象：{recipient}\n"
         f"审核凭证：{proof_status}\n"
         f"投稿编号：{submission.get('id', '未知')}"
     )
@@ -10507,6 +10660,9 @@ async def _handle_wall_publish_message(
         }
         if comment_target:
             submission["comment_target"] = comment_target
+            # Persist the recipient at submission time, so review notices keep
+            # showing who the user submitted for even if keyword mappings change.
+            submission["recipient"] = _comment_target_recipient_text(comment_target)
 
         pending = _load_pending_submissions()
         if bool(config.get("proof_required", False)):

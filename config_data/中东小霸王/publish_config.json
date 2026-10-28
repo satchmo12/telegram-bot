@@ -1,5 +1,5 @@
 {
-    "channel_id": null,
+    "channel_id": -1004435773099,
     "review_enabled": false,
     "daily_limit": 0,
     "ads_enabled": false,
@@ -24,10 +24,12 @@
     "comment_forward_enabled": false,
     "forward_channel_id": null,
     "bottom_comment_buttons_enabled": false,
-    "report_link_enabled": false,
+    "report_link_enabled": true,
     "template_publish_enabled": false,
     "publish_templates": [],
-    "keyword_extract_labels": [],
+    "keyword_extract_labels": [
+        "联系"
+    ],
     "keyword_group_reply_enabled": false,
     "keyword_group_reply_rules": [],
     "keyword_post_search_display_mode": "main",

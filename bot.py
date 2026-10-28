@@ -347,6 +347,36 @@ async def owner_reply_router(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await reply_from_owner(update, context)
 
 
+def _custom_emoji_ids(message) -> list[str]:
+    """Return unique custom-emoji IDs from a message body or media caption."""
+    emoji_ids = []
+    for entities in (
+        getattr(message, "entities", None) or [],
+        getattr(message, "caption_entities", None) or [],
+    ):
+        for entity in entities:
+            if getattr(entity, "type", None) != "custom_emoji":
+                continue
+            emoji_id = str(getattr(entity, "custom_emoji_id", "") or "").strip()
+            if emoji_id and emoji_id not in emoji_ids:
+                emoji_ids.append(emoji_id)
+    return emoji_ids
+
+
+async def query_member_emoji_id(message) -> bool:
+    """Reply with custom/member emoji IDs and report whether any were found."""
+    emoji_ids = _custom_emoji_ids(message)
+    if not emoji_ids:
+        return False
+
+    id_lines = "\n".join(
+        f"<code>{html.escape(emoji_id)}</code>" for emoji_id in emoji_ids
+    )
+    await message.reply_text(f"会员表情 ID：\n{id_lines}", parse_mode="HTML")
+    print(f"[private_forward_router] 检测到会员表情，IDs={','.join(emoji_ids)}")
+    return True
+
+
 async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bind_runtime_bot_context(context)
 
@@ -508,19 +538,8 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
     # 2. 非转发消息，才检查会员/自定义表情 ID
     # =========================================================
 
-    # for entity in msg.entities or []:
-    #     if entity.type == "custom_emoji":
-    #         emoji_id = entity.custom_emoji_id
-
-    #         print(
-    #             f"[private_forward_router] 检测到会员表情，ID={emoji_id}"
-    #         )
-
-    #         await msg.reply_text(
-    #             f"会员表情 ID：\n<code>{emoji_id}</code>",
-    #             parse_mode="HTML",
-    #         )
-    #         return
+    if await query_member_emoji_id(msg):
+        return
 
     # =========================================================
     # 3. 检查命令
@@ -1028,6 +1047,11 @@ def _build_start_panel_rows(
         )
     if is_bot_admin_viewer:
         rows.append([InlineKeyboardButton("⚙️机器人设置", callback_data="mbot:settings")])
+        
+    if bot_name == MASTER_BOT_NAME and bool(publish_config.get("collection_display_enabled", False)):
+        rows.append([
+            InlineKeyboardButton("老师列表", callback_data="teacher_list:primary", api_kwargs={"style": "success", "icon_custom_emoji_id": "5474525960143385880"}),
+        ])
 
     # The master bot owner can forward a channel post here and receive a
     # rule-based, reformatted copy. Rule editing lives in its own panel.
@@ -1111,10 +1135,7 @@ def _build_start_panel_rows(
 
     # The roster is public only on the master bot. It uses the same collection
     # display switch as the reply-keyboard entry.
-    if bot_name == MASTER_BOT_NAME and bool(publish_config.get("collection_display_enabled", False)):
-        rows.append([
-            InlineKeyboardButton("老师列表", callback_data="teacher_list:primary"),
-        ])
+
 
     # Post lookup is deliberately explicit. It must never consume ordinary
     # private text such as a protocol-login phone number.

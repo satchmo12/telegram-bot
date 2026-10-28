@@ -186,7 +186,7 @@
     "collection_display_enabled": true,
     "collection_display_command_text": "老师",
     "collection_display_text": "收录老师",
-    "collection_display_label": "艺名+课费",
+    "collection_display_label": "艺名+课费+标签",
     "collection_display_group_label": "城市",
     "collection_display_subgroup_label": "区域"
 }

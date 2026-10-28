@@ -490,6 +490,9 @@ async def talk_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     counts.sort(key=lambda item: item[3], reverse=True)
+    active_users = len(counts)  # 当前时间段活跃人数
+    total_messages = sum(item[3] for item in counts)  # 当前时间段总发言数
+    
     CHAT_TALK_COUNTS.setdefault(chat_id, {})[mode] = counts
 
     title_map = {
@@ -499,7 +502,10 @@ async def talk_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "month": "📅 本月发言排行榜",
     }
     title = title_map.get(mode, "📅 发言排行榜")
-
+    title += (
+    f"\n🔥 活跃人数：{active_users}"
+    f"\n💬 总发言数：{total_messages}"
+)  
     items = []
     for i, (name, username, _user_id, count) in enumerate(counts, 1):
         user_link = _leaderboard_user_link(name, username, silent=is_silent)
@@ -529,7 +535,9 @@ async def talk_top_pagination_callback(update: Update, context: ContextTypes.DEF
     chat_id = str(update.effective_chat.id)
     is_silent = _is_chat_silent(context, chat_id)
     counts = CHAT_TALK_COUNTS.get(chat_id, {}).get(mode, [])
-
+    active_users = len(counts)  # 当前时间段活跃人数
+    total_messages = sum(item[3] for item in counts)  # 当前时间段总发言数
+    
     if not counts:
         await query.message.edit_text("暂无发言记录。")
         return
@@ -546,7 +554,10 @@ async def talk_top_pagination_callback(update: Update, context: ContextTypes.DEF
         "month": "📅 本月发言排行榜",
     }
     title = title_map.get(mode, "📅 发言排行榜")
-
+    title += (
+        f"\n🔥 活跃人数：{active_users}"
+        f"\n💬 总发言数：{total_messages}"
+    )  
     await send_paginated_list(
         update, context, items, page=page, prefix=f"talktop_{mode}", title=title
     )
