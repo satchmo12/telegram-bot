@@ -78,7 +78,8 @@
         "telethon_manage": true,
         "bot_channel_config": false,
         "group_config": true,
-        "global_ad_config": false
+        "global_ad_config": false,
+        "keyword_post_search": true
     },
     "discussion_mapping_session": "main",
     "report_link_enabled": true,
@@ -161,7 +162,7 @@
     "checkin_command_text": "打卡",
     "checkin_cancel_command_text": "取消打卡",
     "checkin_online_command_text": "在线宝宝",
-    "checkin_online_text": "在线老师哈哈哈哈",
+    "checkin_online_text": "在线老师欢迎咨询",
     "user_mark_enabled": true,
     "user_mark_report_chat_id": -1003861180330,
     "user_mark_labels": [

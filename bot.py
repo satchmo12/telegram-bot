@@ -1038,7 +1038,7 @@ def _build_start_panel_rows(
         return is_bot_admin_viewer or bool(custom_menu_buttons.get(key, True))
 
     rows: list[list[InlineKeyboardButton]] = []
-    if is_bot_admin_viewer and bot_name == MASTER_BOT_NAME:
+    if  bot_name == MASTER_BOT_NAME:
         rows.append(
             [
                 InlineKeyboardButton("🧬克隆机器人", callback_data=f"mbot:clone:{MASTER_BOT_NAME}"),
@@ -1138,12 +1138,14 @@ def _build_start_panel_rows(
 
 
     # Post lookup is deliberately explicit. It must never consume ordinary
-    # private text such as a protocol-login phone number.
-    rows.append(
-        [
-            InlineKeyboardButton("🔎 查找收录标签", callback_data="publish:keyword_post_search"),
-         
-        ])
+    # private text such as a protocol-login phone number. Its start-panel entry
+    # is configurable together with the other ordinary-user menu buttons.
+    if show_custom_button("keyword_post_search"):
+        rows.append(
+            [
+                InlineKeyboardButton("🔎 查找收录标签", callback_data="publish:keyword_post_search"),
+            ]
+        )
 
     return rows
 

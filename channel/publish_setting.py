@@ -236,6 +236,7 @@ def load_publish_config():
             "bot_channel_config": True,
             "group_config": True,
             "global_ad_config": True,
+            "keyword_post_search": True,
         },
         "submission_enabled": False,
         "random_view_enabled": False,
@@ -252,6 +253,14 @@ def load_publish_config():
         if key not in data:
             data[key] = value.copy() if isinstance(value, (list, dict)) else value
             changed = True
+        elif isinstance(value, dict) and isinstance(data.get(key), dict):
+            # Nested maps (such as custom-menu button visibility) gain new
+            # defaults over time. Preserve the owner's existing choices while
+            # adding only newly introduced keys.
+            for nested_key, nested_value in value.items():
+                if nested_key not in data[key]:
+                    data[key][nested_key] = nested_value
+                    changed = True
     normalized_labels = _keyword_labels(data)
     if data.get("keyword_extract_labels") != normalized_labels:
         data["keyword_extract_labels"] = normalized_labels
@@ -5906,6 +5915,59 @@ def _find_keyword_routes(query: str, *, require_discussion: bool = True) -> list
     matches.sort(key=lambda item: int(item.get("created_at", 0) or 0), reverse=True)
     return matches[:30]
 
+async def _restore_missing_discussion_mappings_for_keyword(
+    context: ContextTypes.DEFAULT_TYPE,
+    query: str,
+) -> tuple[int, int]:
+    """Recover native discussion parents for matching but unlinked main posts.
+
+    A channel post can be indexed before its automatic forward reaches the
+    linked discussion group, or that update can be missed during a restart.
+    Ordinary “查找收录标签” can still open such a post, but “我要投稿” needs the
+    discussion parent in order to publish a native comment.  Resolve only those
+    missing parents on demand through the configured protocol account.
+    """
+    candidates = _find_keyword_routes(query, require_discussion=False)
+    missing_by_channel: dict[int, list[int]] = {}
+    for route in candidates:
+        if _as_int(route.get("discussion_message_id")) is not None:
+            continue
+        channel_id = _as_int(route.get("channel_id"))
+        message_id = _as_int(route.get("channel_message_id"))
+        if channel_id is None or message_id is None:
+            continue
+        message_ids = missing_by_channel.setdefault(channel_id, [])
+        if message_id not in message_ids:
+            message_ids.append(message_id)
+
+    if not missing_by_channel:
+        return 0, 0
+
+    config = load_publish_config()
+    comment_map = _load_comment_map()
+    keyword_data = _load_keyword_map()
+    resolved_total = 0
+    failed_total = 0
+    changed = False
+    for channel_id, message_ids in missing_by_channel.items():
+        resolved, failed, mapping_changed = await _restore_cloned_discussion_mappings(
+            context,
+            config=config,
+            target_channel_id=channel_id,
+            target_message_ids=message_ids,
+            comment_map=comment_map,
+            keyword_data=keyword_data,
+        )
+        resolved_total += resolved
+        failed_total += failed
+        changed = changed or mapping_changed
+
+    if changed:
+        _save_comment_map(comment_map)
+        _save_keyword_map(keyword_data)
+    return resolved_total, failed_total
+
+
 def _find_keyword_routes_with_artist(
     query: str,
     *,
@@ -7911,6 +7973,7 @@ CUSTOM_USER_MENU_OPTIONS = (
     ("bot_channel_config", "📣 机器人配置"),
     ("group_config", "👥 群配置"),
     ("global_ad_config", "📢 全群广告配置"),
+    ("keyword_post_search", "🔎 查找收录标签"),
 )
 
 
@@ -10989,9 +11052,24 @@ async def _handle_keyword_search_input(update: Update, context: ContextTypes.DEF
         context.user_data.pop(KEYWORD_INPUT_KEY, None)
         await msg.reply_text("✅ 已取消关键词搜索。")
         return True
+    # “我要投稿” must have a linked discussion parent.  If an otherwise
+    # indexed post missed that automatic-forward update, recover the mapping
+    # once here instead of hiding the post while ordinary tag search can find it.
+    recovered, recovery_failed = await _restore_missing_discussion_mappings_for_keyword(
+        context, query
+    )
+    if recovered:
+        print(f"投稿关键词搜索已恢复讨论组映射：{recovered} 条，query={query!r}")
+
     routes = _find_keyword_routes(query)
     if not routes:
-        await msg.reply_text("❗ 未找到可评论的对应帖子。请检查关键词，或等待管理员发布带关键词的新帖子后重试。")
+        if recovery_failed:
+            await msg.reply_text(
+                "❗ 找到了收录帖子，但它的评论区映射尚未恢复。"
+                "机器人正在初始化协议号，请稍后重新点击“我要投稿”并搜索。"
+            )
+        else:
+            await msg.reply_text("❗ 未找到可评论的对应帖子。请检查关键词，或等待管理员发布带关键词的新帖子后重试。")
         return True
     if len(routes) == 1:
         route = routes[0]

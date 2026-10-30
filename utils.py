@@ -529,7 +529,43 @@ def is_valid_idiom(word, idioms_data):
 # ===== 白名单判断 =====
 # 保留兼容变量，实际使用请走 get_group_whitelist()（支持多机器人隔离）
 GROUP_WHITELIST = {}
-SUPER_ADMINS = [int(uid) for uid in safe_load_file(ADMIN_WHITELIST_FILE)]
+# Keep the list object for compatibility with legacy imports, but refresh its
+# contents when the whitelist file is edited.  Previously this list was built
+# only at module import, so adding a super administrator required restarting
+# every running bot before the start-panel permission check could see it.
+SUPER_ADMINS: list[int] = []
+_SUPER_ADMINS_FILE_SIGNATURE = None
+
+
+def _super_admin_file_signature():
+    try:
+        stat = os.stat(ADMIN_WHITELIST_FILE)
+        return stat.st_mtime_ns, stat.st_size
+    except OSError:
+        return None
+
+
+def refresh_super_admins() -> list[int]:
+    """Refresh the global super-admin whitelist after an on-disk change."""
+    global _SUPER_ADMINS_FILE_SIGNATURE
+    signature = _super_admin_file_signature()
+    if signature == _SUPER_ADMINS_FILE_SIGNATURE:
+        return SUPER_ADMINS
+
+    parsed: list[int] = []
+    for raw_user_id in safe_load_file(ADMIN_WHITELIST_FILE):
+        try:
+            parsed.append(int(raw_user_id))
+        except (TypeError, ValueError):
+            print(f"⚠️ 忽略 admin_whitelist.txt 中无效的用户 ID：{raw_user_id!r}")
+    # Mutate rather than rebind: any legacy code that imported SUPER_ADMINS
+    # continues to observe the updated values.
+    SUPER_ADMINS[:] = parsed
+    _SUPER_ADMINS_FILE_SIGNATURE = signature
+    return SUPER_ADMINS
+
+
+refresh_super_admins()
 
 # 群配置默认字段不应在每条消息中重复创建和遍历。
 GROUP_CONFIG_DEFAULTS = {
@@ -657,7 +693,10 @@ def group_only(func):
 
 # 高级管理员
 def is_super_admin(user_id):
-    return int(user_id) in SUPER_ADMINS
+    try:
+        return int(user_id) in refresh_super_admins()
+    except (TypeError, ValueError):
+        return False
 
 
 def _owner_id(context: ContextTypes.DEFAULT_TYPE):
@@ -832,7 +871,7 @@ def apply_reward(user_data: dict, reward: dict):
 async def is_admin(update, context):
     user_id = update.effective_user.id
 
-    if user_id in SUPER_ADMINS:
+    if is_super_admin(user_id):
         return True
 
     admin_ids = await get_admin_ids(update.effective_chat.id, context)
@@ -850,7 +889,7 @@ async def is_owner(update, context):
 # 可以操作的人
 async def can_use_command(context, user_id, chat_id):
     # ⭐ 超级管理员
-    if user_id in SUPER_ADMINS:
+    if is_super_admin(user_id):
         return True
 
     # 🤖 当前机器人的所有者。每个多开机器人都在 app.bot_data 中保存自己

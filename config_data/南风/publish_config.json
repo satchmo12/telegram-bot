@@ -19,7 +19,8 @@
         "telethon_manage": true,
         "bot_channel_config": true,
         "group_config": true,
-        "global_ad_config": true
+        "global_ad_config": true,
+        "keyword_post_search": true
     },
     "discussion_mapping_session": "main",
     "report_link_enabled": false,

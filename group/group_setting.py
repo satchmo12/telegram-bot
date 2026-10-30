@@ -1,11 +1,13 @@
 import asyncio
 import html
+import json
+import os
 import re
 import time
 from typing import Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity, Update
-from telegram.error import Forbidden
+from telegram.error import Forbidden, RetryAfter
 from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
@@ -50,7 +52,9 @@ from group.ai_group_reply import (
     save_global_ai_reply_config,
 )
 from group.event_lottery import open_lottery_creator
+from group.points_auction import open_auction_creator
 from group.group_logger import refresh_tracked_group_memberships
+from group.grouplist import load_users
 from group.talk_lottery_settings import (
     STAGE_TRIGGER_RATE,
     handle_callback as _handle_talk_lottery_callback,
@@ -72,6 +76,9 @@ from utils import (
 )
 from channel.channel_force import (
     get_force_subscribe_targets,
+    is_private_force_subscribe_target,
+    parse_force_subscribe_targets,
+    set_force_subscribe_invite_link,
     set_force_subscribe_targets,
     unmute_force_subscribe_chat,
 )
@@ -158,6 +165,25 @@ AD_PUSH_MIN_INTERVAL = 5
 AD_PUSH_MAX_INTERVAL = 1440
 MANAGE_CHECK_CACHE_TTL_SEC = 60
 GROUP_LIST_PAGE_SIZE = 10
+FROZEN_ACCOUNT_SCAN_KEY = "group_setting_frozen_account_scan"
+FROZEN_ACCOUNT_SCAN_MAX_AGE_SECONDS = 10 * 60
+# The Bot API does not consistently expose an ``is_deleted`` field.  For
+# deleted/frozen accounts it normally exposes one of these display names instead.
+FROZEN_ACCOUNT_DISPLAY_NAMES = frozenset({
+    "deleted account",
+    "deactivated account",
+    "已注销账户",
+    "已删除账户",
+    "账号已注销",
+    "账户已注销",
+})
+FROZEN_SCAN_REQUEST_INTERVAL_SECONDS = 0.08
+# Before per-bot data isolation was introduced, group member records were stored
+# in this shared directory.  Retain it as a read-only scan source so a bot does
+# not lose all previously recorded members (and therefore miss deleted accounts)
+# merely because its records have since moved to data/<bot name>/group_users/.
+LEGACY_SHARED_GROUP_USER_DIR = os.path.join("data", "group_users")
+
 
 
 def _is_group_chat(update: Update) -> bool:
@@ -327,96 +353,87 @@ def _build_lottery_prizes_keyboard(chat_id: str) -> InlineKeyboardMarkup:
 
 
 def _build_lottery_settings_text(chat_id: str, cfg: dict) -> str:
-    talk_points = get_talk_points_config(cfg)
-    checkin_points = get_checkin_points_config(cfg)
-    invite_points = get_invite_points_config(cfg)
     lottery_cfg = get_points_lottery_config(cfg)
     prize_count = len(list_points_lottery_prizes(chat_id))
-    lines = [
+    return "\n".join([
         "🎰 积分抽奖设置",
         f"积分抽奖：{_toggle_text(bool(cfg.get('points_lottery_enabled', False)))}",
-        f"发言积分：{_toggle_text(bool(cfg.get('talk_points_enabled', False)))}",
-        f"签到积分：{_toggle_text(bool(cfg.get('checkin_points_enabled', True)))}",
-        f"邀请积分：{_toggle_text(bool(cfg.get('invite_points_enabled', False)))}",
-        f"邀请有用户名：{_toggle_text(bool(cfg.get('invite_username_enabled', False)))}",
-        
-        
-        f"抽奖积分：单次 {lottery_cfg['cost']} 分",
+        f"单次消耗：{lottery_cfg['cost']} 积分",
         f"奖池设置：{prize_count} 个奖品",
         f"抽奖显示文案：{html.escape(str(lottery_cfg.get('display_text', '') or '奖池丰厚，祝您好运。'))}",
-        f"发言积分规则：每次 {talk_points['amount']} 分 每日上限 {talk_points['daily_limit']} 分 最小字数 {talk_points['min_length']}",
-        f"签到积分规则：每次签到 {checkin_points['amount']} 分",
-        f"积分别名：{html.escape(str(cfg.get('points_alias') or '未设置'))}",
-        f"邀请积分规则：每邀请 1 人 {invite_points['amount']} 分 每日上限 {invite_points['daily_limit']} 分",
-    ]
-    return "\n".join(lines)
+    ])
 
 
 def _build_lottery_settings_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardMarkup:
-    rows = []
-    toggle_buttons = []
-    for key, label in LOTTERY_TOGGLE_FIELDS:
-        is_on = bool(cfg.get(key, False))
-        toggle_buttons.append(
-            InlineKeyboardButton(
-                text=f"{'✅' if is_on else '🚫'} {label}",
-                callback_data=f"{CALLBACK_PREFIX}:toggle:{chat_id}:{key}",
-            )
-        )
-    for i in range(0, len(toggle_buttons), 3):
-        rows.append(toggle_buttons[i : i + 3])
+    enabled = bool(cfg.get("points_lottery_enabled", False))
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"{'✅' if enabled else '🚫'} 积分抽奖",
+            callback_data=f"{CALLBACK_PREFIX}:toggle:{chat_id}:points_lottery_enabled:lottery",
+        )],
+        [
+            InlineKeyboardButton("🎰 抽奖积分", callback_data=f"{CALLBACK_PREFIX}:lottery_cost:{chat_id}"),
+            InlineKeyboardButton("🎁 奖池设置", callback_data=f"{CALLBACK_PREFIX}:lottery_prizes:{chat_id}"),
+        ],
+        [InlineKeyboardButton("📝 抽奖显示文案", callback_data=f"{CALLBACK_PREFIX}:lottery_display_text:{chat_id}")],
+        [InlineKeyboardButton("⬅️ 返回积分与抽奖", callback_data=f"{CALLBACK_PREFIX}:category:{chat_id}:points")],
+    ])
 
-    rows.append(
+
+def _build_points_rules_text(chat_id: str, cfg: dict) -> str:
+    talk_points = get_talk_points_config(cfg)
+    checkin_points = get_checkin_points_config(cfg)
+    invite_points = get_invite_points_config(cfg)
+    return "\n".join([
+        "🪙 积分规则",
+        f"发言积分：{_toggle_text(bool(cfg.get('talk_points_enabled', False)))} ｜每次 {talk_points['amount']} 分，每日上限 {talk_points['daily_limit']} 分",
+        f"签到积分：{_toggle_text(bool(cfg.get('checkin_points_enabled', True)))} ｜每次 {checkin_points['amount']} 分",
+        f"邀请积分：{_toggle_text(bool(cfg.get('invite_points_enabled', False)))} ｜每人 {invite_points['amount']} 分，每日上限 {invite_points['daily_limit']} 分",
+        f"邀请需用户名：{_toggle_text(bool(cfg.get('invite_username_enabled', False)))}",
+        f"积分别名：{html.escape(str(cfg.get('points_alias') or '未设置'))}",
+    ])
+
+
+def _build_points_rules_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardMarkup:
+    fields = LOTTERY_TOGGLE_FIELDS[1:]
+    buttons = [InlineKeyboardButton(
+        f"{'✅' if bool(cfg.get(key, False)) else '🚫'} {label}",
+        callback_data=f"{CALLBACK_PREFIX}:toggle:{chat_id}:{key}:points_rules",
+    ) for key, label in fields]
+    rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
+    rows.extend([
         [
-            InlineKeyboardButton(
-                "🎰 抽奖积分", callback_data=f"{CALLBACK_PREFIX}:lottery_cost:{chat_id}"
-            ),
-            InlineKeyboardButton(
-                "🎁 奖池设置",
-                callback_data=f"{CALLBACK_PREFIX}:lottery_prizes:{chat_id}",
-            ),
-        ]
-    )
-    rows.append(
+            InlineKeyboardButton("💬 发言积分规则", callback_data=f"{CALLBACK_PREFIX}:talk_points:{chat_id}"),
+            InlineKeyboardButton("📅 签到积分规则", callback_data=f"{CALLBACK_PREFIX}:checkin_points:{chat_id}"),
+        ],
         [
-            InlineKeyboardButton(
-                "💬 发言积分规则",
-                callback_data=f"{CALLBACK_PREFIX}:talk_points:{chat_id}",
-            ),
-            InlineKeyboardButton(
-                "📅 签到积分规则",
-                callback_data=f"{CALLBACK_PREFIX}:checkin_points:{chat_id}",
-            ),
-        ]
-    )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "🪙 积分别名",
-                callback_data=f"{CALLBACK_PREFIX}:points_alias:{chat_id}",
-            ),
-            InlineKeyboardButton(
-                "👥 邀请积分规则",
-                callback_data=f"{CALLBACK_PREFIX}:invite_points:{chat_id}",
-            ),
-        ]
-    )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "💬 清空积分", callback_data=f"{CALLBACK_PREFIX}:clean_point:{chat_id}"
-            )
-        ]
-    )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "⬅️ 返回群设置", callback_data=f"{CALLBACK_PREFIX}:open:{chat_id}"
-            )
-        ]
-    )
+            InlineKeyboardButton("👥 邀请积分规则", callback_data=f"{CALLBACK_PREFIX}:invite_points:{chat_id}"),
+            InlineKeyboardButton("🪙 积分别名", callback_data=f"{CALLBACK_PREFIX}:points_alias:{chat_id}"),
+        ],
+        [InlineKeyboardButton("🧹 清空积分", callback_data=f"{CALLBACK_PREFIX}:clean_point:{chat_id}")],
+        [InlineKeyboardButton("⬅️ 返回积分与抽奖", callback_data=f"{CALLBACK_PREFIX}:category:{chat_id}:points")],
+    ])
     return InlineKeyboardMarkup(rows)
 
+
+async def _open_points_rules_panel(
+    query, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str, user_id: int
+):
+    chat_id = _parse_chat_id(chat_id_str)
+    if chat_id is None:
+        return await query.answer("群ID无效。", show_alert=True)
+    if not await _can_manage_group(context, user_id, chat_id):
+        return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+    if not await _is_bot_group_admin(context, chat_id):
+        return await query.answer("机器人不是该群管理员，无法配置积分规则。", show_alert=True)
+    cfg = get_group_whitelist(context).get(chat_id_str, {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    return await query.edit_message_text(
+        _build_points_rules_text(chat_id_str, cfg),
+        reply_markup=_build_points_rules_keyboard(chat_id_str, cfg),
+        parse_mode="HTML",
+    )
 
 
 def _build_game_settings_text(chat_id: str, cfg: dict) -> str:
@@ -434,7 +451,7 @@ def _build_game_settings_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardMark
         )]
         for key, label in GAME_TOGGLE_FIELDS
     ]
-    rows.append([InlineKeyboardButton("⬅️ 返回群设置", callback_data=f"{CALLBACK_PREFIX}:game_back:{chat_id}")])
+    rows.append([InlineKeyboardButton("⬅️ 返回游戏功能", callback_data=f"{CALLBACK_PREFIX}:category:{chat_id}:games")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1509,102 +1526,29 @@ async def _open_ai_reply_settings_panel(
 def _build_group_panel_text(
     chat_id: str, cfg: dict, *, bot_is_admin: bool = False
 ) -> str:
+    """Build a compact overview; detailed state belongs to category pages."""
     group_name = html.escape(_group_title(chat_id, cfg))
     username = str(cfg.get("username", "") or "").strip()
-    username_text = f"@{username}" if username else "未设置"
-    spam_limit_value = int(cfg.get("spam_limit_max_per_minute", 10))
-    interval = int(cfg.get("active_speak_interval_min", ACTIVE_SPEAK_DEFAULT_INTERVAL))
-    online_baby_interval = int(
-        cfg.get("online_baby_interval_min", ONLINE_BABY_DEFAULT_INTERVAL)
-    )
-    teacher_interval = int(
-        cfg.get("teacher_interval_min", TEACHER_DEFAULT_INTERVAL)
+    enabled_count = sum(
+        1
+        for key, _label in _visible_toggle_fields(bot_is_admin)
+        if _toggle_value(cfg, key)
     )
     group_ads = _get_group_ads(cfg)
-    business_coop = (
-        _normalize_business_coop_link(cfg.get("business_coop_link", "")) or "未设置"
-    )
-    talk_points = get_talk_points_config(cfg)
-    checkin_points = get_checkin_points_config(cfg)
-    invite_points = get_invite_points_config(cfg)
-    lottery_cfg = get_points_lottery_config(cfg)
-    prize_count = len(list_points_lottery_prizes(chat_id))
-    
-  
-    # count = await context.bot.get_chat_member_count(chat_id)
-    # ｜ 当前群人数：{count}
-
+    enabled_ads = sum(1 for ad in group_ads if ad.get("enabled"))
     lines = [
-        "📊 群配置面板",
-        f"🆔 群ID：<code>{chat_id}</code> | 群名：{group_name} ",
-        f"👤 用户名：{html.escape(username_text)}",
+        "⚙️ 群设置",
+        f"<b>{group_name}</b>",
+        f"🆔 <code>{chat_id}</code>{f' ｜ @{html.escape(username)}' if username else ''}",
         f"🤖 机器人管理员：{'✅ 是' if bot_is_admin else '🚫 否'}",
+        "",
+        f"当前已启用 {enabled_count} 项功能",
+        f"广告推送：{enabled_ads}/{len(group_ads)} 条已开启",
+        "",
+        "请选择下方分类进入设置。",
     ]
-    enabled_toggles = [
-        (key, label)
-        for key, label in _visible_toggle_fields(bot_is_admin)
-        if _toggle_value(cfg, key)
-    ]
-    if enabled_toggles:
-        lines.append("")
-        lines.append("已开启功能：")
-        for _, label in enabled_toggles:
-            lines.append(f"- {label}")
-
-    if bot_is_admin and bool(cfg.get("spam_limit", False)):
-        lines.append(f"限频条数：{spam_limit_value} 条/分钟")
-    if int(cfg.get("exposure", 0)) > 0:
-        lines.append(f"曝光度：{int(cfg.get('exposure', 0))}")
-    if bool(cfg.get("active_speak_enabled", False)):
-        lines.append(f"主动说话频率：每 {interval} 分钟")
-    if bool(cfg.get("online_baby_auto_enabled", False)):
-        lines.append(f"在线宝宝定时调用：每 {online_baby_interval} 分钟")
-    if bool(cfg.get("teacher_auto_enabled", False)):
-        lines.append(f"老师定时调用：每 {teacher_interval} 分钟")
-    (
-        ai_enabled,
-        ai_probability,
-        ai_max_per_hour,
-        ai_min_interval,
-        ai_delay_min,
-        ai_delay_max,
-        ai_style,
-    ) = _ai_reply_settings_values(cfg)
-    lines.append(
-        f"AI 接话：{'✅ 开启' if ai_enabled else '🚫 关闭'} | 概率 {ai_probability}% | "
-        f"每小时 {ai_max_per_hour} 次 | 间隔 {ai_min_interval}s | 等待 {ai_delay_min}-{ai_delay_max}s"
-    )
-    if ai_style:
-        lines.append(f"AI 风格：{html.escape(_ai_reply_style_summary(ai_style))}")
-    if lottery_cfg["enabled"]:
-        lines.append(
-            f"积分抽奖：单次消耗 {lottery_cfg['cost']} 分 奖品数 {prize_count}"
-        )
-        display_text = str(lottery_cfg.get("display_text", "") or "").strip()
-        if display_text and display_text != "奖池丰厚，祝您好运。":
-            lines.append(f"抽奖显示文案：{html.escape(display_text)}")
-    if bool(cfg.get("talk_lottery_enabled", False)):
-        talk_lottery_prize_count = len(list_talk_lottery_prizes(chat_id))
-        lines.append(f"发言抽奖：奖品数 {talk_lottery_prize_count}")
-    if bool(cfg.get("talk_points_enabled", False)):
-        lines.append(
-            f"发言积分规则：每次 {talk_points['amount']} 分 每日上限 {talk_points['daily_limit']} 分 最小字数 {talk_points['min_length']}"
-        )
-    if bool(cfg.get("invite_points_enabled", False)):
-        lines.append(
-            f"邀请积分规则：每邀请 1 人 {invite_points['amount']} 分 每日上限 {invite_points['daily_limit']} 分"
-        )
-    if bot_is_admin and group_ads:
-        enabled_ad_count = sum(1 for ad in group_ads if ad.get("enabled"))
-        lines.append(f"广告推送：{enabled_ad_count}/{len(group_ads)} 条已开启")
-    if bot_is_admin and bool(cfg.get("force_subscribe", False)):
-        force_channels = _get_force_channels(chat_id)
-        lines.append(f"强制关注：{'、'.join(force_channels) if force_channels else '未设置'}")
-    if str(cfg.get("business_coop_link", "")).strip():
-        lines.append(f"商业合作：{html.escape(business_coop)}")
-    lines.append("")
     if not bot_is_admin:
-        lines.append("部分需要管理权限的功能已隐藏。")
+        lines.append("⚠️ 需要机器人管理权限的分类与功能会被隐藏。")
     return "\n".join(lines)
 
 
@@ -1619,147 +1563,162 @@ def _can_refresh_group_presence(
     return _is_current_bot_owner(context, user_id) or is_super_admin(user_id)
 
 
+GROUP_SETTING_CATEGORIES = {
+    "basic": ("🧩 基础与互动", "机器人基础回复、欢迎与群内互动功能"),
+    "moderation": ("🛡 管理与安全", "验证、防广告、防刷屏及入群管理"),
+    "automation": ("🤖 自动化与 AI", "自动发言、定时调用与 AI 接话"),
+    "games": ("🎮 游戏功能", "成语接龙、牛牛、庄园等群内游戏"),
+    "points": ("🪙 积分与抽奖", "积分体系、积分规则与各类抽奖活动"),
+    "content": ("📣 内容与推广", "广告推送、群广播与商业合作"),
+}
+
+
+def _category_toggle_button(chat_id: str, cfg: dict, key: str, label: str, category: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(
+        f"{'✅' if _toggle_value(cfg, key) else '🚫'} {label}",
+        callback_data=f"{CALLBACK_PREFIX}:toggle:{chat_id}:{key}:{category}",
+    )
+
+
+def _build_group_category_text(chat_id: str, cfg: dict, category: str, *, bot_is_admin: bool) -> str:
+    title, description = GROUP_SETTING_CATEGORIES[category]
+    lines = [title, f"群ID：<code>{chat_id}</code>", "", description]
+    if category == "moderation" and not bot_is_admin:
+        lines.extend(["", "⚠️ 机器人不是管理员，需管理权限的项目暂不可用。"])
+    elif category == "automation":
+        enabled, probability, max_per_hour, *_ = _ai_reply_settings_values(cfg)
+        lines.extend([
+            "",
+            f"AI 接话：{'✅ 开启' if enabled else '🚫 关闭'} ｜概率 {probability}% ｜每小时最多 {max_per_hour} 次",
+        ])
+    elif category == "games":
+        lines.extend(["", "在此管理群内游戏功能。"])
+    elif category == "points":
+        lines.extend([
+            "",
+            f"积分系统：{'✅ 开启' if bool(cfg.get('points_enabled', True)) else '🚫 关闭'}",
+            "积分规则、积分抽奖与其他抽奖活动已分为独立入口。",
+        ])
+    elif category == "content":
+        ads = _get_group_ads(cfg)
+        enabled_ads = sum(1 for ad in ads if ad.get("enabled"))
+        lines.extend(["", f"广告推送：{enabled_ads}/{len(ads)} 条已开启"])
+    return "\n".join(lines)
+
+
+def _build_group_category_keyboard(
+    chat_id: str, cfg: dict, category: str, list_page: int, *, bot_is_admin: bool
+) -> InlineKeyboardMarkup:
+    rows = []
+    if category == "basic":
+        fields = [
+            ("bot_enabled", "启用机器人"),
+            ("reply_enabled", "开启回复"),
+            ("custom_qa_enabled", "自定义问答"),
+            ("voice_reply_enabled", "语音回复"),
+            ("welcome", "入群欢迎"),
+            ("silent", "隐私模式"),
+            ("recommend", "群推荐"),
+            ("name_change_notice", "用户名变更提示"),
+        ]
+        buttons = [_category_toggle_button(chat_id, cfg, key, label, category) for key, label in fields]
+        rows.extend(buttons[index:index + 2] for index in range(0, len(buttons), 2))
+    elif category == "moderation":
+        if bot_is_admin:
+            fields = [
+                ("verify", "身份验证"),
+                ("verify_math", "数字验证"),
+                ("join_request_enabled", "处理入群申请"),
+                ("ad_filter", "广告拦截"),
+                ("invite_approval_enabled", "邀请审核"),
+            ]
+            buttons = [_category_toggle_button(chat_id, cfg, key, label, category) for key, label in fields]
+            rows.extend(buttons[index:index + 2] for index in range(0, len(buttons), 2))
+            spam_limit = int(cfg.get("spam_limit_max_per_minute", 10))
+            rows.append([
+                _category_toggle_button(chat_id, cfg, "spam_limit", "防刷屏限频", category),
+                InlineKeyboardButton(f"➖ {max(1, spam_limit - 1)} 条/分", callback_data=f"{CALLBACK_PREFIX}:spam:{chat_id}:-1:{category}"),
+                InlineKeyboardButton(f"➕ {min(200, spam_limit + 1)} 条/分", callback_data=f"{CALLBACK_PREFIX}:spam:{chat_id}:+1:{category}"),
+            ])
+            rows.append([InlineKeyboardButton("📢 强制关注设置", callback_data=f"{CALLBACK_PREFIX}:force_subscribe_menu:{chat_id}")])
+            rows.append([InlineKeyboardButton("🧹 清理冻结账号", callback_data=f"{CALLBACK_PREFIX}:clean_frozen:{chat_id}")])
+    elif category == "automation":
+        intervals = [
+            ("active_speak_enabled", "主动说话", "active_speak_interval", "active_speak_interval_min", ACTIVE_SPEAK_DEFAULT_INTERVAL),
+            ("online_baby_auto_enabled", "在线宝宝", "online_baby_interval", "online_baby_interval_min", ONLINE_BABY_DEFAULT_INTERVAL),
+            ("teacher_auto_enabled", "老师调用", "teacher_interval", "teacher_interval_min", TEACHER_DEFAULT_INTERVAL),
+        ]
+        for key, label, action, interval_key, default in intervals:
+            interval = int(cfg.get(interval_key, default))
+            rows.append([
+                _category_toggle_button(chat_id, cfg, key, label, category),
+                InlineKeyboardButton(f"⏱ 间隔：{interval}m", callback_data=f"{CALLBACK_PREFIX}:{action}:{chat_id}:{category}"),
+            ])
+        rows.append([InlineKeyboardButton("🤖 AI 接话设置", callback_data=f"{CALLBACK_PREFIX}:ai_reply_menu:{chat_id}")])
+    elif category == "games":
+        rows.append([InlineKeyboardButton("🎮 游戏功能设置", callback_data=f"{CALLBACK_PREFIX}:game_menu:{chat_id}")])
+    elif category == "points":
+        if bot_is_admin:
+            rows.extend([
+                [_category_toggle_button(chat_id, cfg, "points_enabled", "积分系统", category)],
+                [InlineKeyboardButton("🪙 积分规则", callback_data=f"{CALLBACK_PREFIX}:points_rules_menu:{chat_id}")],
+                [InlineKeyboardButton("🎰 积分抽奖", callback_data=f"{CALLBACK_PREFIX}:lottery_menu:{chat_id}")],
+                [InlineKeyboardButton("🎰 发言抽奖", callback_data=f"{CALLBACK_PREFIX}:talk_lottery_menu:{chat_id}")],
+                [InlineKeyboardButton("🎉 独立活动抽奖", callback_data=f"{CALLBACK_PREFIX}:event_lottery:{chat_id}")],
+                [InlineKeyboardButton("💎 积分拍卖", callback_data=f"{CALLBACK_PREFIX}:auction_menu:{chat_id}")],
+            ])
+    elif category == "content":
+        rows.append([InlineKeyboardButton("🤝 商业合作", callback_data=f"{CALLBACK_PREFIX}:business_coop:{chat_id}")])
+        if bot_is_admin:
+            rows.extend([
+                [InlineKeyboardButton("📣 消息广播", callback_data=f"{CALLBACK_PREFIX}:group_broadcast:{chat_id}")],
+                [InlineKeyboardButton("📢 广告推送设置", callback_data=f"{CALLBACK_PREFIX}:ad_push_menu:{chat_id}")],
+            ])
+    rows.append([InlineKeyboardButton("⬅️ 返回群设置", callback_data=f"{CALLBACK_PREFIX}:open:{chat_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
 def _build_group_panel_keyboard(
     chat_id: str, cfg: dict, list_page: int = 1, *, bot_is_admin: bool = False
 ) -> InlineKeyboardMarkup:
-    rows = []
-    toggle_button_map = {}
-    for key, label in _visible_toggle_fields(bot_is_admin):
-        is_on = _toggle_value(cfg, key)
-        toggle_button_map[key] = InlineKeyboardButton(
-            text=f"{'✅' if is_on else '🚫'} {label}",
-            callback_data=f"{CALLBACK_PREFIX}:toggle:{chat_id}:{key}",
-        )
-
-    toggle_buttons = list(toggle_button_map.values())
-    for i in range(0, len(toggle_buttons), 3):
-        rows.append(toggle_buttons[i : i + 3])
-        
-    interval = int(cfg.get("active_speak_interval_min", ACTIVE_SPEAK_DEFAULT_INTERVAL))
-    online_baby_interval = int(
-        cfg.get("online_baby_interval_min", ONLINE_BABY_DEFAULT_INTERVAL)
-    )
-    teacher_interval = int(
-        cfg.get("teacher_interval_min", TEACHER_DEFAULT_INTERVAL)
-    )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text=f"⏱ 主动说话频率：{interval}m",
-                callback_data=f"{CALLBACK_PREFIX}:active_speak_interval:{chat_id}",
-            ),
-            InlineKeyboardButton(
-                text=f"🟢 在线宝宝间隔：{online_baby_interval}m",
-                callback_data=f"{CALLBACK_PREFIX}:online_baby_interval:{chat_id}",
-            ),
-            InlineKeyboardButton(
-                text=f"📚 老师间隔：{teacher_interval}m",
-                callback_data=f"{CALLBACK_PREFIX}:teacher_interval:{chat_id}",
-            ),
-        ]
-    )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "🎮 游戏功能",
-                callback_data=f"{CALLBACK_PREFIX}:game_menu:{chat_id}",
-            ),
-            InlineKeyboardButton(
-                "🤖 AI 接话设置",
-                callback_data=f"{CALLBACK_PREFIX}:ai_reply_menu:{chat_id}",
-            ),
-        ]
-    )
-
-    if bot_is_admin:
-
-        is_on = bool(cfg.get("points_enabled", True))
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "🤝 商业合作",
-                    callback_data=f"{CALLBACK_PREFIX}:business_coop:{chat_id}",
-                ),
-                InlineKeyboardButton(
-                    "📣 消息广播",
-                    callback_data=f"{CALLBACK_PREFIX}:group_broadcast:{chat_id}",
-                ),
-                InlineKeyboardButton(
-                    "📢 强制关注设置",
-                    callback_data=f"{CALLBACK_PREFIX}:force_subscribe_menu:{chat_id}",
-                ),
-            ]
-        )
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "📢 广告推送设置",
-                    callback_data=f"{CALLBACK_PREFIX}:ad_push_menu:{chat_id}",
-                ),
-                InlineKeyboardButton(
-                    "🎰 积分抽奖设置",
-                    callback_data=f"{CALLBACK_PREFIX}:lottery_menu:{chat_id}",
-                ),
-                InlineKeyboardButton(
-                    "🎰 发言中奖设置",
-                    callback_data=f"{CALLBACK_PREFIX}:talk_lottery_menu:{chat_id}",
-                ),
-            ]
-        )
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "🎉 独立活动抽奖",
-                    callback_data=f"{CALLBACK_PREFIX}:event_lottery:{chat_id}",
-                ),
-                InlineKeyboardButton(
-                    text=f"{'✅' if is_on else '🚫'} 积分开关",
-                    callback_data=f"{CALLBACK_PREFIX}:toggle:{chat_id}:points_enabled",
-                )
-            ]
-        )
-
-        spam_limit = int(cfg.get("spam_limit_max_per_minute", 10))
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"{'✅' if bool(cfg.get('spam_limit', False)) else '🚫'} 防刷屏限频",
-                    callback_data=f"{CALLBACK_PREFIX}:toggle:{chat_id}:spam_limit",
-                ),
-                InlineKeyboardButton(
-                    text=f"➖ 限频 {max(1, spam_limit - 1)}",
-                    callback_data=f"{CALLBACK_PREFIX}:spam:{chat_id}:-1",
-                ),
-                InlineKeyboardButton(
-                    text=f"➕ 限频 {min(200, spam_limit + 1)}",
-                    callback_data=f"{CALLBACK_PREFIX}:spam:{chat_id}:+1",
-                ),
-            ]
-        )
-    else:
-
-        rows.append(
-            
-            [   
-                InlineKeyboardButton(
-                    "🤝 商业合作",
-                    callback_data=f"{CALLBACK_PREFIX}:business_coop:{chat_id}",
-                )
-            ]
-        )
-
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "⬅️ 选择其他群",
-                callback_data=f"{CALLBACK_PREFIX}:list:{max(1, list_page)}",
-            ),
-            InlineKeyboardButton(
-                "🔄 刷新", callback_data=f"{CALLBACK_PREFIX}:open:{chat_id}"
-            ),
-        ]
-    )
+    # Keep the landing page intentionally short: individual settings live in
+    # focused category pages instead of one long, hard-to-scan keyboard.
+    rows = [
+        [InlineKeyboardButton(title, callback_data=f"{CALLBACK_PREFIX}:category:{chat_id}:{key}")]
+        for key, (title, _description) in GROUP_SETTING_CATEGORIES.items()
+        if key not in {"moderation", "points"} or bot_is_admin
+    ]
+    rows.append([
+        InlineKeyboardButton("⬅️ 选择其他群", callback_data=f"{CALLBACK_PREFIX}:list:{max(1, list_page)}"),
+        InlineKeyboardButton("🔄 刷新", callback_data=f"{CALLBACK_PREFIX}:open:{chat_id}"),
+    ])
     return InlineKeyboardMarkup(rows)
+
+
+async def _open_group_category_panel(
+    query, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str, category: str, user_id: int
+):
+    if category not in GROUP_SETTING_CATEGORIES:
+        return await query.answer("设置分类无效。", show_alert=True)
+    chat_id = _parse_chat_id(chat_id_str)
+    if chat_id is None:
+        return await query.answer("群ID无效。", show_alert=True)
+    if not await _can_manage_group(context, user_id, chat_id):
+        return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+    cfg = get_group_whitelist(context).get(chat_id_str, {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    bot_is_admin = await _is_bot_group_admin(context, chat_id)
+    if category in {"moderation", "points"} and not bot_is_admin:
+        return await query.answer("机器人不是该群管理员，无法配置此分类。", show_alert=True)
+    await query.answer()
+    list_page = int(context.user_data.get("group_setting_list_page", 1) or 1)
+    return await query.edit_message_text(
+        _build_group_category_text(chat_id_str, cfg, category, bot_is_admin=bot_is_admin),
+        reply_markup=_build_group_category_keyboard(chat_id_str, cfg, category, list_page, bot_is_admin=bot_is_admin),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
 
 
 def _build_group_panel_keyboard_for_user(
@@ -1831,6 +1790,153 @@ async def _is_bot_group_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int) 
     except Exception:
         cache[cache_key] = {"ok": False, "ts": now_ts}
         return False
+
+
+def _member_status(member) -> str:
+    """Return a PTB-version-independent chat-member status string."""
+    status = getattr(member, "status", "")
+    return str(getattr(status, "value", status)).lower()
+
+
+def _is_frozen_account(user) -> bool:
+    """Whether Telegram identifies a user as a deleted/frozen account.
+
+    The Bot API has historically represented these accounts by the display name
+    ``Deleted Account`` rather than a stable boolean.  Prefer a boolean if a
+    library/version supplies one, and otherwise use only exact well-known
+    Telegram labels to avoid kicking ordinary members by a loose name match.
+    """
+    if bool(getattr(user, "is_deleted", False)):
+        return True
+    names = (
+        getattr(user, "full_name", ""),
+        getattr(user, "first_name", ""),
+    )
+    for name in names:
+        normalized = re.sub(r"\s+", " ", str(name or "")).strip().casefold()
+        if normalized in FROZEN_ACCOUNT_DISPLAY_NAMES:
+            return True
+    return False
+
+
+async def _with_flood_retry(operation, *, attempts: int = 3):
+    """Retry a Bot API request after Telegram's explicit flood-control delay."""
+    for attempt in range(attempts):
+        try:
+            return await operation()
+        except RetryAfter as exc:
+            if attempt + 1 >= attempts:
+                raise
+            delay = getattr(exc, "retry_after", 0)
+            try:
+                delay = delay.total_seconds()
+            except AttributeError:
+                delay = float(delay)
+            await asyncio.sleep(max(0.0, float(delay)) + 0.25)
+
+
+async def _bot_can_restrict_members(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int
+) -> bool:
+    """Check the exact permission required to remove a normal group member."""
+    try:
+        member = await _with_flood_retry(
+            lambda: context.bot.get_chat_member(chat_id, context.bot.id)
+        )
+    except Exception:
+        return False
+    status = _member_status(member)
+    return status in {"creator", "owner"} or bool(
+        getattr(member, "can_restrict_members", False)
+    )
+
+
+def _load_legacy_shared_group_users(chat_id: int) -> dict:
+    """Load pre-isolation group-member records without applying bot path mapping.
+
+    ``load_json`` correctly maps normal files to ``data/<bot name>/...``.  That
+    behavior is exactly why the old, shared ``data/group_users`` records cannot
+    be read through it after migration.  The old files are only a supplemental
+    source of user IDs; every ID is still verified against Telegram before a
+    removal can happen.
+    """
+    path = os.path.join(LEGACY_SHARED_GROUP_USER_DIR, f"{chat_id}.json")
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            users = json.load(file)
+    except (OSError, ValueError, TypeError):
+        return {}
+    return users if isinstance(users, dict) else {}
+
+
+def _frozen_scan_user_ids(chat_id: int) -> set[int]:
+    """Return unique valid IDs from current and legacy member-record stores."""
+    user_ids: set[int] = set()
+    for users in (load_users(chat_id), _load_legacy_shared_group_users(chat_id)):
+        if not isinstance(users, dict):
+            continue
+        for raw_user_id in users:
+            try:
+                user_ids.add(int(raw_user_id))
+            except (TypeError, ValueError):
+                continue
+    return user_ids
+
+
+async def _find_frozen_group_members(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int
+) -> tuple[list[int], int, int]:
+    """Find removable deleted accounts among members known to this deployment.
+
+    Telegram's Bot API cannot enumerate every member of a group.  The scan uses
+    both the active bot's member records and the pre-isolation shared records,
+    then rechecks each ID with ``get_chat_member`` before removal.
+    """
+    user_ids = _frozen_scan_user_ids(chat_id)
+    if not user_ids:
+        return [], 0, 0
+
+    candidates: list[int] = []
+    checked = 0
+    unavailable = 0
+    for user_id in user_ids:
+        try:
+            member = await _with_flood_retry(
+                lambda user_id=user_id: context.bot.get_chat_member(chat_id, user_id)
+            )
+        except Exception:
+            unavailable += 1
+            continue
+        finally:
+            # Keep scans friendly to Bot API rate limits for large groups.
+            await asyncio.sleep(FROZEN_SCAN_REQUEST_INTERVAL_SECONDS)
+
+        checked += 1
+        status = _member_status(member)
+        user = getattr(member, "user", None)
+        if (
+            user
+            and status in {"member", "restricted"}
+            and not bool(getattr(user, "is_bot", False))
+            and _is_frozen_account(user)
+        ):
+            candidates.append(user_id)
+    return candidates, checked, unavailable
+
+
+def _frozen_cleanup_confirm_keyboard(chat_id_str: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ 确认移除", callback_data=f"{CALLBACK_PREFIX}:clean_frozen_confirm:{chat_id_str}"
+                ),
+                InlineKeyboardButton(
+                    "❌ 取消", callback_data=f"{CALLBACK_PREFIX}:clean_frozen_cancel:{chat_id_str}"
+                ),
+            ]
+        ]
+    )
 
 
 async def _visible_group_data_for_user(
@@ -2586,6 +2692,153 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             _group_list_text(visible_data, page), reply_markup=keyboard
         )
 
+    if action == "clean_frozen" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return await query.answer("群ID无效。", show_alert=True)
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法清理。", show_alert=True)
+        if not await _bot_can_restrict_members(context, chat_id):
+            return await query.answer(
+                "机器人缺少“封禁用户/限制成员”权限，无法移除成员。",
+                show_alert=True,
+            )
+
+        await query.answer("正在扫描机器人已记录的群成员…")
+        await query.edit_message_text(
+            "🔎 正在扫描冻结账号，请稍候…\n\n"
+            "仅扫描机器人当前及历史记录过的成员；Telegram Bot API 无法直接列出全体群成员。"
+        )
+        candidates, checked, unavailable = await _find_frozen_group_members(
+            context, chat_id
+        )
+        context.user_data[FROZEN_ACCOUNT_SCAN_KEY] = {
+            "chat_id": chat_id,
+            "user_ids": candidates,
+            "created_at": time.time(),
+        }
+        detail = f"已核对 {checked} 位已记录成员"
+        if unavailable:
+            detail += f"，{unavailable} 位无法读取或已不在群内"
+        if not candidates:
+            return await query.edit_message_text(
+                "✅ 未发现可移除的冻结账号。\n\n"
+                f"{detail}。\n"
+                "识别规则：Telegram 明确标为 Deleted Account / 已注销账户的普通成员。",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ 返回群配置", callback_data=f"{CALLBACK_PREFIX}:open:{chat_id_str}")]]
+                ),
+            )
+        return await query.edit_message_text(
+            "⚠️ 发现冻结账号\n\n"
+            f"{detail}，其中 {len(candidates)} 位符合冻结账号标识。\n"
+            "确认后会将这些普通成员踢出群聊（封禁后立即解除封禁，不会永久拉黑）。\n\n"
+            "仅会处理 Telegram 明确显示为 Deleted Account / 已注销账户的账号。",
+            reply_markup=_frozen_cleanup_confirm_keyboard(chat_id_str),
+        )
+
+    if action == "clean_frozen_cancel" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        scan = context.user_data.get(FROZEN_ACCOUNT_SCAN_KEY)
+        if isinstance(scan, dict) and str(scan.get("chat_id")) == chat_id_str:
+            context.user_data.pop(FROZEN_ACCOUNT_SCAN_KEY, None)
+        return await _open_group_panel(query, context, chat_id_str, user_id)
+
+    if action == "clean_frozen_confirm" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return await query.answer("群ID无效。", show_alert=True)
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法清理。", show_alert=True)
+        if not await _bot_can_restrict_members(context, chat_id):
+            return await query.answer(
+                "机器人缺少“封禁用户/限制成员”权限，无法移除成员。",
+                show_alert=True,
+            )
+
+        scan = context.user_data.get(FROZEN_ACCOUNT_SCAN_KEY)
+        scan_chat_id = scan.get("chat_id") if isinstance(scan, dict) else None
+        created_at = scan.get("created_at", 0) if isinstance(scan, dict) else 0
+        candidate_ids = scan.get("user_ids") if isinstance(scan, dict) else None
+        if (
+            scan_chat_id != chat_id
+            or not isinstance(candidate_ids, list)
+            or time.time() - float(created_at or 0) > FROZEN_ACCOUNT_SCAN_MAX_AGE_SECONDS
+        ):
+            context.user_data.pop(FROZEN_ACCOUNT_SCAN_KEY, None)
+            return await query.answer("扫描结果已过期，请重新扫描后再确认。", show_alert=True)
+
+        await query.answer("正在移除冻结账号…")
+        await query.edit_message_text(
+            f"🧹 正在移除 {len(candidate_ids)} 个冻结账号，请稍候…"
+        )
+        removed = 0
+        unban_failed = 0
+        skipped = 0
+        failed = 0
+        for raw_user_id in candidate_ids:
+            try:
+                member = await _with_flood_retry(
+                    lambda user_id=int(raw_user_id): context.bot.get_chat_member(chat_id, user_id)
+                )
+                status = _member_status(member)
+                member_user = getattr(member, "user", None)
+                if (
+                    not member_user
+                    or status not in {"member", "restricted"}
+                    or bool(getattr(member_user, "is_bot", False))
+                    or not _is_frozen_account(member_user)
+                ):
+                    skipped += 1
+                    continue
+
+                user_id_to_remove = int(raw_user_id)
+                await _with_flood_retry(
+                    lambda: context.bot.ban_chat_member(chat_id, user_id_to_remove)
+                )
+                removed += 1
+                try:
+                    await _with_flood_retry(
+                        lambda: context.bot.unban_chat_member(
+                            chat_id, user_id_to_remove, only_if_banned=True
+                        )
+                    )
+                except Exception as exc:
+                    # The account has still left the group.  Report this so an
+                    # administrator knows that it remains banned rather than
+                    # silently treating a temporary kick as a permanent ban.
+                    unban_failed += 1
+                    print(
+                        f"清理冻结账号后解除封禁失败 chat={chat_id} user={user_id_to_remove}: {exc}"
+                    )
+            except Exception as exc:
+                failed += 1
+                print(f"清理冻结账号失败 chat={chat_id} user={raw_user_id}: {exc}")
+            finally:
+                await asyncio.sleep(FROZEN_SCAN_REQUEST_INTERVAL_SECONDS)
+
+        context.user_data.pop(FROZEN_ACCOUNT_SCAN_KEY, None)
+        summary = f"✅ 清理完成：已移出 {removed} 个冻结账号"
+        if skipped:
+            summary += f"，跳过 {skipped} 个状态已变化的账号"
+        if failed:
+            summary += f"，失败 {failed} 个"
+        if unban_failed:
+            summary += f"。其中 {unban_failed} 个已移出但解除封禁失败，仍处于封禁状态"
+        return await query.edit_message_text(
+            summary + "。",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ 返回群配置", callback_data=f"{CALLBACK_PREFIX}:open:{chat_id_str}")]]
+            ),
+        )
+
+    if action == "category" and len(parts) >= 4:
+        return await _open_group_category_panel(
+            query, context, parts[2], parts[3], user_id
+        )
+
     if action == "open" and len(parts) >= 3:
         return await _open_group_panel(query, context, parts[2], user_id)
 
@@ -2677,6 +2930,11 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                 await unmute_force_subscribe_chat(context, chat_id_str)
         if feature_key in LOTTERY_TOGGLE_KEYS:
             await query.answer("✅ 已更新", show_alert=False)
+            destination = parts[4] if len(parts) >= 5 else ""
+            if destination == "points_rules":
+                return await _open_points_rules_panel(
+                    query, context, chat_id_str, user_id
+                )
             return await _open_lottery_settings_panel(
                 query, context, chat_id_str, user_id
             )
@@ -2697,6 +2955,11 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             )
         if feature_key == "spam_limit":
             await query.answer("✅ 已更新", show_alert=False)
+            category = parts[4] if len(parts) >= 5 else ""
+            if category in GROUP_SETTING_CATEGORIES:
+                return await _open_group_category_panel(
+                    query, context, chat_id_str, category, user_id
+                )
             return await _open_group_panel(query, context, chat_id_str, user_id)
         if feature_key in {"force_subscribe", "force_subscribe_new_only"}:
             await query.answer("✅ 已更新", show_alert=False)
@@ -2705,6 +2968,11 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                 reply_markup=_build_force_subscribe_settings_keyboard(
                     chat_id_str, cfg
                 ),
+            )
+        category = parts[4] if len(parts) >= 5 else ""
+        if category in GROUP_SETTING_CATEGORIES:
+            return await _open_group_category_panel(
+                query, context, chat_id_str, category, user_id
             )
         return await _open_group_panel(query, context, chat_id_str, user_id)
 
@@ -2718,6 +2986,17 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         if not await _is_bot_group_admin(context, chat_id):
             return await query.answer("机器人不是该群管理员，无法发布独立抽奖。", show_alert=True)
         return await open_lottery_creator(query, context, chat_id_str, user_id)
+
+    if action == "auction_menu" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return await query.answer("群ID无效。", show_alert=True)
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法管理拍卖。", show_alert=True)
+        if not await _is_bot_group_admin(context, chat_id):
+            return await query.answer("机器人不是该群管理员，无法发布拍卖。", show_alert=True)
+        return await open_auction_creator(query, context, chat_id_str, user_id)
 
     if action == "game_menu" and len(parts) >= 3:
         await query.answer()
@@ -2746,8 +3025,13 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         )
 
     if action == "game_back" and len(parts) >= 3:
+        return await _open_group_category_panel(
+            query, context, parts[2], "games", user_id
+        )
+
+    if action == "points_rules_menu" and len(parts) >= 3:
         await query.answer()
-        return await _open_group_panel(query, context, parts[2], user_id)
+        return await _open_points_rules_panel(query, context, parts[2], user_id)
 
     if action == "lottery_menu" and len(parts) >= 3:
         chat_id_str = parts[2]
@@ -3107,7 +3391,10 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["group_setting_chat_id"] = chat_id_str
         await query.answer()
         return await query.edit_message_text(
-            "请输入要添加的公开频道或群组用户名，例如：@example\n\n"
+            "请输入要添加的频道/群组：\n"
+            "• 公开目标：@laoshibangdan 或 t.me/zhaolaoshiqun\n"
+            "• 私有目标：发送频道/群组 ID，例如 -1001234567890\n\n"
+            "添加私有目标时，机器人必须在目标中拥有创建邀请链接的管理员权限。\n"
             "只会新增这一个目标，不会覆盖已有设置。",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⬅️ 返回目标列表", callback_data=f"{CALLBACK_PREFIX}:force_channel:{chat_id_str}")
@@ -3271,7 +3558,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             f"当前：{html.escape(current_alias)}\n"
             "例如：比特币。发送“无”可清空别名。",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:lottery_menu:{chat_id_str}")
+                InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:points_rules_menu:{chat_id_str}")
             ]]),
             parse_mode="HTML",
         )
@@ -3289,7 +3576,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                 [
                     InlineKeyboardButton(
                         "⬅️ 返回",
-                        callback_data=f"{CALLBACK_PREFIX}:lottery_menu:{chat_id_str}",
+                        callback_data=f"{CALLBACK_PREFIX}:points_rules_menu:{chat_id_str}",
                     )
                 ]
             ]
@@ -3610,6 +3897,11 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         cfg["spam_limit_max_per_minute"] = max(1, min(200, current + delta))
         data[chat_id_str] = cfg
         save_json(GROUP_LIST_FILE, data)
+        category = parts[4] if len(parts) >= 5 else ""
+        if category in GROUP_SETTING_CATEGORIES:
+            return await _open_group_category_panel(
+                query, context, chat_id_str, category, user_id
+            )
         return await _open_group_panel(query, context, chat_id_str, user_id)
 
     if action in {
@@ -4032,7 +4324,7 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
 
     if stage in {"force_channel", "force_channel_add"}:
         if not text:
-            return await update.message.reply_text("❗ 请发送频道或群组用户名。")
+            return await update.message.reply_text("❗ 请发送频道/群组用户名，或私有频道/群组 ID。")
         if text in {"清空", "取消", "关闭"}:
             if stage == "force_channel_add" and text == "取消":
                 context.user_data.pop("group_setting_stage", None)
@@ -4045,20 +4337,52 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
         else:
             # The add screen accepts one target, preventing accidental overwrite
             # of every existing channel/group when changing a single item.
-            new_target = text.replace("，", ",").replace("\n", ",").split(",")[0].strip().split()[0]
+            raw_target = text.replace("，", ",").replace("\n", ",").split(",")[0].strip().split()[0]
+            parsed_targets = parse_force_subscribe_targets([raw_target])
+            if not parsed_targets:
+                return await update.message.reply_text(
+                    "❗ 目标格式无效。请发送 @用户名、t.me/用户名，或私有频道/群组 ID。"
+                )
+            new_target = parsed_targets[0]
             targets = _get_force_channels(chat_id_str)
+            if new_target in targets:
+                return await update.message.reply_text("❗ 该关注目标已存在。")
+            if len(targets) >= 10:
+                return await update.message.reply_text("❗ 最多只能设置 10 个关注目标。")
+
+            invite_link = ""
+            if is_private_force_subscribe_target(new_target):
+                try:
+                    target_chat = await context.bot.get_chat(int(new_target))
+                    if getattr(target_chat, "type", "") not in {"channel", "group", "supergroup"}:
+                        return await update.message.reply_text("❗ 该 ID 不是频道或群组。")
+                    invite = await context.bot.create_chat_invite_link(
+                        chat_id=int(new_target),
+                        name="强制关注",
+                    )
+                    invite_link = str(getattr(invite, "invite_link", "") or "").strip()
+                    if not invite_link:
+                        raise ValueError("未获得邀请链接")
+                except Exception as exc:
+                    return await update.message.reply_text(
+                        "❗ 无法添加私有目标。请确认 ID 正确，机器人已在目标频道/群组中，"
+                        "并拥有创建邀请链接的管理员权限。\n"
+                        f"原因：{exc}"
+                    )
+
             _set_force_channels(chat_id_str, targets + [new_target])
+            if invite_link:
+                set_force_subscribe_invite_link(chat_id_str, new_target, invite_link)
             saved_targets = _get_force_channels(chat_id_str)
-            if len(saved_targets) == len(targets):
+            if new_target not in saved_targets:
                 return await update.message.reply_text("❗ 目标无效、重复，或已达到 10 个上限。")
             _mark_force_subscribe_set_ts(chat_id_str)
             cfg["force_subscribe"] = True
             data[chat_id_str] = cfg
             save_json(GROUP_LIST_FILE, data)
             context.user_data.pop("group_setting_stage", None)
-            # context.user_data.pop("group_setting_chat_id", None)
             await update.message.reply_text(
-                f"✅ 已添加强制关注目标：{saved_targets[-1]}\n\n"
+                f"✅ 已添加强制关注目标：{new_target}\n\n"
                 + _force_target_manager_text(chat_id_str),
                 reply_markup=_build_force_target_manager_keyboard(chat_id_str, saved_targets),
             )

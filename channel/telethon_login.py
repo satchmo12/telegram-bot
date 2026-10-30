@@ -336,6 +336,7 @@ def _build_account_menu_keyboard(session_name: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("👥 群组管理（AI / 群发）", callback_data=f"{CALLBACK_PREFIX}:groups:{session_name}")],
             [InlineKeyboardButton("➕ 加群", callback_data=f"{CALLBACK_PREFIX}:join:{session_name}")],
             [InlineKeyboardButton("📣 群发消息", callback_data=f"{CALLBACK_PREFIX}:broadcast:{session_name}")],
+            [InlineKeyboardButton("📢 广告推送", callback_data=f"{CALLBACK_PREFIX}:ads:{session_name}")],
             [InlineKeyboardButton("🗑 删除协议号", callback_data=f"{CALLBACK_PREFIX}:delete:{session_name}")],
             [InlineKeyboardButton("⬅️ 返回账号列表", callback_data=f"{CALLBACK_PREFIX}:list")],
         ]
@@ -1636,6 +1637,10 @@ async def handle_telethon_login_callback(update: Update, context: ContextTypes.D
             f"已选择账号：{label}\n请选择操作：",
             reply_markup=keyboard,
         )
+
+    if action == "ads":
+        from channel.telethon_ad_push import open_protocol_ads
+        return await open_protocol_ads(query, context, payload)
 
     if action == "broadcast":
         await _clear_login_state(uid, context)

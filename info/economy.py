@@ -838,8 +838,9 @@ def clean_point(chat_id: str):
         return False, "没有用户数据"
     for user_id, user_data in users.items():
         points = _normalize_points(user_data.get("points"))
-        if points > 0:
+        if points != 0:
             change_points(chat_id, user_id, -points, reason="管理员清空积分")
+       
     return True, "✅ 所有用户积分已清零"
 
 

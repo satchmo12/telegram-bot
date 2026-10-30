@@ -25,7 +25,8 @@
         "telethon_manage": false,
         "bot_channel_config": false,
         "group_config": false,
-        "global_ad_config": false
+        "global_ad_config": false,
+        "keyword_post_search": true
     },
     "report_link_enabled": true,
     "template_publish_enabled": true,

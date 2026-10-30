@@ -7,6 +7,7 @@ from group.admin import register_admin_handlers
 from group.auto_scan import register_auto_scan_handlers
 from group.group_care import register_group_care_handlers
 from group.event_lottery import register_event_lottery_handlers
+from group.points_auction import register_points_auction_handlers
 from group.group_logger import register_group_logger_handlers
 from group.group_media_tools import register_group_media_tools_handlers
 from group.group_setting import register_group_setting_handlers
@@ -19,6 +20,7 @@ from group.verify import register_verification_handlers
 from menu import register_menu_handlers
 from feature_flags import is_feature_enabled
 from channel.telethon_login import register_telethon_login_handlers
+from channel.telethon_ad_push import register_protocol_ad_handlers
 
 
 def register_group_handlers(app):
@@ -41,6 +43,7 @@ def register_group_handlers(app):
     register_verification_handlers(app)
     register_checkin_handlers(app)
     register_event_lottery_handlers(app)
+    register_points_auction_handlers(app)
 
     # 群互动能力
     register_group_care_handlers(app)
@@ -51,6 +54,7 @@ def register_group_handlers(app):
     if is_feature_enabled(app, "channel"):
         register_channel_config_handlers(app)
         register_telethon_login_handlers(app)
+        register_protocol_ad_handlers(app)
         
     
     register_publish_setting_handlers(app)

@@ -1,3 +1,30 @@
 {
-    "show_reply_keyboard": false
+    "show_reply_keyboard": false,
+    "text": "👏欢迎使用修车机器人\n\n把老师的用户名发送给机器人就可以查看老师的报告✍️ \n老师列表可以分类展示老师💬\n查找收录标签，就可以搜索你喜欢的老师🆒\n\n协议号管理就是一个群发器\n群管理群管功能\n克隆同款机器人",
+    "entities": [
+        {
+            "custom_emoji_id": "5258288547361732952",
+            "length": 2,
+            "offset": 0,
+            "type": "custom_emoji"
+        },
+        {
+            "custom_emoji_id": "5197269100878907942",
+            "length": 2,
+            "offset": 36,
+            "type": "custom_emoji"
+        },
+        {
+            "custom_emoji_id": "5303138782004924588",
+            "length": 2,
+            "offset": 52,
+            "type": "custom_emoji"
+        },
+        {
+            "custom_emoji_id": "5413657760933880470",
+            "length": 2,
+            "offset": 73,
+            "type": "custom_emoji"
+        }
+    ]
 }

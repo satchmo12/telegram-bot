@@ -4,7 +4,9 @@ The feature is intentionally separate from the existing points/talk lotteries:
 these events are published posts with explicit prizes, entry requirements and a
 scheduled draw time.
 """
+import html
 import random
+import re
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -38,6 +40,7 @@ DRAFT_KEY = "event_lottery_draft"
 JOIN_KEY = "event_lottery_join"
 MAX_PRIZES = 20
 MAX_TARGETS = 10
+PRIVATE_CHAT_ID_RE = re.compile(r"^-\d{5,20}$")
 
 
 def _file(context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -107,9 +110,24 @@ def _normalize_target(value: str) -> str:
         target = "@" + target.rsplit("/", 1)[-1]
     elif target.startswith("t.me/"):
         target = "@" + target.rsplit("/", 1)[-1]
+    if PRIVATE_CHAT_ID_RE.fullmatch(target):
+        return target
     if target and not target.startswith("@"):
         target = "@" + target.lstrip("@")
     return target if len(target) > 1 else ""
+
+
+def _target_join_url(item: dict) -> str:
+    """Return a safe public URL or the stored private-chat invite link."""
+    target = str((item or {}).get("target") or "").strip()
+    if PRIVATE_CHAT_ID_RE.fullmatch(target):
+        invite_link = str((item or {}).get("invite_link") or "").strip()
+        return invite_link if invite_link.startswith("https://t.me/") else ""
+    return f"https://t.me/{target.lstrip('@')}" if target.startswith("@") else ""
+
+
+def _target_api_ref(target: str):
+    return int(target) if PRIVATE_CHAT_ID_RE.fullmatch(str(target or "")) else target
 
 
 def _target_items(value: str) -> list[str]:
@@ -169,7 +187,7 @@ def _target_is_group(item: dict) -> bool:
 async def _get_admin_target_chat(context: ContextTypes.DEFAULT_TYPE, target: str):
     """Return the target chat only when this bot is an administrator there."""
     try:
-        chat = await context.bot.get_chat(target)
+        chat = await context.bot.get_chat(_target_api_ref(target))
         me = await context.bot.get_me()
         member = await context.bot.get_chat_member(chat.id, me.id)
     except Exception:
@@ -187,7 +205,7 @@ async def _refresh_target_chat_type(context: ContextTypes.DEFAULT_TYPE, item: di
     if not target:
         return False
     try:
-        chat = await context.bot.get_chat(target)
+        chat = await context.bot.get_chat(_target_api_ref(target))
     except Exception:
         return False
     chat_type = getattr(chat, "type", "")
@@ -859,7 +877,7 @@ async def _build_participation_status(
         joined = False
         chat = None
         try:
-            chat = await context.bot.get_chat(target)
+            chat = await context.bot.get_chat(_target_api_ref(target))
             member = await context.bot.get_chat_member(chat.id, user.id)
             status = getattr(member, "status", "")
             status = getattr(status, "value", status)
@@ -933,10 +951,96 @@ async def _build_participation_status(
     return bool(eligible), "\n".join(lines)
 
 
+PARTICIPANT_PAGE_SIZE = 20
+
+
+def _participant_entries(record: dict, *, eligible_only: bool = False) -> list[dict]:
+    participants = record.get("participants") if isinstance(record.get("participants"), dict) else {}
+    entries = [item for item in participants.values() if isinstance(item, dict)]
+    if eligible_only:
+        entries = [item for item in entries if bool(item.get("eligible", False))]
+    return sorted(
+        entries,
+        key=lambda item: int(item.get("registered_at", 0) or 0),
+        reverse=True,
+    )
+
+
+def _participants_text(
+    record: dict, context: ContextTypes.DEFAULT_TYPE, page: int, *, eligible_only: bool = False
+) -> tuple[str, int]:
+    """Build one safe, paginated manager-facing participant list."""
+    all_entries = _participant_entries(record)
+    entries = _participant_entries(record, eligible_only=eligible_only)
+    total = len(all_entries)
+    eligible = sum(bool(item.get("eligible", False)) for item in all_entries)
+    total_pages = max(1, (len(entries) + PARTICIPANT_PAGE_SIZE - 1) // PARTICIPANT_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    visible = entries[(page - 1) * PARTICIPANT_PAGE_SIZE : page * PARTICIPANT_PAGE_SIZE]
+    lines = [
+        "👥 <b>参与用户</b>",
+        f"🎰 {html.escape(str(record.get('name') or '未命名抽奖'))}",
+        f"已报名：{total} 人 ｜ 达标：{eligible} 人",
+        f"筛选：{'仅展示已达标' if eligible_only else '全部参与用户'}（当前 {len(entries)} 人）",
+        f"第 {page}/{total_pages} 页",
+    ]
+    if not visible:
+        lines.extend(["", "暂无符合当前筛选条件的用户。"])
+    else:
+        lines.append("")
+        for index, entry in enumerate(visible, start=(page - 1) * PARTICIPANT_PAGE_SIZE + 1):
+            try:
+                user_id = int(entry.get("user_id"))
+            except (TypeError, ValueError):
+                user_id = 0
+            name = html.escape(str(entry.get("name") or "未知用户")[:24])
+            name_text = f'<a href="tg://user?id={user_id}">{name}</a>' if user_id else name
+            username = str(entry.get("username") or "").strip().lstrip("@")
+            username_text = f" ｜ @{html.escape(username)}" if username else ""
+            registered_at = int(entry.get("registered_at", 0) or 0)
+            registered_text = _timestamp_text(registered_at, context) if registered_at else "时间未知"
+            lines.append(
+                f"{index}. {'✅ 达标' if entry.get('eligible', False) else '⏳ 未达标'} {name_text}{username_text}"
+            )
+            lines.append(f"   <code>{user_id}</code> ｜ 报名于 {registered_text}")
+    return "\n".join(lines), page
+
+
+def _participants_keyboard(record: dict, page: int, *, eligible_only: bool = False) -> InlineKeyboardMarkup:
+    all_entries = _participant_entries(record)
+    entries = _participant_entries(record, eligible_only=eligible_only)
+    eligible_count = sum(bool(item.get("eligible", False)) for item in all_entries)
+    total_pages = max(1, (len(entries) + PARTICIPANT_PAGE_SIZE - 1) // PARTICIPANT_PAGE_SIZE)
+    filter_value = "eligible" if eligible_only else "all"
+    rows = [[InlineKeyboardButton(
+        f"{'⬅️ 查看全部' if eligible_only else '✅ 仅展示已达标'}（{len(all_entries) if eligible_only else eligible_count}）",
+        callback_data=f"{CALLBACK_PREFIX}:participants:{record['id']}:1:{'all' if eligible_only else 'eligible'}",
+    )]]
+    navigation = []
+    if page > 1:
+        navigation.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"{CALLBACK_PREFIX}:participants:{record['id']}:{page - 1}:{filter_value}"))
+    if page < total_pages:
+        navigation.append(InlineKeyboardButton("➡️ 下一页", callback_data=f"{CALLBACK_PREFIX}:participants:{record['id']}:{page + 1}:{filter_value}"))
+    if navigation:
+        rows.append(navigation)
+    rows.append([InlineKeyboardButton("⬅️ 返回抽奖详情", callback_data=f"{CALLBACK_PREFIX}:view:{record['id']}")])
+    return InlineKeyboardMarkup(rows)
+
+
 def _participation_status_keyboard(record: dict) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
+    rows = []
+    for item in record.get("follow_targets", []) or []:
+        if not isinstance(item, dict):
+            continue
+        url = _target_join_url(item)
+        if not url:
+            continue
+        label = str(item.get("title") or item.get("target") or "频道/群组")
+        rows.append([InlineKeyboardButton(f"📢 关注/加入 {label[:48]}", url=url)])
+    rows.append([
         InlineKeyboardButton("🔄 刷新参与条件", callback_data=f"{CALLBACK_PREFIX}:join_refresh:{record['id']}")
-    ]])
+    ])
+    return InlineKeyboardMarkup(rows)
 
 
 async def event_lottery_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1018,10 +1122,36 @@ async def event_lottery_callback(update: Update, context: ContextTypes.DEFAULT_T
         if record.get("status") in {"draft", "scheduled", "open"}:
             rows.append([InlineKeyboardButton("✏️ 编辑抽奖", callback_data=f"{CALLBACK_PREFIX}:edit:{record['id']}")])
             rows.append([InlineKeyboardButton("🗑 删除抽奖", callback_data=f"{CALLBACK_PREFIX}:delete:{record['id']}")])
+        participant_count = len(_participant_entries(record))
+        rows.append([InlineKeyboardButton(
+            f"👥 查看参与用户（{participant_count}）",
+            callback_data=f"{CALLBACK_PREFIX}:participants:{record['id']}:1",
+        )])
         rows.append([InlineKeyboardButton("📋 使用此设置新建", callback_data=f"{CALLBACK_PREFIX}:clone:{record['id']}")])
         rows.append([InlineKeyboardButton("⬅️ 返回抽奖列表", callback_data=f"{CALLBACK_PREFIX}:dashboard:{record['chat_id']}")])
         await query.answer()
         return await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
+    if action == "participants":
+        if not await _can_manage(context, query.from_user.id, int(record["chat_id"])):
+            return await query.answer("无管理权限。", show_alert=True)
+        try:
+            page = int(parts[3]) if len(parts) >= 4 else 1
+        except (TypeError, ValueError):
+            page = 1
+        eligible_only = len(parts) >= 5 and parts[4] == "eligible"
+        text, page = _participants_text(
+            record, context, page, eligible_only=eligible_only
+        )
+        await query.answer()
+        return await query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=_participants_keyboard(
+                record, page, eligible_only=eligible_only
+            ),
+            disable_web_page_preview=True,
+        )
+
     if action in {"discard", "delete"}:
         if action == "discard" and record.get("status") != "draft":
             return await query.answer("草稿以外的抽奖请使用删除操作。", show_alert=True)
@@ -1160,7 +1290,10 @@ async def event_lottery_callback(update: Update, context: ContextTypes.DEFAULT_T
         _start_editor_input_stage(query, context, lottery_id, "target_follow")
         await query.answer()
         return await query.edit_message_text(
-            "请输入要关注的公开 @频道或 @群组。\n机器人必须已是该频道或群组的管理员，才可添加。",
+            "请输入要关注的频道/群组：\n"
+            "• 公开目标：@laoshibangdan 或 t.me/zhaolaoshiqun\n"
+            "• 私有目标：发送频道/群组 ID，例如 -1001234567890\n\n"
+            "机器人必须是目标管理员；私有目标还需要创建邀请链接的权限。",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⬅️ 返回关注列表", callback_data=f"{CALLBACK_PREFIX}:targets:{lottery_id}:follow")
             ]]),
@@ -1323,7 +1456,7 @@ async def _handle_editor_input(update: Update, context: ContextTypes.DEFAULT_TYP
                 raise ValueError(f"最多只能设置 {MAX_TARGETS} 个关注目标。")
             target = _normalize_target(text)
             if not target:
-                raise ValueError("请输入公开 @频道或 @群组用户名。")
+                raise ValueError("请输入公开 @频道/@群组，或私有频道/群组 ID。")
             target_chat = await _get_admin_target_chat(context, target)
             if target_chat is None:
                 raise ValueError("机器人不是该频道或群组的管理员，无法添加为关注目标。")
@@ -1335,10 +1468,25 @@ async def _handle_editor_input(update: Update, context: ContextTypes.DEFAULT_TYP
             values = record.setdefault("follow_targets", [])
             if any(item.get("target") == target for item in values if isinstance(item, dict)):
                 raise ValueError("该关注目标已经存在。")
+            invite_link = ""
+            if PRIVATE_CHAT_ID_RE.fullmatch(target):
+                try:
+                    invite = await context.bot.create_chat_invite_link(
+                        chat_id=int(target), name="抽奖关注",
+                    )
+                    invite_link = str(getattr(invite, "invite_link", "") or "").strip()
+                    if not invite_link:
+                        raise ValueError("未获得邀请链接")
+                except Exception as exc:
+                    raise ValueError(
+                        "无法为私有目标创建邀请链接；请确认机器人拥有邀请用户的管理员权限。"
+                    ) from exc
             values.append({
                 "target": target,
+                "title": str(getattr(target_chat, "title", "") or getattr(target_chat, "username", "") or target)[:128],
                 "chat_id": int(target_chat.id),
                 "chat_type": chat_type,
+                "invite_link": invite_link,
                 "requirements": {"username": False, "min_messages": 0, "password": ""},
             })
         elif field in {"target_req_min_messages", "target_req_password"}:

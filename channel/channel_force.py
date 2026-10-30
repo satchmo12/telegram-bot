@@ -22,6 +22,7 @@ from group.mute_registry import add_mute, remove_mute
 
 
 DATA_FILE = "config_data/force_subscribe.json"
+INVITE_FILE = "config_data/force_subscribe_invites.json"
 MUTE_FILE = "data/force_subscribe_mute.json"
 
 # 用户提醒冷却
@@ -34,6 +35,7 @@ FORCE_SUBSCRIBE_SWEEP_INTERVAL_SECONDS = 60
 FORCE_SUBSCRIBE_TARGET_ERROR_LOG_INTERVAL_SECONDS = 10 * 60
 _target_error_logged_at: dict[str, float] = {}
 _TARGET_USERNAME_RE = re.compile(r"^@[A-Za-z0-9_]{5,32}$")
+_TARGET_PRIVATE_CHAT_ID_RE = re.compile(r"^-\d{5,20}$")
 
 
 def _normalize_target(value: str) -> str:
@@ -45,10 +47,21 @@ def _normalize_target(value: str) -> str:
     candidate = candidate.split("?", 1)[0].strip().lstrip("@")
     if not candidate:
         return ""
+    # A private channel/group has no public username. Telegram APIs accept its
+    # negative chat ID for membership checks, and its invite link is stored in
+    # a sidecar config created when an administrator adds the ID in the panel.
+    if _TARGET_PRIVATE_CHAT_ID_RE.fullmatch(candidate):
+        return candidate
     target = f"@{candidate}"
-    # Public @usernames are required so Telegram can render a join button and
-    # Telegram can resolve the target through getChatMember.
     return target if _TARGET_USERNAME_RE.fullmatch(target) else ""
+
+
+def is_private_force_subscribe_target(value: str) -> bool:
+    return bool(_TARGET_PRIVATE_CHAT_ID_RE.fullmatch(str(value or "").strip()))
+
+
+def _target_api_ref(target: str):
+    return int(target) if is_private_force_subscribe_target(target) else target
 
 
 def parse_force_subscribe_targets(value) -> list[str]:
@@ -69,6 +82,34 @@ def get_force_subscribe_targets(chat_id: str) -> list[str]:
     return parse_force_subscribe_targets(data.get(str(chat_id), []))
 
 
+def _load_invite_links() -> dict:
+    data = load_json(INVITE_FILE)
+    return data if isinstance(data, dict) else {}
+
+
+def get_force_subscribe_invite_link(chat_id: str, target: str) -> str:
+    links = _load_invite_links().get(str(chat_id), {})
+    if not isinstance(links, dict):
+        return ""
+    link = str(links.get(str(target), "") or "").strip()
+    return link if link.startswith("https://t.me/") else ""
+
+
+def set_force_subscribe_invite_link(chat_id: str, target: str, invite_link: str) -> None:
+    """Save the generated join link for a private target chat ID."""
+    target = _normalize_target(target)
+    invite_link = str(invite_link or "").strip()
+    if not is_private_force_subscribe_target(target) or not invite_link.startswith("https://t.me/"):
+        return
+    data = _load_invite_links()
+    links = data.setdefault(str(chat_id), {})
+    if not isinstance(links, dict):
+        links = {}
+        data[str(chat_id)] = links
+    links[target] = invite_link
+    save_json(INVITE_FILE, data)
+
+
 def set_force_subscribe_targets(chat_id: str, targets) -> None:
     data = load_json(DATA_FILE)
     if not isinstance(data, dict):
@@ -79,6 +120,18 @@ def set_force_subscribe_targets(chat_id: str, targets) -> None:
     else:
         data.pop(str(chat_id), None)
     save_json(DATA_FILE, data)
+
+    # Keep invite links only for targets that are still configured. Old public
+    # configurations require no sidecar entry and continue to work unchanged.
+    invite_data = _load_invite_links()
+    links = invite_data.get(str(chat_id))
+    if isinstance(links, dict):
+        kept = {target: link for target, link in links.items() if target in normalized}
+        if kept:
+            invite_data[str(chat_id)] = kept
+        else:
+            invite_data.pop(str(chat_id), None)
+        save_json(INVITE_FILE, invite_data)
 
 
 def _record_targets(record: dict) -> list[str]:
@@ -149,6 +202,11 @@ async def set_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     targets = parse_force_subscribe_targets(context.args)
     if not targets:
         return await update.message.reply_text("用法：/setchannel @频道或群组，可一次填写多个")
+    if any(is_private_force_subscribe_target(target) for target in targets):
+        return await update.message.reply_text(
+            "私有频道/群组请在「群设置 → 管理与安全 → 强制关注设置」中发送 ID 添加，"
+            "系统会自动生成入群链接。"
+        )
     chat_id = str(update.effective_chat.id)
     set_force_subscribe_targets(chat_id, targets)
     await update.message.reply_text(f"✅ 已开启强制关注：{'、'.join(targets)}")
@@ -162,8 +220,9 @@ async def clear_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_json(DATA_FILE)
 
     if chat_id in data:
-        del data[chat_id]
-        save_json(DATA_FILE, data)
+        # Use the shared setter so any private-target invite links are removed
+        # together with the requirement.
+        set_force_subscribe_targets(chat_id, [])
         await update.message.reply_text("✅ 已关闭强制关注")
     else:
         await update.message.reply_text("当前未开启强制关注")
@@ -173,7 +232,7 @@ async def clear_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _target_display_name(context: ContextTypes.DEFAULT_TYPE, target: str) -> str:
     try:
-        chat = await context.bot.get_chat(target)
+        chat = await context.bot.get_chat(_target_api_ref(target))
         return str(getattr(chat, "title", "") or getattr(chat, "username", "") or target)
     except Exception:
         return target
@@ -224,7 +283,7 @@ async def _missing_force_subscribe_targets(
     missing = []
     for target in targets:
         try:
-            member = await context.bot.get_chat_member(target, user_id)
+            member = await context.bot.get_chat_member(_target_api_ref(target), user_id)
         except Exception as exc:
             if _is_unverifiable_force_subscribe_target_error(exc):
                 _log_force_subscribe_target_error(target, exc)
@@ -242,12 +301,21 @@ async def _force_subscribe_keyboard(
     rows = []
     for target in targets:
         name = await _target_display_name(context, target)
-        rows.append([
-            InlineKeyboardButton(
-                f"📢 关注/加入 {name[:48]}",
-                url=f"https://t.me/{target.lstrip('@')}",
-            )
-        ])
+        url = (
+            get_force_subscribe_invite_link(chat_id, target)
+            if is_private_force_subscribe_target(target)
+            else f"https://t.me/{target.lstrip('@')}"
+        )
+        # A newly configured private target always gets a generated invite link.
+        # Skip a legacy numeric target without a link rather than rendering an
+        # invalid URL from its chat ID.
+        if url:
+            rows.append([
+                InlineKeyboardButton(
+                    f"📢 关注/加入 {name[:48]}",
+                    url=url,
+                )
+            ])
     rows.append([
         InlineKeyboardButton(
             "✅ 我已全部关注/加入，解除禁言",
@@ -441,10 +509,11 @@ async def force_subscribe_membership_update(
     if not member_update:
         return
 
-    target = _normalize_target(getattr(getattr(member_update, "chat", None), "username", ""))
+    target_chat = getattr(member_update, "chat", None)
+    target = _normalize_target(getattr(target_chat, "username", ""))
+    if not target and target_chat is not None:
+        target = _normalize_target(str(getattr(target_chat, "id", "") or ""))
     if not target:
-        # Force-subscribe targets are public @usernames, so an update without a
-        # username cannot match a configured target.
         return
 
     new_member = getattr(member_update, "new_chat_member", None)
