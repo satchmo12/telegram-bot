@@ -16,7 +16,7 @@ from telegram.ext import (
 
 from command_router import register_command
 from typing import Optional
-from utils import get_group_whitelist, load_json, safe_reply, save_json
+from utils import GROUP_LIST_FILE, get_group_whitelist, load_json, safe_reply, save_json
 from group.grouplist import get_user_join_time
 from group.mute_registry import add_mute, remove_mute
 
@@ -325,6 +325,35 @@ async def _force_subscribe_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+def _ensure_new_only_start_timestamp(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: str, group_config: dict
+) -> int:
+    """Initialize legacy new-member settings that have no activation time.
+
+    A zero timestamp means the old config cannot distinguish existing members
+    from later joins.  Treat the first run after upgrade as the activation
+    point, persist it, and leave all previously untracked members unaffected.
+    """
+    try:
+        configured_at = int(group_config.get("force_subscribe_set_ts", 0) or 0)
+    except (TypeError, ValueError):
+        configured_at = 0
+    if configured_at > 0:
+        return configured_at
+
+    configured_at = int(time.time())
+    group_config["force_subscribe_set_ts"] = configured_at
+    groups = get_group_whitelist(context)
+    if isinstance(groups, dict):
+        groups[str(chat_id)] = group_config
+        save_json(GROUP_LIST_FILE, groups)
+    print(
+        "[强制关注] 已为仅新成员模式初始化生效时间 "
+        f"group={chat_id} ts={configured_at}"
+    )
+    return configured_at
+
+
 async def check_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_user or not update.effective_chat:
         return
@@ -347,9 +376,12 @@ async def check_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     apply_new_only = bool(group_config.get("force_subscribe_new_only", False))
-    force_set_ts = int(group_config.get("force_subscribe_set_ts", 0) or 0)
-    if apply_new_only and force_set_ts > 0:
+    if apply_new_only:
+        force_set_ts = _ensure_new_only_start_timestamp(context, chat_id, group_config)
         join_time = get_user_join_time(update.effective_chat.id, user_id)
+        # An unknown join time is treated as an existing/untracked member. The
+        # join tracker records future joins from both service and chat-member
+        # updates, so only verifiably newer members are restricted.
         if join_time <= 0 or join_time <= force_set_ts:
             return
 

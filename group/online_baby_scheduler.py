@@ -137,10 +137,21 @@ async def schedule_teachers(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     from channel.publish_setting import send_teachers_to_group
 
+    groups = get_group_whitelist(context)
     now = time.time()
     for chat_id, key in due_chat_ids:
+        group_config = groups.get(str(chat_id), {}) if isinstance(groups, dict) else {}
+        fixed_parameter = str(
+            group_config.get("teacher_auto_parameter", "")
+            if isinstance(group_config, dict)
+            else ""
+        ).strip()
         try:
-            sent = await send_teachers_to_group(context, chat_id)
+            # This uses the exact same category filter as a user sending
+            # ``老师 <固定参数>`` in the group.
+            sent = await send_teachers_to_group(
+                context, chat_id, filter_text=fixed_parameter
+            )
             if sent:
                 _last_sent_at[key] = now
         except (Forbidden, BadRequest) as exc:

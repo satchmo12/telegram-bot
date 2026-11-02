@@ -197,6 +197,7 @@ def load_publish_config():
         "template_publish_enabled": False,
         "publish_templates": [],
         # Labels such as 艺名 / 联系方式 used to extract routing keywords.
+        # A special label ``#`` indexes every #keyword up to whitespace.
         "keyword_extract_labels": [],
         # Group lookup: input label (e.g. 艺名) -> response label (e.g. 联系方式).
         "keyword_group_reply_enabled": False,
@@ -215,7 +216,7 @@ def load_publish_config():
         "checkin_cancel_command_text": "取消打卡",
         "checkin_online_command_text": "在线宝宝",
         "checkin_online_text": "在线宝宝",
-        # Master-bot-only roster built from collected channel posts.
+        # Per-bot roster built from collected channel posts.
         "collection_display_enabled": False,
         "collection_display_command_text": "老师",
         "collection_display_text": "收录老师",
@@ -1671,7 +1672,11 @@ def _group_online_checkin_posts(
 
 
 def _collection_display_labels(config: dict) -> list[str]:
-    """Parse configured fields used for each collected-post roster item."""
+    """Parse fields used for each collected-post roster item.
+
+    ``#`` is supported as a display field and reads every keyword extracted by
+    the special ``#`` keyword rule (for example ``#成都 #高新区``).
+    """
     raw = str((config or {}).get("collection_display_label") or "艺名")
     labels = []
     for label in re.split(r"[+＋,，、\n]+", raw):
@@ -1842,6 +1847,9 @@ def _collection_display_command_text(config: dict) -> str:
 
 TEACHER_LIST_CALLBACK_PREFIX = "teacher_list"
 TEACHER_LIST_BUTTONS_PER_ROW = 3
+# Category buttons also need pagination: a ``#`` grouping can produce hundreds
+# of distinct tags, which would otherwise exceed Telegram's reply-markup size.
+TEACHER_LIST_CATEGORY_PAGE_SIZE = 30
 # Keep every message comfortably below Telegram's text limit while preserving
 # every teacher link through callback pagination.
 TEACHER_LIST_PAGE_SIZE = 20
@@ -1914,32 +1922,79 @@ def _teacher_list_catalog(config: dict) -> list[dict]:
     return catalog
 
 
-def _teacher_list_primary_keyboard(catalog: list[dict]) -> InlineKeyboardMarkup:
+def _teacher_list_primary_keyboard(
+    catalog: list[dict], page: int = 0, *, has_secondary_group: bool = True
+) -> InlineKeyboardMarkup:
+    """Render a bounded page of first-level categories."""
+    page_count = max(
+        1,
+        (len(catalog) + TEACHER_LIST_CATEGORY_PAGE_SIZE - 1)
+        // TEACHER_LIST_CATEGORY_PAGE_SIZE,
+    )
+    page = max(0, min(int(page), page_count - 1))
+    start = page * TEACHER_LIST_CATEGORY_PAGE_SIZE
+    visible_items = catalog[start : start + TEACHER_LIST_CATEGORY_PAGE_SIZE]
     buttons = [
         InlineKeyboardButton(
             _teacher_list_button_text(item["name"]),
-            callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:secondary:{index}",
+            callback_data=(
+                f"{TEACHER_LIST_CALLBACK_PREFIX}:secondary:{index}"
+                if has_secondary_group
+                else f"{TEACHER_LIST_CALLBACK_PREFIX}:content:{index}:0:0"
+            ),
         )
-        for index, item in enumerate(catalog)
+        for index, item in enumerate(visible_items, start=start)
     ]
     rows = _teacher_list_button_rows(buttons)
-    # 一级分类的上一级就是 /start 首页。复用现有 start:back 回调，
-    # 让从欢迎页或底部键盘进入的老师列表都能回到首页。
-    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
+    pager = []
+    if page > 0:
+        pager.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:primary:{page - 1}"))
+    if page < page_count - 1:
+        pager.append(InlineKeyboardButton("➡️ 下一页", callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:primary:{page + 1}"))
+    if pager:
+        rows.append(pager)
+    # Do not use the generic ``start:back`` callback here.  A teacher list can
+    # be requested in a group, where every member sees the same message; its
+    # close action must pass through the requester authorization below too.
+    rows.append([
+        InlineKeyboardButton(
+            "❌ 关闭",
+            callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:close",
+        )
+    ])
     return InlineKeyboardMarkup(rows)
 
 
-def _teacher_list_secondary_keyboard(catalog: list[dict], primary_index: int) -> InlineKeyboardMarkup:
+def _teacher_list_secondary_keyboard(
+    catalog: list[dict], primary_index: int, page: int = 0
+) -> InlineKeyboardMarkup:
+    """Render a bounded page of second-level categories."""
     primary = catalog[primary_index]
+    secondary_items = primary["secondary"]
+    page_count = max(
+        1,
+        (len(secondary_items) + TEACHER_LIST_CATEGORY_PAGE_SIZE - 1)
+        // TEACHER_LIST_CATEGORY_PAGE_SIZE,
+    )
+    page = max(0, min(int(page), page_count - 1))
+    start = page * TEACHER_LIST_CATEGORY_PAGE_SIZE
+    visible_items = secondary_items[start : start + TEACHER_LIST_CATEGORY_PAGE_SIZE]
     buttons = [
         InlineKeyboardButton(
             _teacher_list_button_text(item["name"]),
             callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:content:{primary_index}:{index}:0",
         )
-        for index, item in enumerate(primary["secondary"])
+        for index, item in enumerate(visible_items, start=start)
     ]
     rows = _teacher_list_button_rows(buttons)
-    rows.append([InlineKeyboardButton("⬅️ 返回一级分类", callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:primary")])
+    pager = []
+    if page > 0:
+        pager.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:secondary:{primary_index}:{page - 1}"))
+    if page < page_count - 1:
+        pager.append(InlineKeyboardButton("➡️ 下一页", callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:secondary:{primary_index}:{page + 1}"))
+    if pager:
+        rows.append(pager)
+    rows.append([InlineKeyboardButton("⬅️ 返回一级分类", callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:primary:0")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -2031,11 +2086,15 @@ def _teacher_list_filtered_payload(
     visible_items = items[start : start + TEACHER_LIST_PAGE_SIZE]
 
     title = _checkin_command_text(config, "collection_display_text", "收录老师")
+    _primary_label, secondary_group_label = _collection_display_category_labels(config)
+    has_secondary_group = bool(secondary_group_label)
     filter_text = str(state.get("filter_text") or "").strip()
     if filter_text:
         primary_label = str(state.get("primary_label") or "一级分类")
-        secondary_label = str(state.get("secondary_label") or "二级分类")
-        subtitle = f"筛选：{filter_text}（{primary_label} / {secondary_label}）"
+        category_labels = [primary_label]
+        if has_secondary_group:
+            category_labels.append(str(state.get("secondary_label") or "二级分类"))
+        subtitle = f"筛选：{filter_text}（{' / '.join(category_labels)}）"
     else:
         subtitle = "全部收录"
     lines = [f"📚 {title}", subtitle, f"共 {len(items)} 条", ""]
@@ -2051,7 +2110,7 @@ def _teacher_list_filtered_payload(
             lines.append(f"【{primary}】")
             previous_primary = primary
             previous_secondary = None
-        if secondary != previous_secondary:
+        if has_secondary_group and secondary != previous_secondary:
             lines.append(f"〔{secondary}〕")
             previous_secondary = secondary
 
@@ -2132,7 +2191,12 @@ def _teacher_list_content_payload(
     visible_posts = posts[start : start + TEACHER_LIST_PAGE_SIZE]
 
     title = _checkin_command_text(config, "collection_display_text", "收录老师")
-    lines = [f"📚 {title}", f"【{primary['name']}】", f"〔{secondary['name']}〕", ""]
+    _primary_label, secondary_group_label = _collection_display_category_labels(config)
+    has_secondary_group = bool(secondary_group_label)
+    lines = [f"📚 {title}", f"【{primary['name']}】"]
+    if has_secondary_group:
+        lines.append(f"〔{secondary['name']}〕")
+    lines.append("")
     link_items: list[tuple[str, str]] = []
     for offset, post in enumerate(visible_posts, start=start + 1):
         name_text = _collection_display_value(post, config)
@@ -2191,8 +2255,12 @@ def _teacher_list_content_payload(
         ])
     rows.append([
         InlineKeyboardButton(
-            "⬅️ 返回二级分类",
-            callback_data=f"{TEACHER_LIST_CALLBACK_PREFIX}:secondary:{primary_index}",
+            "⬅️ 返回二级分类" if has_secondary_group else "⬅️ 返回一级分类",
+            callback_data=(
+                f"{TEACHER_LIST_CALLBACK_PREFIX}:secondary:{primary_index}"
+                if has_secondary_group
+                else f"{TEACHER_LIST_CALLBACK_PREFIX}:primary:0"
+            ),
         )
     ])
     return (
@@ -2252,9 +2320,13 @@ def _teacher_list_delete_menu_payload(
     visible_posts = posts[start : start + TEACHER_LIST_PAGE_SIZE]
 
     title = _checkin_command_text(config, "collection_display_text", "收录老师")
+    _primary_label, secondary_group_label = _collection_display_category_labels(config)
+    category_text = f"【{primary['name']}】"
+    if secondary_group_label:
+        category_text += f"〔{secondary['name']}〕"
     lines = [
         f"🗑 管理 {title}",
-        f"【{primary['name']}】〔{secondary['name']}〕",
+        category_text,
         "请选择要删除的收录记录。仅删除本地收录、关键词和关联记录，不会删除频道原帖。",
     ]
     if notice:
@@ -2313,9 +2385,8 @@ def _teacher_list_delete_menu_payload(
 
 
 def _teacher_list_is_available(context: ContextTypes.DEFAULT_TYPE, config: dict) -> bool:
-    return _is_master_bot_context(context) and bool(
-        (config or {}).get("collection_display_enabled", False)
-    )
+    """Whether this bot has enabled its own collected-post roster."""
+    return bool((config or {}).get("collection_display_enabled", False))
 
 
 async def show_teacher_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2336,8 +2407,38 @@ async def show_teacher_list(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     title = _checkin_command_text(config, "collection_display_text", "收录老师")
     await message.reply_text(
         f"📚 {title}\n请选择一级分类：",
-        reply_markup=_teacher_list_primary_keyboard(catalog),
+        reply_markup=_teacher_list_primary_keyboard(
+            catalog, has_secondary_group=bool(_collection_display_category_labels(config)[1])
+        ),
     )
+
+
+def _teacher_list_requester_id(query) -> Optional[int]:
+    """Return the user that requested this roster, when the message is a reply.
+
+    User-triggered roster messages are sent with ``message.reply_text()``, so
+    Telegram retains the original command as ``reply_to_message`` even after
+    this roster message is edited during pagination.  Proactively sent rosters
+    have no reply target and intentionally remain available to the group.
+    """
+    roster_message = getattr(query, "message", None)
+    request_message = getattr(roster_message, "reply_to_message", None)
+    requester = getattr(request_message, "from_user", None)
+    return _as_int(getattr(requester, "id", None))
+
+
+async def _ensure_teacher_list_requester(query) -> bool:
+    """Allow callbacks on a requested roster only from its requesting user."""
+    requester_id = _teacher_list_requester_id(query)
+    if requester_id is None:
+        return True
+
+    clicker_id = _as_int(getattr(getattr(query, "from_user", None), "id", None))
+    if clicker_id == requester_id:
+        return True
+
+    await query.answer("仅发起“老师”命令的用户可以操作此列表。", show_alert=True)
+    return False
 
 
 async def handle_teacher_list_callback(
@@ -2346,6 +2447,8 @@ async def handle_teacher_list_callback(
     """Navigate the public master-bot teacher roster and admin record deletion."""
     query = update.callback_query
     if not query or not query.data or not query.data.startswith(f"{TEACHER_LIST_CALLBACK_PREFIX}:"):
+        return
+    if not await _ensure_teacher_list_requester(query):
         return
 
     config = load_publish_config()
@@ -2399,10 +2502,20 @@ async def handle_teacher_list_callback(
         return
 
     if stage == "primary":
+        try:
+            page = int(parts[2]) if len(parts) > 2 else 0
+            if page < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return await query.answer("分类分页参数无效，请重新打开老师列表。", show_alert=True)
+        page_count = max(1, (len(catalog) + TEACHER_LIST_CATEGORY_PAGE_SIZE - 1) // TEACHER_LIST_CATEGORY_PAGE_SIZE)
+        page = min(page, page_count - 1)
         await query.answer()
         await query.edit_message_text(
-            f"📚 {title}\n请选择一级分类：",
-            reply_markup=_teacher_list_primary_keyboard(catalog),
+            f"📚 {title}\n请选择一级分类：{f'（第 {page + 1}/{page_count} 页）' if page_count > 1 else ''}",
+            reply_markup=_teacher_list_primary_keyboard(
+                catalog, page, has_secondary_group=bool(_collection_display_category_labels(config)[1])
+            ),
         )
         return
 
@@ -2495,7 +2608,14 @@ async def handle_teacher_list_callback(
                 f"✅ 已删除消息 ID {message_id} 的收录记录（{detail_text}）。\n\n"
                 "当前分类已无其他收录内容，请选择一级分类。"
             )
-            keyboard = _teacher_list_primary_keyboard(refreshed_catalog) if refreshed_catalog else None
+            keyboard = (
+                _teacher_list_primary_keyboard(
+                    refreshed_catalog,
+                    has_secondary_group=bool(_collection_display_category_labels(config)[1]),
+                )
+                if refreshed_catalog
+                else None
+            )
         return await query.edit_message_text(text, reply_markup=keyboard)
 
     try:
@@ -2508,10 +2628,33 @@ async def handle_teacher_list_callback(
         return
 
     if stage == "secondary":
+        _primary_label, secondary_group_label = _collection_display_category_labels(config)
+        if not secondary_group_label:
+            # A stale button rendered before the setting changed should also
+            # skip the synthetic “全部” category.
+            text, entities, keyboard = _teacher_list_content_payload(
+                config, catalog, primary_index, 0, 0, show_delete_button=can_delete
+            )
+            await query.answer()
+            return await query.edit_message_text(
+                text,
+                entities=entities or None,
+                disable_web_page_preview=True,
+                reply_markup=keyboard,
+            )
+        try:
+            page = int(parts[3]) if len(parts) > 3 else 0
+            if page < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return await query.answer("分类分页参数无效，请重新打开老师列表。", show_alert=True)
+        secondary_count = len(primary["secondary"])
+        page_count = max(1, (secondary_count + TEACHER_LIST_CATEGORY_PAGE_SIZE - 1) // TEACHER_LIST_CATEGORY_PAGE_SIZE)
+        page = min(page, page_count - 1)
         await query.answer()
         await query.edit_message_text(
-            f"📚 {title}\n一级分类：{primary['name']}\n请选择二级分类：",
-            reply_markup=_teacher_list_secondary_keyboard(catalog, primary_index),
+            f"📚 {title}\n一级分类：{primary['name']}\n请选择二级分类：{f'（第 {page + 1}/{page_count} 页）' if page_count > 1 else ''}",
+            reply_markup=_teacher_list_secondary_keyboard(catalog, primary_index, page),
         )
         return
 
@@ -2684,22 +2827,31 @@ async def send_online_babies_to_group(
 async def send_teachers_to_group(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
+    *,
+    filter_text: str = "",
 ) -> bool:
-    """Proactively publish the same teacher roster shown by the ``老师`` command."""
+    """Proactively publish the same filtered roster as ``老师 [参数]``."""
     config = load_publish_config()
-    if not _is_master_bot_context(context) or not bool(
-        config.get("collection_display_enabled", False)
-    ):
+    if not bool(config.get("collection_display_enabled", False)):
         return False
 
     posts = _load_collection_display_posts(config)
     if not posts:
         return False
-    items = _filter_collection_display_posts(posts, config, "")
+
+    filter_text = str(filter_text or "").strip()
+    primary_label, secondary_label = _collection_display_category_labels(config)
+    # Match the manual command: parameters filter only the configured category
+    # fields, so do not publish an unexpected unfiltered roster when neither
+    # category is configured.
+    if filter_text and not primary_label and not secondary_label:
+        return False
+
+    items = _filter_collection_display_posts(posts, config, filter_text)
     if not items:
         return False
 
-    token = _store_teacher_filter_result(config, "", items)
+    token = _store_teacher_filter_result(config, filter_text, items)
     text, entities, keyboard = _teacher_list_filtered_payload(
         config, token, _TEACHER_LIST_FILTER_CACHE[token], page=0
     )
@@ -2741,10 +2893,11 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
         collection_filter = None
 
     if collection_filter is not None:
-        if not _is_master_bot_context(context) or not bool(
-            config.get("collection_display_enabled", False)
-        ):
-            return False
+        if not bool(config.get("collection_display_enabled", False)):
+            # The feature switch is also a command gate: silently consume the
+            # configured command so a disabled teacher list cannot fall through
+            # to group AI or other ordinary-text handlers.
+            return True
         await _reply_collection_display(
             msg, context, config, filter_text=collection_filter
         )
@@ -2929,7 +3082,7 @@ def _collection_display_settings_text(config: dict) -> str:
     group_label = str(config.get("collection_display_group_label") or "").strip() or "不分组"
     subgroup_label = str(config.get("collection_display_subgroup_label") or "").strip() or "不分组"
     return "\n".join([
-        "📚 收录展示设置（主机器人）",
+        "📚 收录展示设置",
         "",
         f"状态：{'✅ 开启' if config.get('collection_display_enabled', False) else '🚫 关闭'}",
         f"触发文案：{_collection_display_command_text(config)}",
@@ -2938,6 +3091,7 @@ def _collection_display_settings_text(config: dict) -> str:
         f"一级分组字段：{group_label}",
         f"二级分组字段：{subgroup_label}",
         "",
+        "展示字段可填写“#”：会显示关键词设置中提取的所有 #关键词（例如 #成都 #高新区）。",
         "在群内发送触发文案（例如“老师”）即可分页展示；可加一级/二级分类参数，例如“老师 成都”。",
     ])
 
@@ -5573,6 +5727,23 @@ def _extract_routing_keywords(msg, config: dict) -> list[dict]:
     result = []
 
     for label in _keyword_labels(config):
+        # ``#`` is a special extraction rule rather than a literal field
+        # label: every #keyword is indexed, ending at whitespace. This lets a
+        # single post collect multiple values such as ``#成都 #高新区``.
+        if label == "#":
+            for raw in re.findall(r"#[^\s#]+", text):
+                key = _normalize_routing_keyword(raw)
+                if key and not any(
+                    item["key"] == key and item["label"] == label
+                    for item in result
+                ):
+                    result.append({
+                        "label": label,
+                        "key": key,
+                        "raw": raw,
+                    })
+            continue
+
         # Support both “标签：#示例” and “【标签】：#示例” field styles.
         field_prefix = (
             rf"(?:[【\[（(]\s*)?{re.escape(label)}\s*(?:[】\]）)])?\s*[：:]?"
@@ -6628,14 +6799,16 @@ def _keyword_submission_mode_keyboard(route: dict, link: str) -> InlineKeyboardM
 
 def _keyword_settings_text(config: dict) -> str:
     labels = _keyword_labels(config)
-    sample = "【艺名】：#丹丹\n【联系方式】：@dandan"
+    sample = "【艺名】：#丹丹\n【联系方式】：@dandan\n#成都 #高新区"
     return (
         "🔑 评论关键词设置\n\n"
         f"当前提取标签：{'、'.join(labels) if labels else '未设置'}\n\n"
         "管理员发布到主频道时，机器人会从内容中提取这些标签对应的值，"
         "并映射到主频道消息 ID 与讨论组评论 ID。\n\n"
         f"示例：\n{sample}\n"
-        "设置“艺名”可提取丹丹；设置“联系方式”可提取 @dandan。"
+        "设置“艺名”可提取丹丹；设置“联系方式”可提取 @dandan。\n"
+        "设置“#”后，会提取全文所有 # 后的内容，以空格或换行结束；"
+        "一条内容可收录多个，例如 #成都 #高新区。"
     )
 
 def _keyword_settings_keyboard() -> InlineKeyboardMarkup:
@@ -8483,12 +8656,14 @@ def publish_setting_keyboard(config: dict):
         ],
         [InlineKeyboardButton("⬅️ 返回", callback_data="start:back")]
     ]
-    if _is_master_runtime_bot():
+    # 去掉主机器限制
+    # if _is_master_runtime_bot():
         # This management entry is deliberately visible only in the master bot.
-        rows.insert(
-            5,
-            [InlineKeyboardButton("📚 收录展示设置", callback_data="publish:collection_display_settings")],
-        )
+    rows.insert(
+        5,
+        [InlineKeyboardButton("📚 收录展示设置", callback_data="publish:collection_display_settings")],
+    )
+    
     return InlineKeyboardMarkup(rows)
 
 
@@ -9212,7 +9387,9 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]),
             )
         published = SimpleNamespace(message_id=published_message_id, scheduled=False)
-        if bool(config.get("comment_forward_enabled", False)):
+        if bool(config.get("comment_forward_enabled", False)) or bool(
+            config.get("collection_display_enabled", False)
+        ):
             _register_post_keywords(entries, channel_id_int, published.message_id)
         _register_checkin_post(config, channel_id_int, published.message_id, entries)
         if report_id and report_url:
@@ -9587,8 +9764,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "collection_display_group_label",
         "collection_display_subgroup_label",
     }:
-        if not _is_master_bot_context(context):
-            return await query.answer("该设置仅主机器人可用。", show_alert=True)
+        # if not _is_master_bot_context(context):
+        #     return await query.answer("该设置仅主机器人可用。", show_alert=True)
         if not has_admin_permission(context, query.from_user.id, "submission_config"):
             return await query.answer("你没有收录展示配置权限。", show_alert=True)
 
@@ -9619,7 +9796,9 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "collection_display_text": "请输入展示标题，例如：收录老师。",
             "collection_display_label": (
                 "请输入每条收录的展示字段，多个字段用 + 分隔。\n"
-                "例如：艺名+课费，展示效果：雪500p。"
+                "例如：艺名+课费，展示效果：雪500p。\n"
+                "填写 # 可展示关键词设置中收录的所有 #关键词；"
+                "例如帖子含 #成都 #高新区 时，会展示 成都、高新区。"
             ),
             "collection_display_group_label": "请输入一级分组字段，例如：城市。发送“无”表示不分组。",
             "collection_display_subgroup_label": "请输入二级分组字段，例如：区域。可留空；发送“无”表示不使用二级分组。",
@@ -9708,7 +9887,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data[KEYWORD_LABEL_INPUT_KEY] = True
         return await query.edit_message_text(
             "请输入需要提取的字段标签，多个用逗号或换行分隔。\n"
-            "例如：艺名, 联系方式",
+            "例如：艺名, 联系方式\n"
+            "如需收录全文所有 #关键词，请额外输入 #。",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬅️ 返回", callback_data="publish:keywords")]
             ]),
@@ -10767,7 +10947,11 @@ async def _handle_wall_publish_message(
         "keyword_entries": (
             _extract_routing_keywords(msg, config)
             if (
-                (comment_forward_enabled or bool(config.get("checkin_enabled", False)))
+                (
+                    comment_forward_enabled
+                    or bool(config.get("checkin_enabled", False))
+                    or bool(config.get("collection_display_enabled", False))
+                )
                 and is_owner_submission
                 and submission_kind == "main"
             )
@@ -11381,11 +11565,13 @@ async def _handle_collection_display_settings_input(
         return False
     if not update.message or not update.message.text or not update.effective_user:
         return True
-    if not _is_master_bot_context(context) or not has_admin_permission(
-        context, update.effective_user.id, "submission_config"
-    ):
+    # The settings panel is available to bots that expose this management
+    # entry, so its follow-up text input must use the same permission rule as
+    # the callback instead of silently rejecting non-master bot contexts.
+    if not has_admin_permission(context, update.effective_user.id, "submission_config"):
         context.user_data.pop(COLLECTION_DISPLAY_SETTING_KEY, None)
-        return False
+        await update.message.reply_text("❗ 你没有收录展示配置权限。")
+        return True
 
     value = update.message.text.strip()
     config = load_publish_config()

@@ -582,6 +582,12 @@ GROUP_CONFIG_DEFAULTS = {
     "join_request_enabled": False,
     "silent": False,
     "ad_filter": False,
+    # Advertisement-filter behavior.  A group can limit detection to visitor
+    # bot messages, use delete-only mode, or kick repeat offenders.
+    "ad_filter_delete_only": False,
+    "ad_filter_guest_only": False,
+    "ad_filter_kick_enabled": False,
+    "ad_filter_kick_limit": 3,
     "ad_push_enabled": False,
     "ad_push_mode": "interval",
     "ad_push_interval_min": 120,

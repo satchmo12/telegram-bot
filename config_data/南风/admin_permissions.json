@@ -1,0 +1,32 @@
+{
+    "admins": {
+        "6796003915": {
+            "name": "",
+            "username": "",
+            "permissions": [
+                "submission_review",
+                "submission_config",
+                "private_forward",
+                "group_config",
+                "global_ad_config",
+                "channel_config",
+                "telethon_manage",
+                "bot_channel_config"
+            ]
+        },
+        "6819879789": {
+            "name": "",
+            "username": "",
+            "permissions": [
+                "submission_review",
+                "submission_config",
+                "private_forward",
+                "group_config",
+                "global_ad_config",
+                "channel_config",
+                "telethon_manage",
+                "bot_channel_config"
+            ]
+        }
+    }
+}

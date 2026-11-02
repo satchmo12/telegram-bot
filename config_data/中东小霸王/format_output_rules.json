@@ -1,0 +1,34 @@
+{
+    "next_id": 2,
+    "rules": [
+        {
+            "id": 1,
+            "enabled": true,
+            "channel_id": "-1002891937249",
+            "output_template": "{content}",
+            "output_entities": [],
+            "cut_words": [
+                "#车费定金"
+            ],
+            "cut_includes_word": false,
+            "personal_report_link_enabled": true,
+            "replacements": [
+                {
+                    "id": 1,
+                    "from": "昵称",
+                    "to": "艺名"
+                },
+                {
+                    "id": 2,
+                    "from": "电报",
+                    "to": "联系"
+                },
+                {
+                    "id": 3,
+                    "from": "课表查看图",
+                    "to": ""
+                }
+            ]
+        }
+    ]
+}

@@ -199,7 +199,12 @@ def _dashboard_keyboard(chat_id: int, records: list[dict]) -> InlineKeyboardMark
         for record in records[:8]
     ]
     rows.append([InlineKeyboardButton("➕ 创建积分拍卖", callback_data=f"{CALLBACK_PREFIX}:create:{chat_id}")])
-    rows.append([InlineKeyboardButton("⬅️ 返回群设置", callback_data=f"gcfg:open:{chat_id}")])
+    rows.append([
+        InlineKeyboardButton(
+            "⬅️ 返回积分与抽奖",
+            callback_data=f"gcfg:category:{chat_id}:points",
+        )
+    ])
     return InlineKeyboardMarkup(rows)
 
 

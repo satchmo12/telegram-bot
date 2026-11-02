@@ -1,18 +1,20 @@
 {
-    "channel_id": -1004455955066,
+    "channel_id": -1004434897205,
     "review_enabled": false,
     "daily_limit": 0,
     "ads_enabled": false,
     "ads": [],
     "buttons": [],
-    "submission_enabled": false,
+    "submission_enabled": true,
     "random_view_enabled": true,
     "bottom_buttons_enabled": false,
     "proof_required": false,
     "reject_reason_required": false,
     "comment_forward_enabled": false,
     "forward_channel_id": null,
-    "keyword_extract_labels": [],
+    "keyword_extract_labels": [
+        "#"
+    ],
     "continuous_submission_enabled": true,
     "custom_menu_buttons": {
         "channel_clone": true,
@@ -27,15 +29,20 @@
     "template_publish_enabled": false,
     "publish_templates": [],
     "pending_history_post_migration": {
-        "old_channel_id": 1,
-        "new_channel_id": -1004455955066,
-        "changed_at": 1792602352
+        "old_channel_id": -1004455955066,
+        "new_channel_id": -1004434897205,
+        "changed_at": 1793601589
     },
     "channel_change_history": [
         {
             "old_channel_id": 1,
             "new_channel_id": -1004455955066,
             "changed_at": 1792602352
+        },
+        {
+            "old_channel_id": -1004455955066,
+            "new_channel_id": -1004434897205,
+            "changed_at": 1793601589
         }
     ],
     "keyword_group_reply_enabled": false,
@@ -66,10 +73,10 @@
     "submission_reward_group_id": null,
     "submission_reward_group_title": "",
     "checkin_subgroup_label": "",
-    "collection_display_enabled": false,
-    "collection_display_command_text": "老师",
-    "collection_display_text": "收录老师",
-    "collection_display_label": "艺名",
-    "collection_display_group_label": "",
+    "collection_display_enabled": true,
+    "collection_display_command_text": "看片",
+    "collection_display_text": "收录毛片",
+    "collection_display_label": "#",
+    "collection_display_group_label": "#",
     "collection_display_subgroup_label": ""
 }

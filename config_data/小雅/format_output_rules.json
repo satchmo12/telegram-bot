@@ -1,11 +1,12 @@
 {
-    "next_id": 4,
+    "next_id": 6,
     "rules": [
         {
             "id": 1,
             "enabled": true,
             "channel_id": "-1001951594315",
-            "output_template": "{content}",
+            "note": "上海艺术展览会榜单",
+            "output_template": "✨城市 #上海\n\n {content}",
             "output_entities": [],
             "cut_words": [
                 "中转平台"
@@ -39,6 +40,7 @@
             "id": 2,
             "enabled": true,
             "channel_id": "-1001357865503",
+            "note": "",
             "output_template": "{content}",
             "output_entities": [],
             "cut_words": [
@@ -83,6 +85,7 @@
             "id": 3,
             "enabled": true,
             "channel_id": "-1002298630178",
+            "note": "",
             "output_template": "{content}",
             "output_entities": [],
             "cut_words": [
@@ -99,6 +102,103 @@
                 {
                     "id": 2,
                     "from": "进VIP群",
+                    "to": ""
+                }
+            ]
+        },
+        {
+            "id": 4,
+            "enabled": true,
+            "channel_id": "-1001203635031",
+            "note": "成都狼友已验证",
+            "output_template": "✨城市 #成都 {content}",
+            "output_entities": [
+                {
+                    "custom_emoji_id": "5775917048097939066",
+                    "length": 1,
+                    "offset": 0,
+                    "type": "custom_emoji"
+                }
+            ],
+            "cut_words": [
+                "其他说明"
+            ],
+            "cut_includes_word": false,
+            "personal_report_link_enabled": true,
+            "replacements": [
+                {
+                    "id": 1,
+                    "from": "开课位置",
+                    "to": "区域"
+                },
+                {
+                    "id": 2,
+                    "from": "预约",
+                    "to": "联系"
+                },
+                {
+                    "id": 3,
+                    "from": "价格",
+                    "to": "课费"
+                },
+                {
+                    "id": 4,
+                    "from": "✅狼友车库认证榜✅",
+                    "to": ""
+                },
+                {
+                    "id": 5,
+                    "from": "✅狼友车库认证榜✅",
+                    "to": ""
+                }
+            ]
+        },
+        {
+            "id": 5,
+            "enabled": true,
+            "channel_id": "-1002891937249",
+            "note": "武汉海报榜",
+            "output_template": "✨城市 #武汉\n\n{content}",
+            "output_entities": [],
+            "cut_words": [
+                "#车费定金"
+            ],
+            "cut_includes_word": false,
+            "personal_report_link_enabled": true,
+            "replacements": [
+                {
+                    "id": 1,
+                    "from": "昵称",
+                    "to": "艺名"
+                },
+                {
+                    "id": 2,
+                    "from": "地区",
+                    "to": "区域"
+                },
+                {
+                    "id": 3,
+                    "from": "电报",
+                    "to": "联系"
+                },
+                {
+                    "id": 4,
+                    "from": "水费",
+                    "to": "课费"
+                },
+                {
+                    "id": 5,
+                    "from": "🔰#点击下方查看详情⬇️",
+                    "to": ""
+                },
+                {
+                    "id": 6,
+                    "from": "🔰#外出车费随意不超过100",
+                    "to": ""
+                },
+                {
+                    "id": 7,
+                    "from": "🔰【评论区必看 】 ⬇️⬇️⬇️",
                     "to": ""
                 }
             ]

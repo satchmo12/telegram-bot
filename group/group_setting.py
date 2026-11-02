@@ -150,6 +150,10 @@ ONLINE_BABY_DEFAULT_INTERVAL = 30
 TEACHER_MIN_INTERVAL = 1
 TEACHER_MAX_INTERVAL = 1440
 TEACHER_DEFAULT_INTERVAL = 30
+TEACHER_AUTO_PARAMETER_MAX_LENGTH = 100
+AD_FILTER_KICK_LIMIT_MIN = 1
+AD_FILTER_KICK_LIMIT_MAX = 100
+AD_FILTER_KICK_LIMIT_DEFAULT = 3
 AI_REPLY_PROBABILITY_MIN = 0
 AI_REPLY_PROBABILITY_MAX = 100
 AI_REPLY_MAX_PER_HOUR_MIN = 1
@@ -432,44 +436,6 @@ async def _open_points_rules_panel(
     return await query.edit_message_text(
         _build_points_rules_text(chat_id_str, cfg),
         reply_markup=_build_points_rules_keyboard(chat_id_str, cfg),
-        parse_mode="HTML",
-    )
-
-
-def _build_game_settings_text(chat_id: str, cfg: dict) -> str:
-    lines = ["🎮 游戏功能设置", f"群ID：<code>{chat_id}</code>", ""]
-    for key, label in GAME_TOGGLE_FIELDS:
-        lines.append(f"{'✅' if bool(cfg.get(key, False)) else '🚫'} {label}")
-    return "\n".join(lines)
-
-
-def _build_game_settings_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(
-            f"{'✅' if bool(cfg.get(key, False)) else '🚫'} {label}",
-            callback_data=f"{CALLBACK_PREFIX}:game_toggle:{chat_id}:{key}",
-        )]
-        for key, label in GAME_TOGGLE_FIELDS
-    ]
-    rows.append([InlineKeyboardButton("⬅️ 返回游戏功能", callback_data=f"{CALLBACK_PREFIX}:category:{chat_id}:games")])
-    return InlineKeyboardMarkup(rows)
-
-
-async def _open_game_settings_panel(
-    query, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str, user_id: int
-):
-    chat_id = _parse_chat_id(chat_id_str)
-    if chat_id is None:
-        return await query.answer("群ID无效。", show_alert=True)
-    if not await _can_manage_group(context, user_id, chat_id):
-        return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
-    data = get_group_whitelist(context)
-    cfg = data.get(chat_id_str, {})
-    if not isinstance(cfg, dict):
-        cfg = {}
-    return await query.edit_message_text(
-        _build_game_settings_text(chat_id_str, cfg),
-        reply_markup=_build_game_settings_keyboard(chat_id_str, cfg),
         parse_mode="HTML",
     )
 
@@ -1132,6 +1098,86 @@ async def _open_ad_push_settings_panel(
     )
 
 
+def _ad_filter_kick_limit(cfg: dict) -> int:
+    try:
+        limit = int((cfg or {}).get("ad_filter_kick_limit", AD_FILTER_KICK_LIMIT_DEFAULT))
+    except (TypeError, ValueError):
+        limit = AD_FILTER_KICK_LIMIT_DEFAULT
+    return max(AD_FILTER_KICK_LIMIT_MIN, min(AD_FILTER_KICK_LIMIT_MAX, limit))
+
+
+def _build_ad_filter_settings_text(chat_id: str, cfg: dict) -> str:
+    enabled = bool(cfg.get("ad_filter", False))
+    guest_only = bool(cfg.get("ad_filter_guest_only", False))
+    delete_only = bool(cfg.get("ad_filter_delete_only", False))
+    kick_enabled = bool(cfg.get("ad_filter_kick_enabled", False))
+    limit = _ad_filter_kick_limit(cfg)
+    scope = "仅访客机器人" if guest_only else "所有广告规则"
+    handling = "仅删除消息，不累计违规" if delete_only else "删除消息"
+    kick_status = "✅ 开启" if kick_enabled else "🚫 关闭"
+    return "\n".join([
+        "🛡 广告拦截设置",
+        f"广告拦截：{_toggle_text(enabled)}",
+        f"拦截范围：{scope}",
+        f"处理方式：{handling}",
+        f"违规踢出：{kick_status}",
+        f"踢出阈值：{limit} 次（仅开启违规踢出后生效）",
+        "",
+        "访客机器人模式只删除访客机器人消息；仅删除消息模式不会累计违规或踢人。",
+    ])
+
+
+def _build_ad_filter_settings_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardMarkup:
+    def toggle(key: str, label: str) -> InlineKeyboardButton:
+        enabled = bool(cfg.get(key, False))
+        return InlineKeyboardButton(
+            f"{'✅' if enabled else '🚫'} {label}",
+            callback_data=f"{CALLBACK_PREFIX}:ad_filter_toggle:{chat_id}:{key}",
+        )
+
+    return InlineKeyboardMarkup([
+        [
+            toggle("ad_filter", "广告拦截"),
+            toggle("ad_filter_guest_only", "仅拦截访客机器人"),
+        ],
+        [
+            toggle("ad_filter_delete_only", "仅删除消息"),
+            toggle("ad_filter_kick_enabled", "开启违规踢出"),
+        ],
+        [InlineKeyboardButton(
+            f"🔢 违规 {_ad_filter_kick_limit(cfg)} 次踢出群聊",
+            callback_data=f"{CALLBACK_PREFIX}:ad_filter_kick_limit:{chat_id}",
+        )],
+        [InlineKeyboardButton(
+            "⬅️ 返回管理与安全",
+            callback_data=f"{CALLBACK_PREFIX}:category:{chat_id}:moderation",
+        )],
+    ])
+
+
+async def _open_ad_filter_settings_panel(
+    query, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str, user_id: int
+):
+    chat_id = _parse_chat_id(chat_id_str)
+    if chat_id is None:
+        return await query.answer("群ID无效。", show_alert=True)
+    if not await _can_manage_group(context, user_id, chat_id):
+        return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+    if not await _is_bot_group_admin(context, chat_id):
+        return await query.answer("机器人不是该群管理员，无法配置广告拦截。", show_alert=True)
+    cfg = get_group_whitelist(context).get(chat_id_str, {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    # Returning from the threshold input must cancel that pending text stage.
+    context.user_data.pop("group_setting_stage", None)
+    context.user_data.pop("group_setting_chat_id", None)
+    await query.answer()
+    return await query.edit_message_text(
+        _build_ad_filter_settings_text(chat_id_str, cfg),
+        reply_markup=_build_ad_filter_settings_keyboard(chat_id_str, cfg),
+    )
+
+
 def _build_force_subscribe_settings_text(chat_id: str, cfg: dict) -> str:
     force_on = bool(cfg.get("force_subscribe", False))
     new_only = bool(cfg.get("force_subscribe_new_only", False))
@@ -1629,7 +1675,6 @@ def _build_group_category_keyboard(
                 ("verify", "身份验证"),
                 ("verify_math", "数字验证"),
                 ("join_request_enabled", "处理入群申请"),
-                ("ad_filter", "广告拦截"),
                 ("invite_approval_enabled", "邀请审核"),
             ]
             buttons = [_category_toggle_button(chat_id, cfg, key, label, category) for key, label in fields]
@@ -1640,6 +1685,10 @@ def _build_group_category_keyboard(
                 InlineKeyboardButton(f"➖ {max(1, spam_limit - 1)} 条/分", callback_data=f"{CALLBACK_PREFIX}:spam:{chat_id}:-1:{category}"),
                 InlineKeyboardButton(f"➕ {min(200, spam_limit + 1)} 条/分", callback_data=f"{CALLBACK_PREFIX}:spam:{chat_id}:+1:{category}"),
             ])
+            rows.append([InlineKeyboardButton(
+                f"{'✅' if bool(cfg.get('ad_filter', False)) else '🚫'} 广告拦截设置",
+                callback_data=f"{CALLBACK_PREFIX}:ad_filter_menu:{chat_id}",
+            )])
             rows.append([InlineKeyboardButton("📢 强制关注设置", callback_data=f"{CALLBACK_PREFIX}:force_subscribe_menu:{chat_id}")])
             rows.append([InlineKeyboardButton("🧹 清理冻结账号", callback_data=f"{CALLBACK_PREFIX}:clean_frozen:{chat_id}")])
     elif category == "automation":
@@ -1654,9 +1703,24 @@ def _build_group_category_keyboard(
                 _category_toggle_button(chat_id, cfg, key, label, category),
                 InlineKeyboardButton(f"⏱ 间隔：{interval}m", callback_data=f"{CALLBACK_PREFIX}:{action}:{chat_id}:{category}"),
             ])
+        teacher_parameter = str(cfg.get("teacher_auto_parameter") or "").strip()
+        teacher_parameter_label = teacher_parameter or "全部"
+        if len(teacher_parameter_label) > 20:
+            teacher_parameter_label = f"{teacher_parameter_label[:19]}…"
+        rows.append([InlineKeyboardButton(
+            f"🏷 老师固定参数：{teacher_parameter_label}",
+            callback_data=f"{CALLBACK_PREFIX}:teacher_parameter:{chat_id}:{category}",
+        )])
         rows.append([InlineKeyboardButton("🤖 AI 接话设置", callback_data=f"{CALLBACK_PREFIX}:ai_reply_menu:{chat_id}")])
     elif category == "games":
-        rows.append([InlineKeyboardButton("🎮 游戏功能设置", callback_data=f"{CALLBACK_PREFIX}:game_menu:{chat_id}")])
+        game_buttons = [
+            _category_toggle_button(chat_id, cfg, key, label, category)
+            for key, label in GAME_TOGGLE_FIELDS
+        ]
+        rows.extend(
+            game_buttons[index : index + 2]
+            for index in range(0, len(game_buttons), 2)
+        )
     elif category == "points":
         if bot_is_admin:
             rows.extend([
@@ -2912,8 +2976,9 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             cfg = {}
         if feature_key in (
             {item[0] for item in TOGGLE_FIELDS}
-            | LOTTERY_TOGGLE_KEYS  
-            | {"talk_lottery_enabled" }
+            | GAME_TOGGLE_KEYS
+            | LOTTERY_TOGGLE_KEYS
+            | {"talk_lottery_enabled"}
             | {"ad_push_enabled", "spam_limit", "force_subscribe", "force_subscribe_new_only" }
             |  {"points_enabled" }
         ):
@@ -2998,9 +3063,13 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             return await query.answer("机器人不是该群管理员，无法发布拍卖。", show_alert=True)
         return await open_auction_creator(query, context, chat_id_str, user_id)
 
+    # Compatibility for old keyboards that still use the previous extra
+    # "游戏功能设置" layer. New game toggles are shown directly in the games
+    # category above.
     if action == "game_menu" and len(parts) >= 3:
-        await query.answer()
-        return await _open_game_settings_panel(query, context, parts[2], user_id)
+        return await _open_group_category_panel(
+            query, context, parts[2], "games", user_id
+        )
 
     if action == "game_toggle" and len(parts) >= 4:
         chat_id_str, feature_key = parts[2], parts[3]
@@ -3018,10 +3087,8 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         data[chat_id_str] = cfg
         save_json(GROUP_LIST_FILE, data)
         await query.answer("✅ 已更新")
-        return await query.edit_message_text(
-            _build_game_settings_text(chat_id_str, cfg),
-            reply_markup=_build_game_settings_keyboard(chat_id_str, cfg),
-            parse_mode="HTML",
+        return await _open_group_category_panel(
+            query, context, chat_id_str, "games", user_id
         )
 
     if action == "game_back" and len(parts) >= 3:
@@ -3227,6 +3294,61 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             )
         return await query.answer("未知广告操作。", show_alert=True)
 
+    if action == "ad_filter_menu" and len(parts) >= 3:
+        return await _open_ad_filter_settings_panel(query, context, parts[2], user_id)
+
+    if action == "ad_filter_toggle" and len(parts) >= 4:
+        chat_id_str, setting_key = parts[2], parts[3]
+        chat_id = _parse_chat_id(chat_id_str)
+        allowed_keys = {
+            "ad_filter",
+            "ad_filter_guest_only",
+            "ad_filter_delete_only",
+            "ad_filter_kick_enabled",
+        }
+        if chat_id is None:
+            return await query.answer("群ID无效。", show_alert=True)
+        if setting_key not in allowed_keys:
+            return await query.answer("广告拦截设置无效。", show_alert=True)
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        if not await _is_bot_group_admin(context, chat_id):
+            return await query.answer("机器人不是该群管理员，无法配置广告拦截。", show_alert=True)
+        cfg = data.get(chat_id_str, {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        cfg[setting_key] = not bool(cfg.get(setting_key, False))
+        data[chat_id_str] = cfg
+        save_json(GROUP_LIST_FILE, data)
+        await query.answer("✅ 已更新")
+        return await query.edit_message_text(
+            _build_ad_filter_settings_text(chat_id_str, cfg),
+            reply_markup=_build_ad_filter_settings_keyboard(chat_id_str, cfg),
+        )
+
+    if action == "ad_filter_kick_limit" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return await query.answer("群ID无效。", show_alert=True)
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        if not await _is_bot_group_admin(context, chat_id):
+            return await query.answer("机器人不是该群管理员，无法配置广告拦截。", show_alert=True)
+        context.user_data["group_setting_stage"] = "ad_filter_kick_limit"
+        context.user_data["group_setting_chat_id"] = chat_id_str
+        await query.answer()
+        return await query.edit_message_text(
+            f"请输入广告违规多少次后踢出群聊（{AD_FILTER_KICK_LIMIT_MIN}-{AD_FILTER_KICK_LIMIT_MAX}，默认 {AD_FILTER_KICK_LIMIT_DEFAULT}）。\n\n"
+            "此数值仅在“开启违规踢出”打开后生效。",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "⬅️ 返回广告拦截设置",
+                    callback_data=f"{CALLBACK_PREFIX}:ad_filter_menu:{chat_id_str}",
+                )
+            ]]),
+        )
+
     if action == "force_subscribe_menu" and len(parts) >= 3:
         chat_id_str = parts[2]
         await query.answer()
@@ -3287,6 +3409,28 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                 [[InlineKeyboardButton(
                     "⬅️ 返回",
                     callback_data=f"{CALLBACK_PREFIX}:teacher_interval_back",
+                )]]
+            ),
+        )
+
+    if action == "teacher_parameter" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        context.user_data["group_setting_stage"] = "teacher_parameter"
+        context.user_data["group_setting_chat_id"] = chat_id_str
+        await query.answer()
+        return await query.edit_message_text(
+            "请输入老师定时调用的固定参数。\n\n"
+            "例如设置“成都”后，定时调用等同于发送“老师 成都”。\n"
+            "发送“清空”可恢复为不带参数的“老师”。",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton(
+                    "⬅️ 返回",
+                    callback_data=f"{CALLBACK_PREFIX}:teacher_parameter_back",
                 )]]
             ),
         )
@@ -3908,6 +4052,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         "active_speak_interval_back",
         "online_baby_interval_back",
         "teacher_interval_back",
+        "teacher_parameter_back",
     }:
         context.user_data.pop("group_setting_stage", None)
         chat_id_str = context.user_data.pop("group_setting_chat_id", None)
@@ -4285,6 +4430,8 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
         "active_speak_interval",
         "online_baby_interval",
         "teacher_interval",
+        "teacher_parameter",
+        "ad_filter_kick_limit",
         "ai_reply_probability",
         "ai_reply_hourly_limit",
         "ai_reply_interval",
@@ -4557,6 +4704,35 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
             cfg["teacher_interval_min"] = interval
             await update.message.reply_text(
                 f"✅ 已设置老师自动调用间隔：每 {interval} 分钟"
+            )
+        elif stage == "teacher_parameter":
+            if text in {"清空", "全部", "无"}:
+                cfg["teacher_auto_parameter"] = ""
+                await update.message.reply_text("✅ 老师定时调用将不带参数（等同于“老师”）。")
+            elif not text:
+                return await update.message.reply_text("❗ 请输入固定参数，或发送“清空”。")
+            elif len(text) > TEACHER_AUTO_PARAMETER_MAX_LENGTH:
+                return await update.message.reply_text(
+                    f"❗ 固定参数最多 {TEACHER_AUTO_PARAMETER_MAX_LENGTH} 个字符。"
+                )
+            else:
+                cfg["teacher_auto_parameter"] = text
+                await update.message.reply_text(
+                    f"✅ 已设置老师定时调用参数：{text}\n"
+                    f"定时调用将等同于发送“老师 {text}”。"
+                )
+        elif stage == "ad_filter_kick_limit":
+            limit = _parse_positive_int(text)
+            if limit is None or not (
+                AD_FILTER_KICK_LIMIT_MIN <= limit <= AD_FILTER_KICK_LIMIT_MAX
+            ):
+                return await update.message.reply_text(
+                    f"❗ 请输入 {AD_FILTER_KICK_LIMIT_MIN}-{AD_FILTER_KICK_LIMIT_MAX} 的整数。"
+                )
+            cfg["ad_filter_kick_limit"] = limit
+            await update.message.reply_text(
+                f"✅ 已设置广告违规 {limit} 次后踢出群聊。\n"
+                "请同时在广告拦截设置中开启“开启违规踢出”后才会生效。"
             )
         elif stage == "ai_reply_style":
             if text in {"默认", "恢复默认", "清空"}:

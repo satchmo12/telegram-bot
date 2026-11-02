@@ -3,7 +3,7 @@ import time
 import json
 from typing import Optional
 from telegram import Update
-from telegram.ext import CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import ChatMemberHandler, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.helpers import mention_html
 from command_router import register_command
 from info.economy import ensure_user_exists
@@ -30,12 +30,15 @@ def save_users(chat_id, users):
 
 
 def get_user_join_time(chat_id, user_id) -> int:
+    """Return the most recent observed group-join time for one user."""
     users = load_users(chat_id)
     info = users.get(str(user_id), {})
     if not isinstance(info, dict):
         return 0
     try:
-        return int(info.get("join_time", 0) or 0)
+        # ``last_join_time`` is refreshed on a leave/rejoin.  Older records
+        # only have ``join_time``, which remains a compatible fallback.
+        return int(info.get("last_join_time", info.get("join_time", 0)) or 0)
     except Exception:
         return 0
 
@@ -176,6 +179,9 @@ async def record_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "username": new_username,
             "username_history": history,
             "join_time": int(old.get("join_time", 0) or 0),
+            "last_join_time": int(
+                old.get("last_join_time", old.get("join_time", 0)) or 0
+            ),
             "last_seen": now_ts,
         }
 
@@ -192,31 +198,63 @@ async def record_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     #     )
 
 
+def _record_member_join(chat_id: int, member, joined_at: Optional[int] = None) -> None:
+    """Persist a member's latest join time without losing profile history."""
+    if not member or getattr(member, "is_bot", False):
+        return
+    now_ts = int(joined_at or time.time())
+    users = load_users(chat_id)
+    uid = str(member.id)
+    old = users.get(uid, {})
+    if not isinstance(old, dict):
+        old = {}
+    join_time = int(old.get("join_time", 0) or 0)
+    if join_time <= 0:
+        join_time = now_ts
+    users[uid] = {
+        "full_name": member.full_name,
+        "username": member.username,
+        "username_history": list(old.get("username_history") or []),
+        "join_time": join_time,
+        # This is deliberately updated after every rejoin. Force-subscribe's
+        # “only new members” mode uses it instead of the historical first join.
+        "last_join_time": now_ts,
+        "last_seen": now_ts,
+    }
+    save_users(chat_id, users)
+
+
 async def new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    if not chat or chat.type not in ("group", "supergroup"):
+    message = update.message
+    if not chat or not message or chat.type not in ("group", "supergroup"):
+        return
+    now_ts = int(time.time())
+    for member in message.new_chat_members or []:
+        _record_member_join(chat.id, member, now_ts)
+
+
+async def record_chat_member_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Record joins delivered only as a ``chat_member`` update.
+
+    Telegram can omit the old ``new_chat_members`` service message, especially
+    for invite-link and approval joins. This update is the reliable source used
+    by the per-group “only new members” force-subscribe setting.
+    """
+    change = getattr(update, "chat_member", None)
+    chat = getattr(change, "chat", None)
+    new_member = getattr(change, "new_chat_member", None)
+    old_member = getattr(change, "old_chat_member", None)
+    if not chat or not new_member or getattr(chat, "type", "") not in {"group", "supergroup"}:
         return
 
-    users = load_users(chat.id)
-
-    for member in update.message.new_chat_members:
-        uid = str(member.id)
-        now_ts = int(time.time())
-        old = users.get(uid, {})
-        if not isinstance(old, dict):
-            old = {}
-        join_time = int(old.get("join_time", 0) or 0)
-        if join_time <= 0:
-            join_time = now_ts
-        users[uid] = {
-            "full_name": member.full_name,
-            "username": member.username,
-            "username_history": [],
-            "join_time": join_time,
-            "last_seen": now_ts,
-        }
-
-    save_users(chat.id, users)
+    old_status = str(getattr(old_member, "status", "") or "").lower()
+    new_status = str(getattr(new_member, "status", "") or "").lower()
+    if old_status not in {"left", "kicked"} or new_status not in {
+        "member", "administrator", "restricted"
+    }:
+        return
+    _record_member_join(chat.id, getattr(new_member, "user", None))
 
 
 # 群用户列表命令
@@ -501,6 +539,12 @@ def register_user_tracker_handlers(app):
     app.add_handler(
         MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member),
         group=12,
+    )
+    # Some joins arrive only as a chat_member update, without a service
+    # message. Record them so force_subscribe_new_only can identify them.
+    app.add_handler(
+        ChatMemberHandler(record_chat_member_join, ChatMemberHandler.CHAT_MEMBER),
+        group=11,
     )
     # 群用户列表命令
     app.add_handler(CommandHandler("list", list_group_users))

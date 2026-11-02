@@ -115,7 +115,7 @@ async def show_menu(update, context):
         keyboard[-1].append(label)
     keyboard.append(["🔎查找收录老师与标签"])
     bot_name = str(context.application.bot_data.get("name", "")).strip()
-    if MASTER_BOT_NAME and bot_name == MASTER_BOT_NAME:
+    if bool(load_publish_config().get("collection_display_enabled", False)):
         keyboard.append(["老师列表"])
 
     reply_markup = ReplyKeyboardMarkup(
@@ -1048,17 +1048,18 @@ def _build_start_panel_rows(
     if is_bot_admin_viewer:
         rows.append([InlineKeyboardButton("⚙️机器人设置", callback_data="mbot:settings")])
         
-    if bot_name == MASTER_BOT_NAME and bool(publish_config.get("collection_display_enabled", False)):
+    if bool(publish_config.get("collection_display_enabled", False)):
         rows.append([
             InlineKeyboardButton("老师列表", callback_data="teacher_list:primary", api_kwargs={"style": "success", "icon_custom_emoji_id": "5474525960143385880"}),
         ])
 
     # The master bot owner can forward a channel post here and receive a
     # rule-based, reformatted copy. Rule editing lives in its own panel.
-    is_master_owner = bool(
-        bot_name == MASTER_BOT_NAME and user_id and int(user_id) == owner_id
+    is_master_owner = bool( user_id and int(user_id) == owner_id
+        # bot_name == MASTER_BOT_NAME and user_id and int(user_id) == owner_id
     )
     if is_master_owner:
+    
         rows.append(
             [
                 InlineKeyboardButton("📐格式输出", callback_data="fmt:output"),

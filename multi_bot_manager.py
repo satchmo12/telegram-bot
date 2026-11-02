@@ -1,5 +1,7 @@
 import html
+import json
 import os
+import tempfile
 from typing import Optional
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -67,6 +69,8 @@ TIMEZONE_OPTIONS = (
     ("America/New_York", "🇺🇸 纽约时间"),
 )
 TIMEZONE_LABELS = dict(TIMEZONE_OPTIONS)
+PUBLISH_CONFIG_DIR = "config_data"
+PUBLISH_CONFIG_FILENAME = "publish_config.json"
 
 
 RESTART_HINT_FEATURES = {
@@ -80,6 +84,58 @@ RESTART_HINT_FEATURES = {
     "lottery_betting",
     "market_price",
 }
+
+
+def _publish_config_path_for_bot(name: str) -> Optional[str]:
+    """Return a selected bot's isolated publish-config path safely."""
+    name = str(name or "").strip()
+    if not name or "/" in name or "\\" in name:
+        return None
+    return os.path.join(PUBLISH_CONFIG_DIR, name, PUBLISH_CONFIG_FILENAME)
+
+
+def _load_bot_publish_config(name: str) -> dict:
+    path = _publish_config_path_for_bot(name)
+    if not path:
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _teacher_list_enabled_for_bot(name: str) -> bool:
+    return bool(_load_bot_publish_config(name).get("collection_display_enabled", False))
+
+
+def _set_teacher_list_enabled_for_bot(name: str, enabled: bool) -> bool:
+    """Atomically persist the teacher-list gate for the selected bot."""
+    path = _publish_config_path_for_bot(name)
+    if not path:
+        return False
+    config = _load_bot_publish_config(name)
+    config["collection_display_enabled"] = bool(enabled)
+    directory = os.path.dirname(path)
+    temporary_path = ""
+    try:
+        os.makedirs(directory, exist_ok=True)
+        fd, temporary_path = tempfile.mkstemp(
+            prefix=".publish_config_", suffix=".json", dir=directory
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(config, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(temporary_path, path)
+        return True
+    except OSError:
+        if temporary_path:
+            try:
+                os.unlink(temporary_path)
+            except OSError:
+                pass
+        return False
 
 
 def _is_master_panel(context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -523,6 +579,7 @@ async def _build_detail_text(cfg: dict) -> str:
         f"状态：{running}",
         f"归属：{_build_owner_link(owner_id)}",
         f"机器人：{_build_bot_link(bot_username)}",
+        f"老师列表功能：{'✅ 开启' if _teacher_list_enabled_for_bot(name) else '🚫 关闭'}",
         f"时区：{html.escape(_timezone_label(cfg.get('timezone', 'Asia/Shanghai')))}",
     ]
     return "\n".join(lines)
@@ -561,6 +618,15 @@ def _build_detail_keyboard(cfg: dict, *, can_edit: bool, can_control: bool) -> I
         for idx in range(0, len(feature_buttons), 2):
             rows.append(feature_buttons[idx : idx + 2])
 
+    if can_edit:
+        teacher_list_enabled = _teacher_list_enabled_for_bot(name)
+        rows.append([
+            InlineKeyboardButton(
+                f"{'✅' if teacher_list_enabled else '🚫'} 老师列表功能",
+                callback_data=f"{CALLBACK_PREFIX}:teacher_list_toggle:{name}",
+            )
+        ])
+
     if can_control and cfg.get("managed") and name != MASTER_BOT_NAME:
         rows.append(
             [InlineKeyboardButton("🗑 删除机器人", callback_data=f"{CALLBACK_PREFIX}:delete:{name}")]
@@ -596,8 +662,10 @@ def _current_bot_config(context: ContextTypes.DEFAULT_TYPE) -> Optional[dict]:
     return get_bot_config_by_name(name) if name else None
 
 
-def _build_current_bot_settings_keyboard() -> InlineKeyboardMarkup:
+def _build_current_bot_settings_keyboard(cfg: dict) -> InlineKeyboardMarkup:
     keyboard_status = "✅ 已开启" if start_reply_keyboard_enabled() else "🚫 已关闭"
+    bot_name = str((cfg or {}).get("name", "")).strip()
+    teacher_list_enabled = _teacher_list_enabled_for_bot(bot_name)
     return InlineKeyboardMarkup(
         [
             [
@@ -618,6 +686,12 @@ def _build_current_bot_settings_keyboard() -> InlineKeyboardMarkup:
                     callback_data=f"{CALLBACK_PREFIX}:start_keyboard_toggle",
                 )
             ],
+            # [
+            #     InlineKeyboardButton(
+            #         f"{'✅' if teacher_list_enabled else '🚫'} 老师列表功能",
+            #         callback_data=f"{CALLBACK_PREFIX}:teacher_list_toggle:{bot_name}",
+            #     )
+            # ],
             [InlineKeyboardButton("⬅️ 返回主面板", callback_data="start:back")],
         ]
     )
@@ -629,7 +703,7 @@ async def _show_current_bot_settings(query, cfg: dict):
         "⚙️ 机器人设置\n\n"
         f"当前机器人：{html.escape(name)}\n"
         f"时区：{html.escape(_timezone_label(cfg.get('timezone', 'Asia/Shanghai')))}",
-        reply_markup=_build_current_bot_settings_keyboard(),
+        reply_markup=_build_current_bot_settings_keyboard(cfg),
         parse_mode="HTML",
     )
 
@@ -799,6 +873,26 @@ async def handle_multi_bot_callback(update: Update, context: ContextTypes.DEFAUL
             "已开启 /start 底部键盘" if enabled else "已关闭 /start 底部键盘"
         )
         return await _show_current_bot_settings(query, cfg)
+
+    if action == "teacher_list_toggle":
+        target_cfg = get_bot_config_by_name(name)
+        current_cfg = _current_bot_config(context)
+        current_name = str((current_cfg or {}).get("name", "")).strip()
+        if not target_cfg:
+            return await query.answer("未找到目标机器人配置。", show_alert=True)
+        # A non-master bot can only toggle its own list. The master bot's
+        # robot panel may edit another bot after normal ownership checks.
+        if name != current_name and not _can_manage(update, context):
+            return await query.answer("请在主机器人面板修改其他机器人的设置。", show_alert=True)
+        if not _can_edit_bot(target_cfg, query.from_user.id):
+            return await query.answer("仅机器人所有者或超级管理员可修改设置。", show_alert=True)
+        enabled = not _teacher_list_enabled_for_bot(name)
+        if not _set_teacher_list_enabled_for_bot(name, enabled):
+            return await query.answer("保存老师列表功能设置失败。", show_alert=True)
+        await query.answer("已开启老师列表功能。" if enabled else "已关闭老师列表功能。")
+        if name == current_name:
+            return await _show_current_bot_settings(query, target_cfg)
+        return await _show_detail(query, target_cfg)
 
     if action == "current_timezone":
         cfg = _current_bot_config(context)

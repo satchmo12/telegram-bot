@@ -19,6 +19,7 @@ OUTPUT_STATE_KEY = "format_output_waiting_for_forward"
 RULE_EDIT_STATE_KEY = "format_output_rule_editing"
 REPORT_LINK_STATE_KEY = "format_output_report_link_waiting"
 RULES_PER_PAGE = 8
+RULE_NOTE_MAX_LENGTH = 40
 DEFAULT_TEMPLATE = "{content}"
 _CUSTOM_EMOJI_TYPE = "custom_emoji"
 _TOKEN_RE = re.compile(r"\uE000fmt_(?:template|source)_\d+\uE001")
@@ -36,6 +37,8 @@ def _is_master_owner(context: ContextTypes.DEFAULT_TYPE, user) -> bool:
         owner_id = int(context.application.bot_data.get("owner_id"))
     except (TypeError, ValueError):
         return False
+    return bool(int(user.id) == owner_id)
+
     return bool(master_name and bot_name == master_name and int(user.id) == owner_id)
 
 
@@ -92,6 +95,7 @@ def _normalize_rule(value: Any, fallback_id: int) -> dict:
         "id": max(rule_id, 1),
         "enabled": bool(value.get("enabled", True)),
         "channel_id": channel_id,
+        "note": str(value.get("note", "") or "").strip()[:RULE_NOTE_MAX_LENGTH],
         "output_template": template,
         "output_entities": [item for item in entities if isinstance(item, dict)],
         "cut_words": [str(item).strip() for item in cut_words if str(item).strip()],
@@ -356,7 +360,10 @@ def _serialize_custom_emoji_entities(message) -> list[dict]:
 
 def _rule_label(rule: dict) -> str:
     state = "✅" if rule.get("enabled", True) else "🚫"
-    channel = rule.get("channel_id") or "未设置频道"
+    channel = str(rule.get("channel_id") or "未设置频道")
+    note = str(rule.get("note") or "").strip()
+    if note:
+        return f"{state} #{rule['id']} · {note[:30]} · {channel}"[:64]
     return f"{state} #{rule['id']} · {channel}"[:64]
 
 
@@ -386,8 +393,9 @@ def _rules_text(config: dict, page: int) -> str:
     return (
         "⚙️ <b>格式输出 · 规则设置</b>\n\n"
         f"已配置规则：{count} 条。\n"
-        "每条规则对应一个来源频道 ID；转发该频道的消息到机器人后，会按规则处理。\n\n"
-        "点击规则可修改频道号、输出内容、截取词和替换词。"
+        "每条规则对应一个来源频道 ID；转发该频道的消息到机器人后，会按规则处理。\n"
+        "可为规则添加备注，规则列表会优先显示备注，方便区分来源。\n\n"
+        "点击规则可修改备注、频道号、输出内容、截取词和替换词。"
     )
 
 
@@ -421,6 +429,7 @@ def _rule_detail_text(rule: dict) -> str:
     return (
         f"⚙️ <b>规则 #{rule['id']}</b>\n\n"
         f"状态：{status}\n"
+        f"备注：{html.escape(rule.get('note') or '（未设置）')}\n"
         f"来源频道号：<code>{html.escape(rule.get('channel_id') or '未设置')}</code>\n"
         f"截取词：<code>{html.escape(_preview(cut_text, 300))}</code>\n"
         f"截取方式：{cut_mode}\n"
@@ -436,6 +445,7 @@ def _rule_detail_keyboard(rule: dict, page: int) -> InlineKeyboardMarkup:
     toggle_text = "🚫 关闭规则" if rule.get("enabled", True) else "✅ 开启规则"
     return InlineKeyboardMarkup(
         [
+            [InlineKeyboardButton("🏷 设置备注", callback_data=f"{CALLBACK_PREFIX}:field:{rule_id}:note:{page}")],
             [InlineKeyboardButton("📢 设置来源频道号", callback_data=f"{CALLBACK_PREFIX}:field:{rule_id}:channel:{page}")],
             [InlineKeyboardButton("📝 设置输出内容", callback_data=f"{CALLBACK_PREFIX}:field:{rule_id}:template:{page}")],
             [
@@ -634,6 +644,7 @@ async def _show_replacement(query, rule_id: int, replacement_id: int, page: int)
 
 def _field_prompt(field: str) -> str:
     return {
+        "note": "请输入规则备注（最多 40 个字符），例如 <code>成都老师频道</code>。\n发送“清空”或 <code>-</code> 可移除备注。",
         "channel": "请输入来源频道号，例如 <code>-1001234567890</code>。\n之后转发该频道的消息，才会套用本规则。",
         "template": "请输入输出内容。必须带有 <code>{content}</code> 占位符，转发正文会填入这里。\n支持会员表情；发送 <code>{content}</code> 可恢复为仅输出正文。",
         "cut": "请输入截取词，可用逗号或换行设置多条。匹配到任一词后会截掉后续内容；是否保留截取词可在规则页面单独切换。\n发送“清空”可删除全部截取词。",
@@ -841,7 +852,7 @@ async def format_output_callback(update: Update, context: ContextTypes.DEFAULT_T
             return await _show_replacements(query, rule_id, page)
         if action == "field":
             rule_id, field, page = int(parts[2]), parts[3], int(parts[4])
-            if field not in {"channel", "template", "cut"}:
+            if field not in {"note", "channel", "template", "cut"}:
                 return await query.answer("未知设置项。", show_alert=True)
             if not _find_rule(load_format_output_config(), rule_id):
                 return await query.answer("规则不存在。", show_alert=True)
@@ -993,7 +1004,20 @@ async def format_output_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             raise ApplicationHandlerStop
 
         field = edit_state.get("field")
-        if field == "channel":
+        if field == "note":
+            if text_for_command in {"清空", "-"}:
+                rule["note"] = ""
+            elif not text_for_command:
+                await update.message.reply_text("备注不能为空；如需移除备注，请发送“清空”。")
+                raise ApplicationHandlerStop
+            elif len(text) > RULE_NOTE_MAX_LENGTH:
+                await update.message.reply_text(
+                    f"备注不能超过 {RULE_NOTE_MAX_LENGTH} 个字符，请重新发送。"
+                )
+                raise ApplicationHandlerStop
+            else:
+                rule["note"] = text
+        elif field == "channel":
             try:
                 channel_id = str(int(text_for_command))
             except ValueError:

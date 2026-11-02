@@ -3,12 +3,11 @@ import json
 import os
 import re
 import tempfile
-from telegram import ChatPermissions, Update
+from telegram import Update
 import telegram
 from telegram.ext import ContextTypes
 from utils import (
     AD_KEYWORDS_FILE,
-    WARNINGS_FILE,
     delete_later,
     get_bot_path,
     get_group_whitelist,
@@ -62,62 +61,75 @@ def is_advertisement(text: str) -> bool:
 _AD_KEYWORDS_CACHE = {}
 _WHITELIST_CACHE = {}
 _LOWER_GROUP_KEYWORDS_CACHE = {}
-AD_WARNING_LIMIT = 3
+AD_KICK_LIMIT_DEFAULT = 3
+AD_KICK_LIMIT_MIN = 1
+AD_KICK_LIMIT_MAX = 100
+# Keep automatic ad-filter violations separate from manually issued warnings.
+AD_VIOLATIONS_FILE = "data/ad_filter_violations.json"
 
 
-async def _record_ad_warning(update: Update, context: ContextTypes.DEFAULT_TYPE, user) -> tuple[int, bool]:
-    """Persist one ad warning and permanently mute the user on the third one."""
+def _ad_kick_limit(group_config: dict) -> int:
+    """Read a safe per-group repeat-offense threshold."""
+    try:
+        limit = int((group_config or {}).get("ad_filter_kick_limit", AD_KICK_LIMIT_DEFAULT))
+    except (TypeError, ValueError):
+        limit = AD_KICK_LIMIT_DEFAULT
+    return max(AD_KICK_LIMIT_MIN, min(AD_KICK_LIMIT_MAX, limit))
+
+
+async def _record_ad_violation(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    user,
+    group_config: dict,
+) -> tuple[int, bool]:
+    """Count an ad violation and kick the user when this group reaches its limit."""
     chat = update.effective_chat
     if not chat or not user:
         return 0, False
 
     chat_id = str(chat.id)
     user_id = str(user.id)
-    warnings_path = get_bot_path(context, WARNINGS_FILE)
-    warnings = load_json(warnings_path)
-    if not isinstance(warnings, dict):
-        warnings = {}
-    chat_warnings = warnings.setdefault(chat_id, {})
-    if not isinstance(chat_warnings, dict):
-        chat_warnings = {}
-        warnings[chat_id] = chat_warnings
+    limit = _ad_kick_limit(group_config)
+    violations_path = get_bot_path(context, AD_VIOLATIONS_FILE)
+    violations = load_json(violations_path)
+    if not isinstance(violations, dict):
+        violations = {}
+    chat_violations = violations.setdefault(chat_id, {})
+    if not isinstance(chat_violations, dict):
+        chat_violations = {}
+        violations[chat_id] = chat_violations
 
     try:
-        previous_count = int(chat_warnings.get(user_id, 0) or 0)
+        previous_count = int(chat_violations.get(user_id, 0) or 0)
     except (TypeError, ValueError):
         previous_count = 0
     count = previous_count + 1
-    chat_warnings[user_id] = count
-    save_json(warnings_path, warnings)
+    chat_violations[user_id] = count
+    save_json(violations_path, violations)
 
-    if count < AD_WARNING_LIMIT:
-        print(f"[广告警告] chat={chat_id} user={user_id} count={count}/{AD_WARNING_LIMIT}")
+    if count < limit:
+        print(f"[广告违规] chat={chat_id} user={user_id} count={count}/{limit}")
         return count, False
 
     try:
-        # until_date=None means a permanent restriction in the Bot API.
-        await context.bot.restrict_chat_member(
-            chat_id=chat.id,
-            user_id=user.id,
-            permissions=ChatPermissions(can_send_messages=False),
-            until_date=None,
+        # Telegram implements a kick as ban followed by immediate unban: the
+        # user leaves the group but may join again through a valid invite.
+        await context.bot.ban_chat_member(chat_id=chat.id, user_id=user.id)
+        await context.bot.unban_chat_member(
+            chat_id=chat.id, user_id=user.id, only_if_banned=True
         )
     except Exception as exc:
         print(
-            f"[广告警告] 第 {count} 次命中，但永久禁言失败 "
+            f"[广告违规] 第 {count} 次命中，但踢出群聊失败 "
             f"chat={chat_id} user={user_id}: {exc}"
         )
         return count, False
 
-    try:
-        from group.mute_registry import add_mute
-
-        add_mute(chat_id, user.id, getattr(user, "full_name", ""), source="广告累计3次警告")
-    except Exception as exc:
-        # The Telegram restriction has succeeded; a registry failure must not undo it.
-        print(f"[广告警告] 已永久禁言，但写入禁言列表失败: {exc}")
-
-    print(f"[广告警告] chat={chat_id} user={user_id} count={count}/{AD_WARNING_LIMIT} 已永久禁言")
+    # A kicked user starts over if they later rejoin the group.
+    chat_violations.pop(user_id, None)
+    save_json(violations_path, violations)
+    print(f"[广告违规] chat={chat_id} user={user_id} count={count}/{limit} 已踢出群聊")
     return count, True
 
 
@@ -435,7 +447,9 @@ async def check_for_ads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> b
     guest_bot_caller_user = api_kwargs.get("guest_bot_caller_user")
     user = msg.from_user
 
-    # 访客机器人消息不需要关键词命中，仍保留原有的删除行为。
+    # Visitor-bot-only mode leaves ordinary members' messages untouched.
+    # Visitor bot messages themselves are always deleted, without recording a
+    # violation against the caller.
     if guest_bot_caller_user:
         if await is_bot_admin(update, context):
             try:
@@ -443,6 +457,8 @@ async def check_for_ads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> b
             except Exception as exc:
                 print(f"❌ 删除 Guest Bot 消息失败: {exc}", flush=True)
         return True
+    if bool(group_config.get("ad_filter_guest_only", False)):
+        return False
 
     if not user:
         return False
@@ -482,8 +498,16 @@ async def check_for_ads(update: Update, context: ContextTypes.DEFAULT_TYPE) -> b
         print(f"[删除失败] {exc}")
         return True
 
-    # Only count a warning after the ad message has actually been recalled.
-    await _record_ad_warning(update, context, user)
+    # Delete-only mode never records violations.  The repeat counter is also
+    # intentionally inactive until the owner explicitly enables kick-on-repeat.
+    if bool(group_config.get("ad_filter_delete_only", False)) or not bool(
+        group_config.get("ad_filter_kick_enabled", False)
+    ):
+        return True
+
+    # Count only successfully recalled messages, then kick at the configured
+    # threshold (three violations by default).
+    await _record_ad_violation(update, context, user, group_config)
     return True
 
 
