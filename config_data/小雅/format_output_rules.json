@@ -1,5 +1,5 @@
 {
-    "next_id": 6,
+    "next_id": 7,
     "rules": [
         {
             "id": 1,
@@ -199,6 +199,59 @@
                 {
                     "id": 7,
                     "from": "🔰【评论区必看 】 ⬇️⬇️⬇️",
+                    "to": ""
+                }
+            ]
+        },
+        {
+            "id": 6,
+            "enabled": true,
+            "channel_id": "-1003655729399",
+            "note": "西安百花楼修车认证榜",
+            "output_template": "✨城市 #西安 \n🍃️️️️️️联系     {content}",
+            "output_entities": [
+                {
+                    "custom_emoji_id": "5775917048097939066",
+                    "length": 1,
+                    "offset": 0,
+                    "type": "custom_emoji"
+                },
+                {
+                    "custom_emoji_id": "5253944419870062295",
+                    "length": 8,
+                    "offset": 9,
+                    "type": "custom_emoji"
+                }
+            ],
+            "cut_words": [
+                "提交车评奖励"
+            ],
+            "cut_includes_word": false,
+            "personal_report_link_enabled": true,
+            "replacements": [
+                {
+                    "id": 2,
+                    "from": "类型",
+                    "to": "标签"
+                },
+                {
+                    "id": 3,
+                    "from": "👉【查车评】【写车评】👈",
+                    "to": ""
+                },
+                {
+                    "id": 4,
+                    "from": "☎️预约：点击👉联系方式",
+                    "to": ""
+                },
+                {
+                    "id": 5,
+                    "from": "条车评，综合评分",
+                    "to": ""
+                },
+                {
+                    "id": 6,
+                    "from": "#西安.",
                     "to": ""
                 }
             ]

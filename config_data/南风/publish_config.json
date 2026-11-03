@@ -47,7 +47,7 @@
     ],
     "keyword_group_reply_enabled": false,
     "keyword_group_reply_rules": [],
-    "backup_channel_id": null,
+    "backup_channel_id": -1004455955066,
     "keyword_post_search_display_mode": "main",
     "backup_channel_use_telethon": false,
     "backup_channel_session": "",

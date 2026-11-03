@@ -3990,6 +3990,7 @@ def _queue_main_publication_follow_up(
     keyword_entries: Optional[list[dict]] = None,
     mirror_to_backup: bool = False,
     report_link_embedded: bool = False,
+    comment_submission_link_enabled: bool = False,
     source_chat_id: Optional[int] = None,
     source_message_id: Optional[int] = None,
     source_message_ids: Optional[list[int]] = None,
@@ -4012,6 +4013,7 @@ def _queue_main_publication_follow_up(
         "keyword_entries": keyword_entries if isinstance(keyword_entries, list) else [],
         "mirror_to_backup": bool(mirror_to_backup),
         "report_link_embedded": bool(report_link_embedded),
+        "comment_submission_link_enabled": bool(comment_submission_link_enabled),
         "source_chat_id": _as_int(source_chat_id),
         "source_message_id": _as_int(source_message_id),
         "source_message_ids": [
@@ -4109,6 +4111,26 @@ async def _finalize_queued_main_publication(
             #     if not embedded:
             #         await _send_report_link_companion(context, channel_id, report_url)
 
+        report_url_to_append = (
+            "" if bool(publication.get("report_link_embedded", False)) else report_url
+        )
+        if bool(publication.get("comment_submission_link_enabled", False)):
+            await _append_comment_submission_link_to_original_post(
+                context,
+                source_message,
+                channel_id,
+                first_message_id,
+                report_url=report_url_to_append,
+            )
+        elif report_url_to_append:
+            await _append_report_link_to_original_post(
+                context,
+                source_message,
+                channel_id,
+                first_message_id,
+                report_url_to_append,
+            )
+
         if bool(publication.get("mirror_to_backup", False)):
             await _mirror_main_post_to_backup(
                 context,
@@ -4192,6 +4214,97 @@ async def _capture_queued_main_publication(
         )
 
 
+async def _append_post_deep_links(
+    context: ContextTypes.DEFAULT_TYPE,
+    source_message,
+    channel_id: int,
+    message_id: int,
+    *,
+    report_url: str = "",
+    comment_url: str = "",
+) -> bool:
+    """Append report/write-report links to the original post without losing entities.
+
+    The original post keeps Telegram's native discussion entry because this
+    edits its body/caption rather than attaching an inline keyboard. Existing
+    entities are retained and the newly appended links receive their own
+    ``TEXT_LINK`` entities, so formatted posts are safe too.
+    """
+    lines: list[tuple[str, int, int, str]] = []
+    if report_url:
+        prefix = "📋 老师个人报告："
+        lines.append((f"{prefix}{report_url}", len(prefix), len(report_url), report_url))
+    if comment_url:
+        label = "✍️ 写报告"
+        lines.append((label, 0, len(label), comment_url))
+    if not lines:
+        return False
+
+    text = getattr(source_message, "text", None)
+    caption = getattr(source_message, "caption", None)
+    has_media = any(
+        getattr(source_message, attribute, None)
+        for attribute in ("photo", "video", "document", "animation", "audio", "voice")
+    )
+
+    async def edit_body(body: str, entities, *, is_caption: bool) -> bool:
+        separator = "\n\n" if body else ""
+        new_body = f"{body}{separator}" + "\n".join(line[0] for line in lines)
+        limit = 1024 if is_caption else 4096
+        if len(new_body) > limit:
+            return False
+
+        new_entities = list(entities or [])
+        line_start = len(body) + len(separator)
+        for index, (line, link_offset, link_length, url) in enumerate(lines):
+            if index:
+                line_start += 1  # newline between the appended lines
+            prefix = new_body[:line_start + link_offset]
+            new_entities.append(
+                MessageEntity(
+                    type=MessageEntity.TEXT_LINK,
+                    offset=len(prefix.encode("utf-16-le")) // 2,
+                    length=len(line[link_offset:link_offset + link_length].encode("utf-16-le")) // 2,
+                    url=url,
+                )
+            )
+            line_start += len(line)
+
+        if is_caption:
+            await context.bot.edit_message_caption(
+                chat_id=channel_id,
+                message_id=message_id,
+                caption=new_body,
+                caption_entities=new_entities or None,
+            )
+        else:
+            await context.bot.edit_message_text(
+                chat_id=channel_id,
+                message_id=message_id,
+                text=new_body,
+                entities=new_entities or None,
+                disable_web_page_preview=True,
+            )
+        return True
+
+    try:
+        if text is not None:
+            return await edit_body(
+                str(text),
+                getattr(source_message, "entities", None),
+                is_caption=False,
+            )
+        if caption is not None or has_media:
+            return await edit_body(
+                str(caption or ""),
+                getattr(source_message, "caption_entities", None),
+                is_caption=True,
+            )
+    except Exception as exc:
+        print(f"追加帖子报告链接失败: {exc}")
+    return False
+
+
 async def _append_report_link_to_original_post(
     context: ContextTypes.DEFAULT_TYPE,
     source_message,
@@ -4199,37 +4312,14 @@ async def _append_report_link_to_original_post(
     message_id: int,
     report_url: str,
 ) -> bool:
-    """Append a plain deep link without replacing Telegram's discussion button.
-
-    Only plain text/plain captions are edited. Rich entities are deliberately
-    left untouched because editing them as plain text would destroy formatting.
-    """
-    link_line = f"📋 老师个人报告：{report_url}"
-    text = getattr(source_message, "text", None)
-    caption = getattr(source_message, "caption", None)
-    try:
-        if text and not getattr(source_message, "entities", None):
-            new_text = f"{text.rstrip()}\n\n{link_line}"
-            if len(new_text) <= 4096:
-                await context.bot.edit_message_text(
-                    chat_id=channel_id,
-                    message_id=message_id,
-                    text=new_text,
-                    disable_web_page_preview=True,
-                )
-                return True
-        if caption and not getattr(source_message, "caption_entities", None):
-            new_caption = f"{caption.rstrip()}\n\n{link_line}"
-            if len(new_caption) <= 1024:
-                await context.bot.edit_message_caption(
-                    chat_id=channel_id,
-                    message_id=message_id,
-                    caption=new_caption,
-                )
-                return True
-    except Exception as exc:
-        print(f"追加评论报告链接到原帖失败: {exc}")
-    return False
+    """Compatibility wrapper for adding only the personal-report link."""
+    return await _append_post_deep_links(
+        context,
+        source_message,
+        channel_id,
+        message_id,
+        report_url=report_url,
+    )
 
 
 async def _send_report_link_companion(
@@ -7294,13 +7384,17 @@ async def _start_comment_submission(query, context: ContextTypes.DEFAULT_TYPE, c
         "channel_id": channel_id,
         "message_id": message_id,
     }
-    context.user_data["waiting_post"] = True
+    context.user_data["waiting_post"] = False
     try:
         await context.bot.send_message(
             chat_id=user.id,
             text=(
-                "💬 请发送要评论的内容。\n"
-                "内容会按投稿流程审核；通过后会评论到该帖子下，并发布到转发频道。"
+                "💬 已定位到对应帖子。\n"
+                "请选择匿名投稿或实名投稿，选择后才会开始输入投稿内容。"
+            ),
+            reply_markup=_keyword_submission_mode_keyboard(
+                {"channel_id": channel_id, "message_id": message_id},
+                _fallback_channel_message_link(channel_id, message_id),
             ),
         )
     except Exception:
@@ -7325,12 +7419,32 @@ async def _comment_deep_link(
             me = await context.bot.get_me()
             username = str(getattr(me, "username", "") or "").strip().lstrip("@")
         except Exception as exc:
-            print("获取机器人用户名失败，评论按钮将使用回调模式:", exc)
+            print("获取机器人用户名失败，无法生成写报告链接:", exc)
             return None
     if not username:
         return None
     parameter = f"comment_{channel_id}_{message_id}"
     return f"https://t.me/{username}?start={parameter}"
+
+
+async def _append_comment_submission_link_to_original_post(
+    context: ContextTypes.DEFAULT_TYPE,
+    source_message,
+    channel_id: int,
+    message_id: int,
+    *,
+    report_url: str = "",
+) -> bool:
+    """Append the direct write-report link to the same main-channel message."""
+    comment_url = await _comment_deep_link(context, channel_id, message_id)
+    return await _append_post_deep_links(
+        context,
+        source_message,
+        channel_id,
+        message_id,
+        report_url=report_url,
+        comment_url=comment_url or "",
+    )
 
 
 async def handle_comment_start_parameter(
@@ -7361,11 +7475,17 @@ async def handle_comment_start_parameter(
         "channel_id": channel_id,
         "message_id": message_id,
     }
-    context.user_data["waiting_post"] = True
+    # A direct post link skips only keyword searching. It must still use the
+    # same anonymous/real-name choice and the normal review pipeline.
+    context.user_data["waiting_post"] = False
     if update.message:
         await update.message.reply_text(
-            "💬 请发送要评论的内容。\n"
-            "内容会按投稿流程审核；通过后会评论到该帖子下，并发布到转发频道。"
+            "💬 已定位到对应帖子。\n"
+            "请选择匿名投稿或实名投稿，选择后才会开始输入投稿内容。",
+            reply_markup=_keyword_submission_mode_keyboard(
+                {"channel_id": channel_id, "message_id": message_id},
+                _fallback_channel_message_link(channel_id, message_id),
+            ),
         )
     return True
 
@@ -7390,6 +7510,26 @@ def _format_output_entities(context: ContextTypes.DEFAULT_TYPE, payload: dict) -
         for entity in payload.get("entities", [])
         if isinstance(entity, dict)
     ]
+
+
+def _published_link_source(context: ContextTypes.DEFAULT_TYPE, source_message, submission: dict):
+    """Return the exact text/caption that was published before appending links."""
+    formatted = submission.get("format_output") if isinstance(submission, dict) else None
+    if not isinstance(formatted, dict):
+        return source_message
+    output_text = str(formatted.get("text") or "")
+    if not output_text:
+        return source_message
+    entities = _format_output_entities(context, formatted)
+    if bool(submission.get("format_output_is_text", False)):
+        return SimpleNamespace(text=output_text, entities=entities, caption=None)
+    return SimpleNamespace(
+        text=None,
+        caption=output_text,
+        caption_entities=entities,
+        # Marks this as media so an empty formatted caption can still be edited.
+        photo=True,
+    )
 
 
 async def _format_submission_once(
@@ -7612,11 +7752,9 @@ async def _copy_submission_to_channel(
             submission["keyword_entries"],
         )
 
-    if add_comment_button:
-        # 暂时停用“参与讨论请点击下方按钮”辅助消息及其评论按钮。
-        # 主频道正文保持无 InlineKeyboard，避免影响 Telegram 原生评论显示。
-        pass
-
+    # The post link is appended by the caller once it has the final source
+    # message.  Do not send a companion message: report and write-report links
+    # must stay on this same post.
     return published
 
 
@@ -7626,6 +7764,27 @@ def _reply_target_not_found(exc: Exception) -> bool:
     return (
         "message to be replied not found" in detail
         or "reply message not found" in detail
+    )
+
+
+def _discussion_parent_not_found(exc: Exception) -> bool:
+    """Whether a comment cannot be attached to its main-post discussion parent.
+
+    This is deliberately narrower than a general publishing failure.  A missing
+    linked-discussion message should not discard an already approved comment:
+    it can still be copied to the forwarding channel and retained in the
+    report.  Permission, flood-control, and other delivery failures must still
+    be reported to the reviewer normally.
+    """
+    detail = str(exc).lower()
+    return _reply_target_not_found(exc) or any(
+        marker in detail
+        for marker in (
+            "未能重新获取该主帖的讨论组消息",
+            "评论讨论组映射无效",
+            "重新获取的评论讨论组映射无效",
+            "该主帖在讨论组中的父消息不存在或已被删除",
+        )
     )
 
 
@@ -7701,7 +7860,13 @@ async def _publish_comment_and_forward(
     submission: dict,
     config: dict,
 ):
-    """Post approved content as a linked-discussion comment and mirror it onward."""
+    """Post approved content as a linked-discussion comment and mirror it onward.
+
+    If Telegram no longer has the automatic-forward message in the linked
+    discussion group, the comment cannot be attached below the main post.  In
+    that one recoverable case, keep the approval moving: publish the forwarding
+    copy and save it to the source post's report instead of failing the review.
+    """
     target = _comment_target_from_submission(submission)
     main_channel_id = _as_int(target.get("channel_id"))
     main_message_id = _as_int(target.get("message_id"))
@@ -7711,67 +7876,42 @@ async def _publish_comment_and_forward(
     if forward_channel_id is None:
         raise RuntimeError("未设置转发频道")
 
-    comment_map = _load_comment_map()
-    mapping = comment_map.get(_comment_map_key(main_channel_id, main_message_id))
-    if not isinstance(mapping, dict):
-        # A post copied into a replacement channel may have entered its linked
-        # discussion group before that channel became the configured main
-        # channel, so resolve and persist its native discussion parent now.
-        mapping = await _refresh_discussion_mapping_for_post(
-            context,
-            config,
-            main_channel_id,
-            main_message_id,
-            comment_map,
-        )
+    # A submission may be retried after a previous review attempt.  Do not
+    # carry a stale fallback flag into a successful retry.
+    submission.pop("comment_report_only", None)
+    submission.pop("comment_report_only_reason", None)
 
-    discussion_chat_id = _as_int(mapping.get("discussion_chat_id"))
-    discussion_message_id = _as_int(mapping.get("discussion_message_id"))
-    if discussion_chat_id is None or discussion_message_id is None:
-        raise RuntimeError("评论讨论组映射无效")
-
-    # Main posts created in comment mode have no inline markup, so this reply
-    # is shown as a native comment below the original channel post.  Unlike the
-    # channel post itself, a discussion reply can safely carry the configured
-    # comment buttons.
-    # Keep a serializable snapshot so later administrator edits can put back
-    # the exact button layout that was attached to this comment.
-    submission["comment_button_config"] = _comment_button_config_snapshot(config)
-    comment_reply_markup = publish_buttons_keyboard(
-        config,
-        button_key="comment_buttons",
-    )
     main_comment = None
     try:
-        main_comment = await _copy_submission_to_discussion(
-            context,
-            submission,
-            discussion_chat_id,
-            discussion_message_id,
-            reply_markup=comment_reply_markup,
-        )
-    except BadRequest as exc:
-        if not _reply_target_not_found(exc):
-            raise
+        comment_map = _load_comment_map()
+        mapping = comment_map.get(_comment_map_key(main_channel_id, main_message_id))
+        if not isinstance(mapping, dict):
+            # A post copied into a replacement channel may have entered its
+            # linked discussion group before that channel became the configured
+            # main channel, so resolve and persist its native parent now.
+            mapping = await _refresh_discussion_mapping_for_post(
+                context,
+                config,
+                main_channel_id,
+                main_message_id,
+                comment_map,
+            )
 
-        # The map existed but pointed at a deleted/migrated automatic-forward
-        # message. Rebuild it once, then retry exactly once; never fall back to
-        # a standalone group message because it would not be a channel comment.
-        print(
-            "评论讨论组父消息失效，正在刷新映射 "
-            f"channel={main_channel_id} message={main_message_id}: {exc}"
-        )
-        mapping = await _refresh_discussion_mapping_for_post(
-            context,
-            config,
-            main_channel_id,
-            main_message_id,
-            comment_map,
-        )
         discussion_chat_id = _as_int(mapping.get("discussion_chat_id"))
         discussion_message_id = _as_int(mapping.get("discussion_message_id"))
         if discussion_chat_id is None or discussion_message_id is None:
-            raise RuntimeError("重新获取的评论讨论组映射无效")
+            raise RuntimeError("评论讨论组映射无效")
+
+        # Main posts created in comment mode have no inline markup, so this
+        # reply is shown as a native comment below the original channel post.
+        # Unlike the channel post itself, a discussion reply can safely carry
+        # the configured comment buttons.  Preserve the snapshot for later
+        # report-editor updates.
+        submission["comment_button_config"] = _comment_button_config_snapshot(config)
+        comment_reply_markup = publish_buttons_keyboard(
+            config,
+            button_key="comment_buttons",
+        )
         try:
             main_comment = await _copy_submission_to_discussion(
                 context,
@@ -7780,17 +7920,60 @@ async def _publish_comment_and_forward(
                 discussion_message_id,
                 reply_markup=comment_reply_markup,
             )
-        except BadRequest as retry_exc:
-            if _reply_target_not_found(retry_exc):
-                raise RuntimeError(
-                    "该主帖在讨论组中的父消息不存在或已被删除，无法作为评论发布。"
-                    "请确认频道的讨论组未迁移、主帖仍可打开，然后重新审核。"
-                ) from retry_exc
+        except BadRequest as exc:
+            if not _reply_target_not_found(exc):
+                raise
+
+            # The map existed but pointed at a deleted/migrated automatic-
+            # forward message. Rebuild it once, then retry exactly once.
+            print(
+                "评论讨论组父消息失效，正在刷新映射 "
+                f"channel={main_channel_id} message={main_message_id}: {exc}"
+            )
+            mapping = await _refresh_discussion_mapping_for_post(
+                context,
+                config,
+                main_channel_id,
+                main_message_id,
+                comment_map,
+            )
+            discussion_chat_id = _as_int(mapping.get("discussion_chat_id"))
+            discussion_message_id = _as_int(mapping.get("discussion_message_id"))
+            if discussion_chat_id is None or discussion_message_id is None:
+                raise RuntimeError("重新获取的评论讨论组映射无效")
+            try:
+                main_comment = await _copy_submission_to_discussion(
+                    context,
+                    submission,
+                    discussion_chat_id,
+                    discussion_message_id,
+                    reply_markup=comment_reply_markup,
+                )
+            except BadRequest as retry_exc:
+                if _reply_target_not_found(retry_exc):
+                    raise RuntimeError(
+                        "该主帖在讨论组中的父消息不存在或已被删除，无法作为评论发布。"
+                    ) from retry_exc
+                raise
+    except Exception as exc:
+        if not _discussion_parent_not_found(exc):
             raise
-    submission["main_discussion_chat_id"] = discussion_chat_id
-    submission["main_discussion_message_id"] = _as_int(
-        getattr(main_comment, "message_id", None)
-    )
+        # Do not store a known-invalid discussion reply ID in the report.  The
+        # forwarding-channel copy below remains a durable public reference.
+        submission.pop("main_discussion_chat_id", None)
+        submission.pop("main_discussion_message_id", None)
+        submission["comment_report_only"] = True
+        submission["comment_report_only_reason"] = str(exc)[:500]
+        print(
+            "未找到主频道讨论组父消息，评论将仅收录到报告并继续转发 "
+            f"channel={main_channel_id} message={main_message_id}: {exc}"
+        )
+    else:
+        submission["main_discussion_chat_id"] = discussion_chat_id
+        submission["main_discussion_message_id"] = _as_int(
+            getattr(main_comment, "message_id", None)
+        )
+
     submission["forward_channel_id"] = forward_channel_id
     forwarded = await _copy_submission_to_channel(
         context,
@@ -7801,15 +7984,20 @@ async def _publish_comment_and_forward(
     )
     if getattr(forwarded, "scheduled", False):
         return forwarded
-    await _publish_comment_to_backup_discussion(
-        context,
-        submission,
-        config,
-        main_channel_id,
-        main_message_id,
-    )
+
+    # There is no main-discussion reply to mirror when Telegram lost the
+    # parent.  The forwarding copy is still recorded in the report below.
+    if main_comment is not None:
+        await _publish_comment_to_backup_discussion(
+            context,
+            submission,
+            config,
+            main_channel_id,
+            main_message_id,
+        )
     # This must happen after the backup copy: _append_report_comment persists
-    # all three public message IDs for future administrator edits.
+    # every available public message ID for future administrator edits.  In the
+    # report-only fallback it intentionally stores no main-discussion IDs.
     _append_report_comment(submission, forwarded)
     return forwarded
 
@@ -7933,6 +8121,13 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
                 "✅ 投稿已通过，Telegram 正在排队发布；实际发出后会自动收录关键词和打卡。"
             )
 
+        comment_fallback_notice = ""
+        if submission.get("comment_report_only"):
+            comment_fallback_notice = (
+                "\n\n⚠️ 未找到主频道对应的讨论组消息；"
+                "评论已继续发布到转发频道并收录到报告链接。"
+            )
+
         data = _load_cannel_message()
         data.append({
             "user_id": submission.get("user_id"),
@@ -7949,7 +8144,11 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
         try:
             await context.bot.send_message(
                 chat_id=submission["user_chat_id"],
-                text="✅ 您的投稿已审核通过，并已发布到频道。" + reward_notice,
+                text=(
+                    "✅ 您的投稿已审核通过，并已发布到频道。"
+                    + comment_fallback_notice
+                    + reward_notice
+                ),
             )
         except Exception as exc:
             print("投稿通过通知失败:", exc)
@@ -7959,7 +8158,9 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
         except Exception as exc:
             print("更新审核消息失败:", exc)
         await query.answer("投稿已通过并发布。")
-        return await query.message.reply_text("✅ 已通过投稿并发布到频道。")
+        return await query.message.reply_text(
+            "✅ 已通过投稿并发布到频道。" + comment_fallback_notice
+        )
 
     if action == "review_reject":
         if bool(config.get("reject_reason_required", False)):
@@ -9377,6 +9578,9 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 keyword_entries=entries,
                 mirror_to_backup=True,
                 report_link_embedded=bool(report_url),
+                comment_submission_link_enabled=bool(
+                    config.get("comment_forward_enabled", False)
+                ),
             )
             context.user_data.pop(TEMPLATE_FLOW_KEY, None)
             await query.answer("Telegram 正在排队发布模板。")
@@ -9386,6 +9590,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     [InlineKeyboardButton("⬅️ 返回首页", callback_data="start:back")]
                 ]),
             )
+        published_source = published
         published = SimpleNamespace(message_id=published_message_id, scheduled=False)
         if bool(config.get("comment_forward_enabled", False)) or bool(
             config.get("collection_display_enabled", False)
@@ -9398,6 +9603,13 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 published.message_id,
                 report_id,
                 subject_entries=entries,
+            )
+        if bool(config.get("comment_forward_enabled", False)):
+            await _append_comment_submission_link_to_original_post(
+                context,
+                published_source,
+                channel_id_int,
+                published.message_id,
             )
         await _mirror_main_post_to_backup(
             context,
@@ -10998,6 +11210,11 @@ async def _handle_wall_publish_message(
                     report_url=report_url,
                     keyword_entries=submission.get("keyword_entries", []),
                     mirror_to_backup=True,
+                    comment_submission_link_enabled=(
+                        comment_forward_enabled
+                        and is_owner_submission
+                        and submission_kind == "main"
+                    ),
                     source_chat_id=msg.chat_id,
                     source_message_id=msg.message_id,
                     source_message_ids=_submission_message_ids(submission),
@@ -11013,23 +11230,29 @@ async def _handle_wall_publish_message(
                 report_id,
                 subject_entries=submission.get("keyword_entries", []),
             )
-            embedded = await _append_report_link_to_original_post(
+
+        should_append_comment_link = bool(
+            comment_forward_enabled
+            and is_owner_submission
+            and submission_kind == "main"
+        )
+        link_source = _published_link_source(context, msg, submission)
+        if should_append_comment_link:
+            await _append_comment_submission_link_to_original_post(
                 context,
-                msg,
+                link_source,
+                int(target_channel_id),
+                published.message_id,
+                report_url=report_url,
+            )
+        elif report_url:
+            await _append_report_link_to_original_post(
+                context,
+                link_source,
                 int(target_channel_id),
                 published.message_id,
                 report_url,
             )
-            # 单独发一条 不需要先注释掉
-            # if not embedded:
-            #     try:
-            #         await _send_report_link_companion(
-            #             context, int(target_channel_id), report_url
-            #         )
-            #     except Exception as exc:
-            #         # The report remains available by deep link; failure to
-            #         # send the fallback companion must not roll back the post.
-            #         print(f"发送评论报告入口失败: {exc}")
         if submission_kind == "main":
             await _mirror_main_post_to_backup(
                 context,

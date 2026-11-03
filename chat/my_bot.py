@@ -3,6 +3,7 @@ import random
 import re
 import time
 import difflib
+import hashlib
 import telegram
 from datetime import date
 from typing import Optional
@@ -111,6 +112,7 @@ AD_PUSH_MODE_FIXED = "fixed"
 AD_PUSH_DEFAULT_INTERVAL_MIN = 120
 AD_PUSH_MIN_INTERVAL_MIN = 5
 AD_PUSH_MAX_INTERVAL_MIN = 1440
+AD_DELIVERY_HISTORY_LIMIT = 20
 
 JOKE_CACHE = {}
 last_active_speak_ts = {}
@@ -1518,7 +1520,7 @@ async def _global_ad_push_to_groups(
                 AD_PUSH_MIN_INTERVAL_MIN, min(AD_PUSH_MAX_INTERVAL_MIN, interval_min)
             )
             current_minute = int(now_ts // 60)
-            offset_min = abs(hash(ad_key)) % interval_min
+            offset_min = _stable_ad_interval_offset(ad_key, interval_min)
             should_send = current_minute % interval_min == offset_min
             if now_ts - last_global_ad_push_ts.get(ad_key, 0) < interval_min * 60:
                 should_send = False
@@ -1555,6 +1557,59 @@ async def _global_ad_push_to_groups(
             last_global_ad_push_ts[ad_key] = now_ts
         if sent:
             print(f"✅ 全群广告已发送 ad={ad_id} 至 {sent} 个群")
+
+
+def _stable_ad_interval_offset(ad_key: str, interval_min: int) -> int:
+    """Return a restart-stable minute offset for an interval advertisement."""
+    digest = hashlib.sha256(ad_key.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % max(1, int(interval_min))
+
+
+def _ad_timestamp(value) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _record_group_ad_delivery(
+    context: ContextTypes.DEFAULT_TYPE,
+    ad: dict,
+    *,
+    succeeded: bool,
+    now_ts: float,
+    error: Optional[Exception] = None,
+    message_id=None,
+    slot: str = "",
+) -> None:
+    """Persist a bounded delivery history so scheduled-ad failures are inspectable."""
+    event = {
+        "at": int(now_ts),
+        "time": bot_now(context).strftime("%Y-%m-%d %H:%M:%S"),
+        "status": "success" if succeeded else "failed",
+        "message_id": getattr(message_id, "message_id", message_id),
+    }
+    if slot:
+        event["slot"] = slot
+    if error is not None:
+        event["error"] = str(error)[:500]
+
+    history = ad.get("delivery_history")
+    if not isinstance(history, list):
+        history = []
+    history.append(event)
+    ad["delivery_history"] = history[-AD_DELIVERY_HISTORY_LIMIT:]
+    ad["last_delivery"] = event
+    ad["last_attempt_at"] = int(now_ts)
+
+    if succeeded:
+        ad["last_sent_at"] = int(now_ts)
+        ad["last_sent_time"] = event["time"]
+        if slot:
+            ad["last_sent_slot"] = slot
+    else:
+        ad["last_failed_at"] = int(now_ts)
+        ad["last_failure"] = event
 
 
 def _group_ad_records(cfg: dict) -> list[dict]:
@@ -1618,8 +1673,11 @@ async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
                 slots = _parse_fixed_slots(str(ad.get("times", "")))
                 if not slots or current_hm not in slots:
                     continue
-                slot_key = f"{ad_key}:{current_hm}"
-                if last_ad_push_slot.get(ad_key) == slot_key:
+                slot_key = f"{bot_now(context).strftime('%Y-%m-%d')} {current_hm}"
+                if (
+                    last_ad_push_slot.get(ad_key) == slot_key
+                    or str(ad.get("last_sent_slot") or "") == slot_key
+                ):
                     continue
                 try:
                     sent_message = await send_message_payload(
@@ -1631,7 +1689,17 @@ async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
                     )
                     await _pin_ad_message_if_enabled(context.bot, int(chat_id), sent_message, ad)
                     last_ad_push_slot[ad_key] = slot_key
+                    _record_group_ad_delivery(
+                        context, ad, succeeded=True, now_ts=now_ts,
+                        message_id=sent_message, slot=slot_key,
+                    )
+                    save_json(GROUP_LIST_FILE, groups)
                 except Exception as exc:
+                    _record_group_ad_delivery(
+                        context, ad, succeeded=False, now_ts=now_ts,
+                        error=exc, slot=slot_key,
+                    )
+                    save_json(GROUP_LIST_FILE, groups)
                     print(f"⚠️ 群广告定时发送失败 ad={ad_id} chat={chat_id}: {exc}")
                 continue
 
@@ -1643,10 +1711,14 @@ async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
                 min(AD_PUSH_MAX_INTERVAL_MIN, interval_min),
             )
             current_minute = int(now_ts // 60)
-            offset_min = abs(hash(ad_key)) % interval_min
+            offset_min = _stable_ad_interval_offset(ad_key, interval_min)
             if current_minute % interval_min != offset_min:
                 continue
-            if now_ts - last_ad_push_ts.get(ad_key, 0) < interval_min * 60:
+            last_sent_at = max(
+                last_ad_push_ts.get(ad_key, 0),
+                _ad_timestamp(ad.get("last_sent_at")),
+            )
+            if now_ts - last_sent_at < interval_min * 60:
                 continue
             try:
                 sent_message = await send_message_payload(
@@ -1658,7 +1730,15 @@ async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
                 )
                 await _pin_ad_message_if_enabled(context.bot, int(chat_id), sent_message, ad)
                 last_ad_push_ts[ad_key] = now_ts
+                _record_group_ad_delivery(
+                    context, ad, succeeded=True, now_ts=now_ts, message_id=sent_message,
+                )
+                save_json(GROUP_LIST_FILE, groups)
             except Exception as exc:
+                _record_group_ad_delivery(
+                    context, ad, succeeded=False, now_ts=now_ts, error=exc,
+                )
+                save_json(GROUP_LIST_FILE, groups)
                 print(f"⚠️ 群广告间隔发送失败 ad={ad_id} chat={chat_id}: {exc}")
 
 @group_allowed
