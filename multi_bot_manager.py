@@ -106,17 +106,11 @@ def _load_bot_publish_config(name: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _teacher_list_enabled_for_bot(name: str) -> bool:
-    return bool(_load_bot_publish_config(name).get("collection_display_enabled", False))
-
-
-def _set_teacher_list_enabled_for_bot(name: str, enabled: bool) -> bool:
-    """Atomically persist the teacher-list gate for the selected bot."""
+def _save_bot_publish_config(name: str, config: dict) -> bool:
+    """Atomically save one selected bot's isolated 投稿 configuration."""
     path = _publish_config_path_for_bot(name)
     if not path:
         return False
-    config = _load_bot_publish_config(name)
-    config["collection_display_enabled"] = bool(enabled)
     directory = os.path.dirname(path)
     temporary_path = ""
     try:
@@ -136,6 +130,44 @@ def _set_teacher_list_enabled_for_bot(name: str, enabled: bool) -> bool:
             except OSError:
                 pass
         return False
+
+
+def _teacher_list_enabled_for_bot(name: str) -> bool:
+    return bool(_load_bot_publish_config(name).get("collection_display_enabled", False))
+
+
+def _set_teacher_list_enabled_for_bot(name: str, enabled: bool) -> bool:
+    """Atomically persist the teacher-list gate for the selected bot."""
+    config = _load_bot_publish_config(name)
+    config["collection_display_enabled"] = bool(enabled)
+    return _save_bot_publish_config(name, config)
+
+
+def input_search_enabled_for_bot(name: str) -> bool:
+    """Return whether ordinary private input should search collected posts."""
+    return bool(_load_bot_publish_config(name).get("input_search_enabled", False))
+
+
+def _input_search_restore_private_forward_for_bot(name: str) -> bool:
+    return bool(
+        _load_bot_publish_config(name).get(
+            "input_search_restore_private_forward", False
+        )
+    )
+
+
+def _set_input_search_for_bot(
+    name: str,
+    enabled: bool,
+    *,
+    restore_private_forward: bool,
+) -> bool:
+    config = _load_bot_publish_config(name)
+    config["input_search_enabled"] = bool(enabled)
+    config["input_search_restore_private_forward"] = bool(
+        restore_private_forward
+    )
+    return _save_bot_publish_config(name, config)
 
 
 def _is_master_panel(context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -666,6 +698,7 @@ def _build_current_bot_settings_keyboard(cfg: dict) -> InlineKeyboardMarkup:
     keyboard_status = "✅ 已开启" if start_reply_keyboard_enabled() else "🚫 已关闭"
     bot_name = str((cfg or {}).get("name", "")).strip()
     teacher_list_enabled = _teacher_list_enabled_for_bot(bot_name)
+    input_search_enabled = input_search_enabled_for_bot(bot_name)
     return InlineKeyboardMarkup(
         [
             [
@@ -684,6 +717,12 @@ def _build_current_bot_settings_keyboard(cfg: dict) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     f"⌨️ /start 弹出键盘：{keyboard_status}",
                     callback_data=f"{CALLBACK_PREFIX}:start_keyboard_toggle",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    f"{'✅' if input_search_enabled else '🚫'} 输入搜索",
+                    callback_data=f"{CALLBACK_PREFIX}:input_search_toggle",
                 )
             ],
             # [
@@ -822,6 +861,7 @@ async def handle_multi_bot_callback(update: Update, context: ContextTypes.DEFAUL
         "start_welcome_reset",
         "start_welcome_cancel",
         "start_keyboard_toggle",
+        "input_search_toggle",
     }:
         cfg = _current_bot_config(context)
         if not cfg:
@@ -866,6 +906,48 @@ async def handle_multi_bot_callback(update: Update, context: ContextTypes.DEFAUL
             context.user_data.pop(START_WELCOME_RETURN_TO_SETTINGS_KEY, None)
             await query.answer("已取消欢迎词修改。")
             return await _show_start_welcome_settings(query, cfg)
+
+        if action == "input_search_toggle":
+            bot_name = str(cfg.get("name", "")).strip()
+            enabled = not input_search_enabled_for_bot(bot_name)
+            restore_private_forward = _input_search_restore_private_forward_for_bot(
+                bot_name
+            )
+            runtime_features = set(
+                context.application.bot_data.get("enabled_features", [])
+            )
+            managed_features = set(cfg.get("enabled_features", []))
+
+            if enabled:
+                restore_private_forward = "private_forward" in runtime_features
+                runtime_features.discard("private_forward")
+                managed_features.discard("private_forward")
+            elif restore_private_forward:
+                runtime_features.add("private_forward")
+                managed_features.add("private_forward")
+                restore_private_forward = False
+
+            if not _set_input_search_for_bot(
+                bot_name,
+                enabled,
+                restore_private_forward=restore_private_forward,
+            ):
+                return await query.answer("保存输入搜索设置失败。", show_alert=True)
+
+            # The current bot takes effect immediately. Managed bots also save
+            # the mutually exclusive private-forward feature for the next start.
+            context.application.bot_data["input_search_enabled"] = enabled
+            context.application.bot_data["enabled_features"] = runtime_features
+            if bool(cfg.get("managed")):
+                update_managed_bot_features(bot_name, sorted(managed_features))
+            update_running_bot_features(bot_name, sorted(runtime_features))
+
+            await query.answer(
+                "已开启输入搜索，并关闭双向机器人。"
+                if enabled
+                else "已关闭输入搜索，双向机器人已恢复到开启前状态。"
+            )
+            return await _show_current_bot_settings(query, cfg)
 
         enabled = not start_reply_keyboard_enabled()
         set_start_reply_keyboard_enabled(enabled)

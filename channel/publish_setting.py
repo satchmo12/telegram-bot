@@ -126,6 +126,10 @@ async def _retry_flood_control(operation, *, action: str):
 # update. Buffer them briefly so a 投稿 album is reviewed and copied as one post.
 MEDIA_GROUP_BUFFER_KEY = "publish_pending_media_groups"
 MEDIA_GROUP_WAIT_SECONDS = 20.0
+# Posts published by the 投稿 flow already add their own write-report action.
+# Keep their later channel_post update from adding it a second time when the
+# direct-channel feature below is enabled.
+CHANNEL_POST_WRITE_REPORT_SKIP_KEY = "channel_post_write_report_skip"
 
 # A manually published main-channel album is delivered in the same way: one
 # ``channel_post`` update per item.  Delay its backup copy until all items have
@@ -193,6 +197,9 @@ def load_publish_config():
         
         # Generate a public Telegram deep link for comments under admin posts.
         "report_link_enabled": False,
+        # Add the direct “写报告” action to posts sent directly in the main
+        # channel (rather than through the 投稿 flow).
+        "channel_post_write_report_enabled": False,
         # Structured template publishing for administrators.
         "template_publish_enabled": False,
         "publish_templates": [],
@@ -204,6 +211,12 @@ def load_publish_config():
         "keyword_group_reply_rules": [],
         # Private “查找收录” result source: main / backup / all.
         "keyword_post_search_display_mode": "main",
+        # When enabled from 机器人设置, every ordinary private text message is
+        # treated as a collected-post lookup instead of a bidirectional chat.
+        "input_search_enabled": False,
+        # Internal state used to restore the former private-forward setting
+        # when input search is switched off again.
+        "input_search_restore_private_forward": False,
         # Channel-post check-in / online roster settings.
         "checkin_enabled": False,
         "checkin_duration_hours": 8,
@@ -745,6 +758,15 @@ async def _flush_main_channel_media_group_backup(context: ContextTypes.DEFAULT_T
 
     # Reload the configuration so a just-changed backup target is respected.
     config = load_publish_config()
+    source_message = entry.get("source_message")
+    if (
+        bool(config.get("channel_post_write_report_enabled", False))
+        and bool(config.get("comment_forward_enabled", False))
+        and source_message is not None
+    ):
+        await _append_comment_submission_link_to_original_post(
+            context, source_message, main_channel_id, message_ids[0]
+        )
     await _mirror_main_post_to_backup(
         context,
         config,
@@ -774,11 +796,15 @@ async def _queue_main_channel_media_group_backup(
         {
             "main_channel_id": main_channel_id,
             "message_ids": [],
+            "source_message": msg,
             "revision": 0,
         },
     )
     if message_id not in entry["message_ids"]:
         entry["message_ids"].append(message_id)
+    current_source_id = _as_int(getattr(entry.get("source_message"), "message_id", None))
+    if current_source_id is None or message_id < current_source_id:
+        entry["source_message"] = msg
     entry["revision"] = int(entry.get("revision") or 0) + 1
 
     context.job_queue.run_once(
@@ -6477,9 +6503,31 @@ async def _send_keyword_post_result(
 
 
 async def _handle_keyword_post_search_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Handle post lookup only after the user explicitly opened search."""
-    if not (context.user_data or {}).get(KEYWORD_POST_SEARCH_INPUT_KEY):
+    """Handle explicit or always-on private collected-post lookup."""
+    config = load_publish_config()
+    always_on = bool(config.get("input_search_enabled", False))
+    user_data = context.user_data or {}
+    if not always_on and not user_data.get(KEYWORD_POST_SEARCH_INPUT_KEY):
         return False
+
+    # A global input-search mode must not steal text that belongs to an active
+    # submission, review, welcome-word, or multi-bot management flow.
+    if any(
+        user_data.get(key)
+        for key in (
+            "waiting_post",
+            REJECT_REASON_KEY,
+            TEMPLATE_DRAFT_KEY,
+            TEMPLATE_FLOW_KEY,
+            KEYWORD_LABEL_INPUT_KEY,
+            PENDING_PROOF_KEY,
+            "start_welcome_edit",
+            "private_forward_self_service_stage",
+            "multi_bot_stage",
+        )
+    ):
+        return False
+
     msg = update.message
     if not msg or not msg.text or not update.effective_chat:
         return True
@@ -6490,12 +6538,18 @@ async def _handle_keyword_post_search_input(update: Update, context: ContextType
     if query in {"取消", "返回"}:
         context.user_data.pop(KEYWORD_POST_SEARCH_INPUT_KEY, None)
         context.user_data.pop(KEYWORD_POST_RESULTS_KEY, None)
-        await msg.reply_text(
-            "已取消帖子关键词查询。",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ 返回首页", callback_data="start:back")]
-            ]),
-        )
+        if always_on:
+            await msg.reply_text(
+                "🔎 输入搜索已开启，请继续输入要查询的收录关键词。"
+                "如需退出该模式，请让管理员在“机器人设置”中关闭“输入搜索”。"
+            )
+        else:
+            await msg.reply_text(
+                "已取消帖子关键词查询。",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⬅️ 返回首页", callback_data="start:back")]
+                ]),
+            )
         return True
     if not query or len(query) > 64 or "\n" in query or any(char.isspace() for char in query):
         await msg.reply_text("❗ 请发送一个不含空格的关键词，例如：悠悠 或 @youyouabc。")
@@ -7197,7 +7251,14 @@ async def _capture_comment_source_message(
             msg.message_id,
             entries,
         )
-                    
+
+        # 投稿-created posts already attach their own write-report action.
+        # Remember this one-shot marker before deciding whether this is a direct
+        # channel post or a queued 投稿 delivery.
+        submission_owns_write_report_link = _consume_submission_write_report_link_marker(
+            context, main_channel_id, msg.message_id
+        )
+
         # 判断这条消息是否属于机器人发布队列。
         # 队列中的消息由 _finalize_queued_main_publication 负责备份，
         # 这里不能再次复制，否则会造成备用频道重复。
@@ -7213,15 +7274,32 @@ async def _capture_comment_source_message(
                 main_channel_id,
             )
         else:
+            # This setting is for posts sent directly in the configured channel.
+            # A 投稿-created post owns its write-report action and must not get
+            # a second one from its later channel_post update.
+            add_write_report_link = bool(
+                config.get("channel_post_write_report_enabled", False)
+            ) and bool(config.get("comment_forward_enabled", False))
+            is_media_group = bool(getattr(msg, "media_group_id", None))
+
             # Telegram sends every manually posted album item as an individual
-            # channel_post update.  Wait for the complete group before copying;
-            # otherwise the backup receives several unrelated single photos.
-            if (
-                getattr(msg, "media_group_id", None)
-                and _backup_channel_id(config, main_channel_id) is not None
-            ):
-                await _queue_main_channel_media_group_backup(context, msg)
+            # channel_post update. Wait for the complete group so the first
+            # album item gets one write-report link and the backup remains one
+            # grouped album.
+            if is_media_group:
+                if (
+                    not submission_owns_write_report_link
+                    and (
+                        _backup_channel_id(config, main_channel_id) is not None
+                        or add_write_report_link
+                    )
+                ):
+                    await _queue_main_channel_media_group_backup(context, msg)
             else:
+                if add_write_report_link and not submission_owns_write_report_link:
+                    await _append_comment_submission_link_to_original_post(
+                        context, msg, main_channel_id, msg.message_id
+                    )
                 # A non-album post can be mirrored immediately.
                 await _mirror_main_post_to_backup(
                     context,
@@ -7427,6 +7505,41 @@ async def _comment_deep_link(
     return f"https://t.me/{username}?start={parameter}"
 
 
+def _mark_submission_write_report_link(
+    context: ContextTypes.DEFAULT_TYPE,
+    channel_id: int,
+    message_id: int,
+) -> None:
+    """Mark a 投稿-created post whose write-report link is handled by 投稿."""
+    markers = context.application.bot_data.setdefault(
+        CHANNEL_POST_WRITE_REPORT_SKIP_KEY, set()
+    )
+    if not isinstance(markers, set):
+        markers = set()
+        context.application.bot_data[CHANNEL_POST_WRITE_REPORT_SKIP_KEY] = markers
+    # Channel message IDs never repeat. Keep the transient guard bounded so a
+    # long-running bot does not retain one entry for every historical post.
+    if len(markers) >= 2000:
+        markers.clear()
+    markers.add((int(channel_id), int(message_id)))
+
+
+def _consume_submission_write_report_link_marker(
+    context: ContextTypes.DEFAULT_TYPE,
+    channel_id: int,
+    message_id: int,
+) -> bool:
+    """Return whether 投稿 already owns the write-report link for this post."""
+    markers = context.application.bot_data.get(CHANNEL_POST_WRITE_REPORT_SKIP_KEY)
+    if not isinstance(markers, set):
+        return False
+    marker = (int(channel_id), int(message_id))
+    if marker not in markers:
+        return False
+    markers.remove(marker)
+    return True
+
+
 async def _append_comment_submission_link_to_original_post(
     context: ContextTypes.DEFAULT_TYPE,
     source_message,
@@ -7488,6 +7601,19 @@ async def handle_comment_start_parameter(
             ),
         )
     return True
+
+
+def _format_output_embeds_report_url(format_output: Optional[dict], report_url: str) -> bool:
+    """Return whether a formatter rule already added this exact report link.
+
+    Format-output rules can append a personal report link before the normal
+    投稿 pipeline runs.  The publish pipeline also adds its report link after
+    the channel message has an ID.  When both features resolve to the same
+    URL, adding it again produces two identical report links.
+    """
+    if not report_url or not isinstance(format_output, dict):
+        return False
+    return report_url in str(format_output.get("text") or "")
 
 
 def _serialize_format_output(
@@ -7737,6 +7863,12 @@ async def _copy_submission_to_channel(
 
     if len(message_ids) == 1:
         published.message_ids = [published.message_id]
+
+    if add_comment_button:
+        for published_message_id in published.message_ids:
+            _mark_submission_write_report_link(
+                context, int(target_channel_id), int(published_message_id)
+            )
 
     if register_keywords and submission.get("keyword_entries"):
         _register_post_keywords(
@@ -8762,6 +8894,9 @@ def publish_setting_keyboard(config: dict):
     comment_forward_enabled = bool(config.get("comment_forward_enabled", False))
     continuous_submission_enabled = bool(config.get("continuous_submission_enabled", True))
     report_link_enabled = bool(config.get("report_link_enabled", False))
+    channel_post_write_report_enabled = bool(
+        config.get("channel_post_write_report_enabled", False)
+    )
     template_publish_enabled = bool(config.get("template_publish_enabled", False))
     rows = [
         [
@@ -8840,6 +8975,12 @@ def publish_setting_keyboard(config: dict):
                      callback_data="publish:report_username_migrate",
                  ),
          ],
+        [
+            InlineKeyboardButton(
+                f"{'✅' if channel_post_write_report_enabled else '🚫'} 频道发帖写报告",
+                callback_data="publish:toggle_channel_post_write_report",
+            ),
+        ],
         [InlineKeyboardButton(
             "🔄 一键迁移历史评论到当前转发频道(防止转发频道炸了)",
             callback_data="publish:migrate_forward_comments",
@@ -9592,6 +9733,10 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         published_source = published
         published = SimpleNamespace(message_id=published_message_id, scheduled=False)
+        if bool(config.get("comment_forward_enabled", False)):
+            _mark_submission_write_report_link(
+                context, channel_id_int, published.message_id
+            )
         if bool(config.get("comment_forward_enabled", False)) or bool(
             config.get("collection_display_enabled", False)
         ):
@@ -9821,6 +9966,21 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             note += "\n⚠️ 请同时开启“评论并转发”。"
         return await query.edit_message_text(
             f"报告链接已{'开启' if config['report_link_enabled'] else '关闭'}。\n{note}",
+            reply_markup=publish_setting_keyboard(config),
+        )
+
+    if action == "toggle_channel_post_write_report":
+        config["channel_post_write_report_enabled"] = not bool(
+            config.get("channel_post_write_report_enabled", False)
+        )
+        save_publish_config(config)
+        note = (
+            "直接在发布频道发送新帖子时，机器人会在帖子底部追加“✍️ 写报告”入口。"
+        )
+        if not bool(config.get("comment_forward_enabled", False)):
+            note += "\n⚠️ 还需要开启“评论并转发”，用户才能提交报告。"
+        return await query.edit_message_text(
+            f"频道发帖写报告已{'开启' if config['channel_post_write_report_enabled'] else '关闭'}。\n{note}",
             reply_markup=publish_setting_keyboard(config),
         )
 
@@ -11181,6 +11341,13 @@ async def _handle_wall_publish_message(
         report_id = _report_id_from_subject_entries(submission.get("keyword_entries", []))
         report_url = await _report_deep_link(context, report_id) or ""
 
+    # A matched format-output rule may already have appended the same report
+    # URL. Keep that formatter-owned link and only append the write-report
+    # action below; otherwise the published post gets two report links.
+    report_link_embedded = _format_output_embeds_report_url(
+        format_output, report_url
+    )
+
     try:
         if submission_kind == "comment":
             published = await _publish_comment_and_forward(context, {
@@ -11210,6 +11377,7 @@ async def _handle_wall_publish_message(
                     report_url=report_url,
                     keyword_entries=submission.get("keyword_entries", []),
                     mirror_to_backup=True,
+                    report_link_embedded=report_link_embedded,
                     comment_submission_link_enabled=(
                         comment_forward_enabled
                         and is_owner_submission
@@ -11243,9 +11411,9 @@ async def _handle_wall_publish_message(
                 link_source,
                 int(target_channel_id),
                 published.message_id,
-                report_url=report_url,
+                report_url="" if report_link_embedded else report_url,
             )
-        elif report_url:
+        elif report_url and not report_link_embedded:
             await _append_report_link_to_original_post(
                 context,
                 link_source,

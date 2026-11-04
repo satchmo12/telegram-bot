@@ -72,6 +72,7 @@ from command_router import get_matched_command
 from admin_permissions import has_admin_permission, is_owner_or_super_admin
 
 from chat.my_bot import cleaned_word
+from multi_bot_manager import input_search_enabled_for_bot
 from chat.gemini_chat import handle_gemini_ai
 from run_daily import (
     daily_master_job,
@@ -1329,7 +1330,14 @@ def create_app(bot_cfg: dict):
     app.bot_data["token"] = token
     app.bot_data["name"] = bot_name
     app.bot_data["timezone"] = bot_cfg.get("timezone", "Asia/Shanghai")
-    app.bot_data["enabled_features"] = set(bot_cfg.get("enabled_features", []))
+    input_search_enabled = input_search_enabled_for_bot(bot_name)
+    enabled_features = set(bot_cfg.get("enabled_features", []))
+    # Input search and bidirectional private forwarding are mutually exclusive:
+    # the former must consume ordinary private text as a collected-post lookup.
+    if input_search_enabled:
+        enabled_features.discard("private_forward")
+    app.bot_data["input_search_enabled"] = input_search_enabled
+    app.bot_data["enabled_features"] = enabled_features
     # Custom command edits can refresh Telegram's slash-command menu immediately.
     app.bot_data["refresh_bot_commands"] = set_bot_commands
     set_bot_owner(bot_name, owner_id)
