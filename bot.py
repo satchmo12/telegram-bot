@@ -641,8 +641,8 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
     # 开启后不再转发给主人
     # =========================================================
 
-    if await handle_gemini_ai(update, context):
-        raise ApplicationHandlerStop
+    # if await handle_gemini_ai(update, context):
+    #     raise ApplicationHandlerStop
 
     # =========================================================
     # 6. 机器人转发
@@ -1053,6 +1053,13 @@ def _build_start_panel_rows(
         rows.append([
             InlineKeyboardButton("老师列表", callback_data="teacher_list:primary", api_kwargs={"style": "success", "icon_custom_emoji_id": "5474525960143385880"}),
         ])
+
+    # 「上榜投稿」拥有独立状态、模板和审核队列，仅在主机器人展示。
+    # 模板管理入口仅对所有者、超级管理员和具有投稿配置权限的管理员可见。
+    if bot_name == MASTER_BOT_NAME:
+        rows.append([InlineKeyboardButton("🏆我要上榜", callback_data="rank:start")])
+        if user_id and has_admin_permission(context, int(user_id), "submission_config"):
+            rows.append([InlineKeyboardButton("🧩上榜模板", callback_data="rank:templates")])
 
     # The master bot owner can forward a channel post here and receive a
     # rule-based, reformatted copy. Rule editing lives in its own panel.

@@ -1,0 +1,14 @@
+{
+    "templates": [
+        {
+            "id": "1337b58f62",
+            "name": "老师榜单",
+            "body_html": "<tg-emoji emoji-id=\"5775917048097939066\">✨</tg-emoji>城市 #{城市}\n\n<tg-emoji emoji-id=\"5224450179368767019\">🌎</tg-emoji>区域 #{区域} \n\n <tg-emoji emoji-id=\"5253944419870062295\">🍃</tg-emoji>艺名 #{艺名}        \n\n<tg-emoji emoji-id=\"5256134032852278918\">📡</tg-emoji>联系：{飞机号} \n                                           \n<tg-emoji emoji-id=\"5224257782013769471\">💰</tg-emoji>课费：{#课费}  \n                                   \n✅标签：{#标签}",
+            "body_plain": "✨城市 #{城市}\n\n🌎区域 #{区域} \n\n 🍃艺名 #{艺名}        \n\n📡联系：{飞机号} \n                                           \n💰课费：{#课费}  \n                                   \n✅标签：{#标签}",
+            "created_at": 1793786859,
+            "updated_at": 1793797041
+        }
+    ],
+    "channel_id": null,
+    "greeting_text": "妹妹，你好👋我在 @zhaolaoshiqun【找老师群】看到你的。请问有空吗？"
+}

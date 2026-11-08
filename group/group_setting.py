@@ -53,6 +53,16 @@ from group.ai_group_reply import (
 )
 from group.event_lottery import open_lottery_creator
 from group.points_auction import open_auction_creator
+from group.points_title import (
+    ENABLED_KEY as POINTS_TITLES_ENABLED_KEY,
+    MAX_LEVELS as POINTS_TITLES_MAX_LEVELS,
+    MAX_TITLE_LENGTH as POINTS_TITLE_MAX_LENGTH,
+    RULES_KEY as POINTS_TITLES_RULES_KEY,
+    normalize_title_levels,
+    resync_known_members,
+    title_ranges_overlap,
+    title_text_is_valid,
+)
 from group.group_logger import refresh_tracked_group_memberships
 from group.grouplist import load_users
 from group.talk_lottery_settings import (
@@ -395,6 +405,8 @@ def _build_points_rules_text(chat_id: str, cfg: dict) -> str:
         f"邀请积分：{_toggle_text(bool(cfg.get('invite_points_enabled', False)))} ｜每人 {invite_points['amount']} 分，每日上限 {invite_points['daily_limit']} 分",
         f"邀请需用户名：{_toggle_text(bool(cfg.get('invite_username_enabled', False)))}",
         f"积分别名：{html.escape(str(cfg.get('points_alias') or '未设置'))}",
+        f"积分自定义头衔：{'✅ 开启' if bool(cfg.get(POINTS_TITLES_ENABLED_KEY, False)) else '🚫 关闭'}"
+        f"（{len(normalize_title_levels(cfg))} 个等级）",
     ])
 
 
@@ -414,6 +426,7 @@ def _build_points_rules_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardMarku
             InlineKeyboardButton("👥 邀请积分规则", callback_data=f"{CALLBACK_PREFIX}:invite_points:{chat_id}"),
             InlineKeyboardButton("🪙 积分别名", callback_data=f"{CALLBACK_PREFIX}:points_alias:{chat_id}"),
         ],
+        [InlineKeyboardButton("🏷 积分自定义头衔", callback_data=f"{CALLBACK_PREFIX}:points_titles:{chat_id}")],
         [InlineKeyboardButton("🧹 清空积分", callback_data=f"{CALLBACK_PREFIX}:clean_point:{chat_id}")],
         [InlineKeyboardButton("⬅️ 返回积分与抽奖", callback_data=f"{CALLBACK_PREFIX}:category:{chat_id}:points")],
     ])
@@ -439,6 +452,114 @@ async def _open_points_rules_panel(
         parse_mode="HTML",
     )
 
+
+def _points_title_rules_text(chat_id: str, cfg: dict) -> str:
+    enabled = bool(cfg.get(POINTS_TITLES_ENABLED_KEY, False))
+    levels = normalize_title_levels(cfg)
+    lines = [
+        "🏷 <b>用户积分自定义头衔</b>",
+        "",
+        f"状态：{'✅ 开启' if enabled else '🚫 关闭'}",
+        f"等级数量：{len(levels)} / {POINTS_TITLES_MAX_LEVELS}",
+        "",
+        "当用户积分落入某个区间时，机器人会设置 Telegram 群内系统标签。",
+        "若用户已有不属于本功能配置的标签，机器人会保留该标签，不覆盖。",
+        "",
+    ]
+    if levels:
+        lines.append("<b>当前等级</b>")
+        for item in levels:
+            lines.append(
+                f"等级 {item['level']}：<code>{item['min_points']} ~ {item['max_points']}</code> 分"
+                f" → {html.escape(item['title'])}"
+            )
+    else:
+        lines.append("当前未设置等级。")
+    lines.extend([
+        "",
+        "机器人必须具有 Telegram 的“管理标签 / can_manage_tags”管理员权限。",
+        f"头衔最长 {POINTS_TITLE_MAX_LENGTH} 个字符，不能包含 emoji。",
+    ])
+    return "\n".join(lines)
+
+
+def _points_title_rules_keyboard(chat_id: str, cfg: dict) -> InlineKeyboardMarkup:
+    enabled = bool(cfg.get(POINTS_TITLES_ENABLED_KEY, False))
+    levels = normalize_title_levels(cfg)
+    rows = [[InlineKeyboardButton(
+        f"{'✅' if enabled else '🚫'} 启用积分头衔",
+        callback_data=f"{CALLBACK_PREFIX}:points_title_toggle:{chat_id}",
+    )]]
+    for item in levels:
+        rows.append([InlineKeyboardButton(
+            f"等级 {item['level']} · {item['min_points']}~{item['max_points']} · {item['title']}"[:64],
+            callback_data=f"{CALLBACK_PREFIX}:points_title_edit:{chat_id}:{item['level']}",
+        )])
+    if len(levels) < POINTS_TITLES_MAX_LEVELS:
+        rows.append([InlineKeyboardButton(
+            "➕ 新增等级",
+            callback_data=f"{CALLBACK_PREFIX}:points_title_add:{chat_id}",
+        )])
+    if levels:
+        rows.append([InlineKeyboardButton(
+            "🔄 同步已记录成员",
+            callback_data=f"{CALLBACK_PREFIX}:points_title_sync:{chat_id}",
+        )])
+    rows.append([InlineKeyboardButton(
+        "⬅️ 返回积分规则", callback_data=f"{CALLBACK_PREFIX}:points_rules_menu:{chat_id}"
+    )])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _open_points_title_panel(
+    query, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str, user_id: int
+):
+    chat_id = _parse_chat_id(chat_id_str)
+    if chat_id is None:
+        return await query.answer("群ID无效。", show_alert=True)
+    if not await _can_manage_group(context, user_id, chat_id):
+        return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+    if not await _is_bot_group_admin(context, chat_id):
+        return await query.answer("机器人不是该群管理员，无法配置积分头衔。", show_alert=True)
+    cfg = get_group_whitelist(context).get(chat_id_str, {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    return await query.edit_message_text(
+        _points_title_rules_text(chat_id_str, cfg),
+        reply_markup=_points_title_rules_keyboard(chat_id_str, cfg),
+        parse_mode="HTML",
+    )
+
+
+def _points_title_parse_level(value) -> Optional[int]:
+    try:
+        level = int(value)
+    except (TypeError, ValueError):
+        return None
+    return level if level > 0 else None
+
+
+def _points_title_level_by_number(cfg: dict, level_number: int) -> Optional[dict]:
+    return next(
+        (item for item in normalize_title_levels(cfg) if item["level"] == level_number),
+        None,
+    )
+
+
+def _points_title_input_prompt(*, level_number: int, existing: Optional[dict] = None) -> str:
+    current = ""
+    if existing:
+        current = (
+            f"\n\n当前：<code>{existing['min_points']} | {existing['max_points']} | "
+            f"{html.escape(existing['title'])}</code>"
+        )
+    return (
+        f"请输入等级 {level_number} 的规则，格式：\n"
+        "<code>最低积分 | 最高积分 | 头衔名称</code>\n\n"
+        "示例：<code>0 | 999 | 新人</code>\n"
+        "积分区间为闭区间，不能和已有等级重叠。"
+        + current
+    )
 
 async def _open_lottery_settings_panel(
     query, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str, user_id: int
@@ -3096,6 +3217,138 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             query, context, parts[2], "games", user_id
         )
 
+    if action == "points_titles" and len(parts) >= 3:
+        await query.answer()
+        return await _open_points_title_panel(query, context, parts[2], user_id)
+
+    if action == "points_title_toggle" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return await query.answer("群ID无效。", show_alert=True)
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        data = get_group_whitelist(context)
+        cfg = data.get(chat_id_str, {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        cfg[POINTS_TITLES_ENABLED_KEY] = not bool(cfg.get(POINTS_TITLES_ENABLED_KEY, False))
+        data[chat_id_str] = cfg
+        save_json(GROUP_LIST_FILE, data)
+        await query.answer("✅ 已更新")
+        if cfg[POINTS_TITLES_ENABLED_KEY]:
+            context.application.create_task(
+                resync_known_members(context.bot, chat_id, dict(cfg)),
+                name=f"points-title-sync:{chat_id}",
+            )
+        return await _open_points_title_panel(query, context, chat_id_str, user_id)
+
+    if action == "points_title_add" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None or not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        cfg = get_group_whitelist(context).get(chat_id_str, {})
+        levels = normalize_title_levels(cfg if isinstance(cfg, dict) else {})
+        if len(levels) >= POINTS_TITLES_MAX_LEVELS:
+            return await query.answer(f"最多设置 {POINTS_TITLES_MAX_LEVELS} 个等级。", show_alert=True)
+        level_number = max((item["level"] for item in levels), default=0) + 1
+        context.user_data["group_setting_stage"] = {
+            "kind": "points_title_rule",
+            "mode": "add",
+            "chat_id": chat_id_str,
+            "level": level_number,
+        }
+        await query.answer()
+        return await query.edit_message_text(
+            _points_title_input_prompt(level_number=level_number),
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:points_titles:{chat_id_str}")
+            ]]),
+            parse_mode="HTML",
+        )
+
+    if action == "points_title_edit" and len(parts) >= 4:
+        chat_id_str, level_raw = parts[2], parts[3]
+        chat_id = _parse_chat_id(chat_id_str)
+        level_number = _points_title_parse_level(level_raw)
+        if chat_id is None or level_number is None or not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("操作参数无效或你没有权限。", show_alert=True)
+        cfg = get_group_whitelist(context).get(chat_id_str, {})
+        level = _points_title_level_by_number(cfg if isinstance(cfg, dict) else {}, level_number)
+        if not level:
+            return await query.answer("该等级不存在。", show_alert=True)
+        return await query.edit_message_text(
+            "🏷 <b>积分头衔等级</b>\n\n"
+            f"等级：{level['level']}\n"
+            f"积分区间：<code>{level['min_points']} ~ {level['max_points']}</code>\n"
+            f"头衔：{html.escape(level['title'])}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ 修改", callback_data=f"{CALLBACK_PREFIX}:points_title_edit_input:{chat_id_str}:{level_number}")],
+                [InlineKeyboardButton("🗑 删除", callback_data=f"{CALLBACK_PREFIX}:points_title_delete:{chat_id_str}:{level_number}")],
+                [InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:points_titles:{chat_id_str}")],
+            ]),
+            parse_mode="HTML",
+        )
+
+    if action == "points_title_edit_input" and len(parts) >= 4:
+        chat_id_str, level_raw = parts[2], parts[3]
+        chat_id = _parse_chat_id(chat_id_str)
+        level_number = _points_title_parse_level(level_raw)
+        if chat_id is None or level_number is None or not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("操作参数无效或你没有权限。", show_alert=True)
+        cfg = get_group_whitelist(context).get(chat_id_str, {})
+        level = _points_title_level_by_number(cfg if isinstance(cfg, dict) else {}, level_number)
+        if not level:
+            return await query.answer("该等级不存在。", show_alert=True)
+        context.user_data["group_setting_stage"] = {
+            "kind": "points_title_rule",
+            "mode": "edit",
+            "chat_id": chat_id_str,
+            "level": level_number,
+        }
+        await query.answer()
+        return await query.edit_message_text(
+            _points_title_input_prompt(level_number=level_number, existing=level),
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:points_title_edit:{chat_id_str}:{level_number}")
+            ]]),
+            parse_mode="HTML",
+        )
+
+    if action == "points_title_delete" and len(parts) >= 4:
+        chat_id_str, level_raw = parts[2], parts[3]
+        chat_id = _parse_chat_id(chat_id_str)
+        level_number = _points_title_parse_level(level_raw)
+        if chat_id is None or level_number is None or not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("操作参数无效或你没有权限。", show_alert=True)
+        data = get_group_whitelist(context)
+        cfg = data.get(chat_id_str, {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        levels = normalize_title_levels(cfg)
+        if not any(item["level"] == level_number for item in levels):
+            return await query.answer("该等级不存在。", show_alert=True)
+        cfg[POINTS_TITLES_RULES_KEY] = [item for item in levels if item["level"] != level_number]
+        data[chat_id_str] = cfg
+        save_json(GROUP_LIST_FILE, data)
+        await query.answer("✅ 等级已删除")
+        return await _open_points_title_panel(query, context, chat_id_str, user_id)
+
+    if action == "points_title_sync" and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None or not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("操作参数无效或你没有权限。", show_alert=True)
+        cfg = get_group_whitelist(context).get(chat_id_str, {})
+        if not isinstance(cfg, dict) or not bool(cfg.get(POINTS_TITLES_ENABLED_KEY, False)):
+            return await query.answer("请先开启积分自定义头衔。", show_alert=True)
+        context.application.create_task(
+            resync_known_members(context.bot, chat_id, dict(cfg)),
+            name=f"points-title-sync:{chat_id}",
+        )
+        return await query.answer("已开始后台同步已记录成员。", show_alert=True)
+
     if action == "points_rules_menu" and len(parts) >= 3:
         await query.answer()
         return await _open_points_rules_panel(query, context, parts[2], user_id)
@@ -4097,6 +4350,81 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
         )
         if handled:
             raise ApplicationHandlerStop
+
+    if isinstance(stage, dict) and stage.get("kind") == "points_title_rule":
+        user = update.effective_user
+        chat_id_str = str(stage.get("chat_id") or "")
+        chat_id = _parse_chat_id(chat_id_str)
+        if not user or chat_id is None or not await _can_manage_group(context, user.id, chat_id):
+            context.user_data.pop("group_setting_stage", None)
+            return await update.message.reply_text("❌ 你没有该群积分头衔设置权限。")
+        text_value = str(update.message.text or "").strip()
+        if text_value in {"取消", "返回"}:
+            context.user_data.pop("group_setting_stage", None)
+            return await update.message.reply_text("已取消积分头衔等级编辑。")
+        values = [item.strip() for item in re.split(r"\s*[|｜]\s*", text_value)]
+        if len(values) != 3:
+            return await update.message.reply_text(
+                "❗ 格式错误，请按“最低积分 | 最高积分 | 头衔名称”发送。\n"
+                "例如：0 | 999 | 新人"
+            )
+        try:
+            minimum, maximum = int(values[0]), int(values[1])
+        except ValueError:
+            return await update.message.reply_text("❗ 积分区间必须是整数。")
+        title = values[2]
+        if minimum > maximum:
+            return await update.message.reply_text("❗ 最低积分不能大于最高积分。")
+        if not title_text_is_valid(title):
+            return await update.message.reply_text(
+                f"❗ 头衔不能为空、不能含 emoji，且最多 {POINTS_TITLE_MAX_LENGTH} 个字符。"
+            )
+
+        data = get_group_whitelist(context)
+        cfg = data.get(chat_id_str, {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        levels = normalize_title_levels(cfg)
+        level_number = _points_title_parse_level(stage.get("level"))
+        if level_number is None:
+            context.user_data.pop("group_setting_stage", None)
+            return await update.message.reply_text("❌ 等级数据已失效，请重新打开设置。")
+        exclude_level = level_number if stage.get("mode") == "edit" else None
+        if title_ranges_overlap(levels, minimum, maximum, exclude_level=exclude_level):
+            return await update.message.reply_text("❗ 该积分区间与已有等级重叠，请修改后重试。")
+        if any(item["title"] == title and item["level"] != exclude_level for item in levels):
+            return await update.message.reply_text("❗ 头衔名称不能与其他等级重复。")
+
+        item = {
+            "level": level_number,
+            "min_points": minimum,
+            "max_points": maximum,
+            "title": title,
+        }
+        if stage.get("mode") == "edit":
+            if not any(existing["level"] == level_number for existing in levels):
+                context.user_data.pop("group_setting_stage", None)
+                return await update.message.reply_text("❌ 该等级已不存在。")
+            levels = [item if existing["level"] == level_number else existing for existing in levels]
+            saved_text = "✅ 积分头衔等级已修改。"
+        else:
+            if len(levels) >= POINTS_TITLES_MAX_LEVELS:
+                return await update.message.reply_text(f"❗ 最多可设置 {POINTS_TITLES_MAX_LEVELS} 个等级。")
+            levels.append(item)
+            saved_text = "✅ 积分头衔等级已新增。"
+        cfg[POINTS_TITLES_RULES_KEY] = sorted(levels, key=lambda value: value["level"])
+        data[chat_id_str] = cfg
+        save_json(GROUP_LIST_FILE, data)
+        context.user_data.pop("group_setting_stage", None)
+        if bool(cfg.get(POINTS_TITLES_ENABLED_KEY, False)):
+            context.application.create_task(
+                resync_known_members(context.bot, chat_id, dict(cfg)),
+                name=f"points-title-sync:{chat_id}",
+            )
+        return await update.message.reply_text(
+            saved_text,
+            reply_markup=_points_title_rules_keyboard(chat_id_str, cfg),
+        )
 
     if isinstance(stage, dict) and stage.get("kind") == "group_ad":
         user = update.effective_user

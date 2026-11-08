@@ -121,9 +121,9 @@ async def handle_text_dispatcher(update: Update, context: ContextTypes.DEFAULT_T
     if await handle_reply_keyboard_button_text(update, context):
         return
 
-    # 仅主机器人：用户级 AI 对话（开启后无需 @）
-    if await handle_gemini_ai(update, context):
-        return
+    # # 仅主机器人：用户级 AI 对话（开启后无需 @）
+    # if await handle_gemini_ai(update, context):
+    #     return
 
     if await handle_text(update, context):
         return

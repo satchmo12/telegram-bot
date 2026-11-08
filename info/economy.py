@@ -1,4 +1,6 @@
 from datetime import datetime
+import asyncio
+import inspect
 import time
 from email.mime import application
 from html import escape
@@ -227,6 +229,29 @@ def change_balance(chat_id, user_id, amount):
 POINT_LOGS_KEY = "point_logs"
 POINT_LOG_PAGE_SIZE = 8
 
+# Optional listeners let group features react to point mutations without every
+# game/check-in/invite call site having to know about those features.
+_POINTS_CHANGE_LISTENERS = []
+
+
+def register_points_change_listener(listener) -> None:
+    if callable(listener) and listener not in _POINTS_CHANGE_LISTENERS:
+        _POINTS_CHANGE_LISTENERS.append(listener)
+
+
+def _notify_points_change(chat_id: str, user_id: str, balance: int) -> None:
+    for listener in tuple(_POINTS_CHANGE_LISTENERS):
+        try:
+            result = listener(chat_id, user_id, balance)
+            if inspect.isawaitable(result):
+                asyncio.get_running_loop().create_task(result)
+        except RuntimeError:
+            # A synchronous maintenance script can still use change_points;
+            # there is simply no running Telegram event loop to synchronize.
+            continue
+        except Exception as exc:
+            print(f"积分变更监听器启动失败: {exc}")
+
 
 def _normalize_points(value, default: int = 0) -> int:
     try:
@@ -311,6 +336,7 @@ def change_points(
         })
 
     save_group_info(chat_id, group_data)
+    _notify_points_change(chat_id, user_id, new_balance)
     return new_balance
 
 

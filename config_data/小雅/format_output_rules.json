@@ -1,5 +1,5 @@
 {
-    "next_id": 7,
+    "next_id": 13,
     "rules": [
         {
             "id": 1,
@@ -13,6 +13,7 @@
             ],
             "cut_includes_word": false,
             "personal_report_link_enabled": true,
+            "personal_report_link_field": "",
             "replacements": [
                 {
                     "id": 1,
@@ -48,6 +49,7 @@
             ],
             "cut_includes_word": false,
             "personal_report_link_enabled": true,
+            "personal_report_link_field": "",
             "replacements": [
                 {
                     "id": 1,
@@ -85,7 +87,7 @@
             "id": 3,
             "enabled": true,
             "channel_id": "-1002298630178",
-            "note": "",
+            "note": "上海【学院】总榜",
             "output_template": "{content}",
             "output_entities": [],
             "cut_words": [
@@ -93,6 +95,7 @@
             ],
             "cut_includes_word": false,
             "personal_report_link_enabled": true,
+            "personal_report_link_field": "",
             "replacements": [
                 {
                     "id": 1,
@@ -125,6 +128,7 @@
             ],
             "cut_includes_word": false,
             "personal_report_link_enabled": true,
+            "personal_report_link_field": "",
             "replacements": [
                 {
                     "id": 1,
@@ -165,6 +169,7 @@
             ],
             "cut_includes_word": false,
             "personal_report_link_enabled": true,
+            "personal_report_link_field": "",
             "replacements": [
                 {
                     "id": 1,
@@ -228,6 +233,7 @@
             ],
             "cut_includes_word": false,
             "personal_report_link_enabled": true,
+            "personal_report_link_field": "",
             "replacements": [
                 {
                     "id": 2,
@@ -253,6 +259,324 @@
                     "id": 6,
                     "from": "#西安.",
                     "to": ""
+                }
+            ]
+        },
+        {
+            "id": 7,
+            "enabled": true,
+            "channel_id": "-1002907577526",
+            "note": "上海艺术展览会人气推荐榜",
+            "output_template": "{content}",
+            "output_entities": [],
+            "cut_words": [
+                "中转平台"
+            ],
+            "cut_includes_word": false,
+            "personal_report_link_enabled": true,
+            "personal_report_link_field": "",
+            "replacements": [
+                {
+                    "id": 1,
+                    "from": "助推频道",
+                    "to": ""
+                },
+                {
+                    "id": 2,
+                    "from": "绅士Vip群",
+                    "to": ""
+                },
+                {
+                    "id": 3,
+                    "from": "艺术展览会",
+                    "to": "找老师群"
+                }
+            ]
+        },
+        {
+            "id": 8,
+            "enabled": true,
+            "channel_id": "-1002822776516",
+            "note": "广州海报榜",
+            "output_template": "✨城市： #广州\n\n{content}",
+            "output_entities": [
+                {
+                    "custom_emoji_id": "5775917048097939066",
+                    "length": 1,
+                    "offset": 0,
+                    "type": "custom_emoji"
+                }
+            ],
+            "cut_words": [],
+            "cut_includes_word": true,
+            "personal_report_link_enabled": true,
+            "personal_report_link_field": "联系",
+            "replacements": [
+                {
+                    "id": 1,
+                    "from": "昵称",
+                    "to": "艺名"
+                },
+                {
+                    "id": 2,
+                    "from": "地区",
+                    "to": "区域"
+                },
+                {
+                    "id": 3,
+                    "from": "电报",
+                    "to": "联系"
+                },
+                {
+                    "id": 4,
+                    "from": "水费",
+                    "to": "课费"
+                },
+                {
+                    "id": 5,
+                    "from": "📤课表查看图📤",
+                    "to": "#600p  #1300pp"
+                },
+                {
+                    "id": 6,
+                    "from": "#禁收车费定金和没见人就给课费",
+                    "to": ""
+                }
+            ]
+        },
+        {
+            "id": 9,
+            "enabled": true,
+            "channel_id": "-1002597703883",
+            "note": "东莞海报榜",
+            "output_template": "✨城市 #东莞 \n\n{content}",
+            "output_entities": [
+                {
+                    "custom_emoji_id": "5775917048097939066",
+                    "length": 1,
+                    "offset": 0,
+                    "type": "custom_emoji"
+                }
+            ],
+            "cut_words": [],
+            "cut_includes_word": true,
+            "personal_report_link_enabled": true,
+            "personal_report_link_field": "联系",
+            "replacements": [
+                {
+                    "id": 1,
+                    "from": "昵称",
+                    "to": "艺名"
+                },
+                {
+                    "id": 2,
+                    "from": "地区",
+                    "to": "区域"
+                },
+                {
+                    "id": 3,
+                    "from": "电报",
+                    "to": "联系"
+                },
+                {
+                    "id": 4,
+                    "from": "📤课表查看图📤",
+                    "to": "#600p  #1100pp"
+                },
+                {
+                    "id": 5,
+                    "from": "🔰#点击下方查看详情⬇️",
+                    "to": ""
+                },
+                {
+                    "id": 6,
+                    "from": "水费",
+                    "to": "课费"
+                },
+                {
+                    "id": 7,
+                    "from": "#老师狼友请看下方评论区⬇️",
+                    "to": ""
+                }
+            ]
+        },
+        {
+            "id": 10,
+            "enabled": true,
+            "channel_id": "-1002609440815",
+            "note": "福州白乐门",
+            "output_template": "✨城市 #福州 \n\n{content}",
+            "output_entities": [
+                {
+                    "custom_emoji_id": "5775917048097939066",
+                    "length": 1,
+                    "offset": 0,
+                    "type": "custom_emoji"
+                }
+            ],
+            "cut_words": [],
+            "cut_includes_word": true,
+            "personal_report_link_enabled": true,
+            "personal_report_link_field": "联系",
+            "replacements": [
+                {
+                    "id": 1,
+                    "from": "福州",
+                    "to": ""
+                },
+                {
+                    "id": 2,
+                    "from": "电报",
+                    "to": "联系"
+                },
+                {
+                    "id": 3,
+                    "from": "📤课表查看图📤",
+                    "to": "#500p #800pp"
+                },
+                {
+                    "id": 4,
+                    "from": "🔰#点击下方查看详情⬇️",
+                    "to": ""
+                },
+                {
+                    "id": 5,
+                    "from": "昵称",
+                    "to": "艺名"
+                },
+                {
+                    "id": 6,
+                    "from": "地区",
+                    "to": "区域"
+                },
+                {
+                    "id": 7,
+                    "from": "水费",
+                    "to": "课费"
+                },
+                {
+                    "id": 8,
+                    "from": "#禁收车费定金和没见人就给课费",
+                    "to": ""
+                },
+                {
+                    "id": 9,
+                    "from": "⬆️课表查看图⬆️",
+                    "to": "#700p #1300pp"
+                }
+            ]
+        },
+        {
+            "id": 11,
+            "enabled": true,
+            "channel_id": "-1002150527965",
+            "note": "长沙必刷榜",
+            "output_template": "✨城市 #长沙 \n\n{content}",
+            "output_entities": [
+                {
+                    "custom_emoji_id": "5775917048097939066",
+                    "length": 1,
+                    "offset": 0,
+                    "type": "custom_emoji"
+                }
+            ],
+            "cut_words": [],
+            "cut_includes_word": true,
+            "personal_report_link_enabled": true,
+            "personal_report_link_field": "联系",
+            "replacements": [
+                {
+                    "id": 1,
+                    "from": "长沙",
+                    "to": ""
+                },
+                {
+                    "id": 2,
+                    "from": "电报",
+                    "to": "联系"
+                },
+                {
+                    "id": 3,
+                    "from": "📤课表查看图📤",
+                    "to": "#500p #800pp"
+                },
+                {
+                    "id": 4,
+                    "from": "🔰#点击下方查看详情⬇️",
+                    "to": ""
+                },
+                {
+                    "id": 5,
+                    "from": "昵称",
+                    "to": "艺名"
+                },
+                {
+                    "id": 6,
+                    "from": "地区",
+                    "to": "区域"
+                },
+                {
+                    "id": 7,
+                    "from": "水费",
+                    "to": "课费"
+                },
+                {
+                    "id": 8,
+                    "from": "#禁收车费定金和没见人就给课费",
+                    "to": ""
+                },
+                {
+                    "id": 9,
+                    "from": "⬆️课表查看图⬆️",
+                    "to": "#700p #1300pp"
+                },
+                {
+                    "id": 10,
+                    "from": "#老师狼友请看下方评论区⬇️",
+                    "to": ""
+                },
+                {
+                    "id": 11,
+                    "from": "#车费定金狼友自己随意不超过100",
+                    "to": ""
+                },
+                {
+                    "id": 12,
+                    "from": "#禁收定金和没见人就给课费",
+                    "to": ""
+                }
+            ]
+        },
+        {
+            "id": 12,
+            "enabled": true,
+            "channel_id": "-1002003699777",
+            "note": "成都【女儿国】老师榜单",
+            "output_template": "✨城市 #成都\n\n{content}",
+            "output_entities": [
+                {
+                    "custom_emoji_id": "5778260412319407959",
+                    "length": 1,
+                    "offset": 0,
+                    "type": "custom_emoji"
+                }
+            ],
+            "cut_words": [
+                "【约课请"
+            ],
+            "cut_includes_word": false,
+            "personal_report_link_enabled": true,
+            "personal_report_link_field": "",
+            "replacements": [
+                {
+                    "id": 1,
+                    "from": "位置",
+                    "to": "区域"
+                },
+                {
+                    "id": 2,
+                    "from": "t.me/",
+                    "to": "@"
                 }
             ]
         }

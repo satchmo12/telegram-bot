@@ -634,6 +634,9 @@ GROUP_CONFIG_DEFAULTS = {
     "name_change_notice": False,
     "invite_approval_enabled": False,
     "points_enabled": True,
+    # Native Telegram member tags awarded from group point ranges.
+    "points_custom_titles_enabled": False,
+    "points_custom_title_levels": [],
 
 }
 # key -> (loaded dict identity, group count). Group count lets newly-created groups be initialized.

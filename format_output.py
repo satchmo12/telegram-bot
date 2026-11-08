@@ -20,6 +20,7 @@ RULE_EDIT_STATE_KEY = "format_output_rule_editing"
 REPORT_LINK_STATE_KEY = "format_output_report_link_waiting"
 RULES_PER_PAGE = 8
 RULE_NOTE_MAX_LENGTH = 40
+PERSONAL_REPORT_FIELD_MAX_LENGTH = 30
 DEFAULT_TEMPLATE = "{content}"
 _CUSTOM_EMOJI_TYPE = "custom_emoji"
 _TOKEN_RE = re.compile(r"\uE000fmt_(?:template|source)_\d+\uE001")
@@ -101,6 +102,10 @@ def _normalize_rule(value: Any, fallback_id: int) -> dict:
         "cut_words": [str(item).strip() for item in cut_words if str(item).strip()],
         "cut_includes_word": bool(value.get("cut_includes_word", True)),
         "personal_report_link_enabled": bool(value.get("personal_report_link_enabled", False)),
+        # Empty keeps the original compatibility behavior: use the first
+        # @username anywhere in the forwarded source. A configured label
+        # (such as “电报” or “联系”) restricts extraction to that field.
+        "personal_report_link_field": str(value.get("personal_report_link_field", "") or "").strip()[:PERSONAL_REPORT_FIELD_MAX_LENGTH],
         "replacements": _normalize_replacements(value.get("replacements", [])),
     }
 
@@ -279,12 +284,19 @@ async def format_message_for_publish(
         return None
 
     output_text, entities = format_forwarded_message(message, rule)
-    report_link = await _personal_report_link(context, rule, message)
+    report_id = _personal_report_id(rule, message)
+    report_link = await _personal_report_link(context, rule, message, report_id)
     if report_link:
         output_text, entities = _append_personal_report_link(
             output_text, entities, report_link
         )
-    return output_text, entities, rule
+    # The normal 投稿 pipeline receives this transient rule payload too. Keep
+    # the exact resolved ID so it does not re-extract a different (or random)
+    # report ID after the formatter has renamed fields such as 电报 → 联系.
+    result_rule = dict(rule)
+    if report_id:
+        result_rule["_personal_report_id"] = report_id
+    return output_text, entities, result_rule
 
 
 def _append_personal_report_link(
@@ -306,22 +318,76 @@ def _append_personal_report_link(
     ]
 
 
-def _report_id_from_message_text(message) -> Optional[str]:
-    """Return the first Telegram @username found in a forwarded message."""
-    text = message.text if message.text is not None else (message.caption or "")
-    match = _USERNAME_RE.search(text)
-    return match.group(1).lower() if match else None
+def _report_id_from_message_text(message, field_name: str | list[str] = "") -> Optional[str]:
+    """Return the report username from one or more configured field names.
+
+    With no field configured, preserve the old behavior and take the first
+    @username in the complete source message. With field candidates, inspect
+    only those lines, so “🤖双向：@muxuexxbot” cannot accidentally win over a
+    selected contact field.
+    """
+    text = str(message.text if message.text is not None else (message.caption or ""))
+    if isinstance(field_name, (list, tuple)):
+        field_names = [str(item or "").strip() for item in field_name]
+    else:
+        field_names = [str(field_name or "").strip()]
+    field_names = list(dict.fromkeys(item for item in field_names if item))
+    if not field_names:
+        match = _USERNAME_RE.search(text)
+        return match.group(1).lower() if match else None
+
+    # Accept normal and decorated field lines alike:
+    # “电报：@sk1586”, “【电报】：@sk1586”, “🚀电报: @sk1586”.
+    for candidate in field_names:
+        field_pattern = re.compile(
+            rf"(?:^|\n)[^\n]*?{re.escape(candidate)}\s*[：:]\s*([^\n]+)",
+            re.IGNORECASE,
+        )
+        for line_match in field_pattern.finditer(text):
+            username_match = _USERNAME_RE.search(line_match.group(1))
+            if username_match:
+                return username_match.group(1).lower()
+    return None
+
+
+def _report_field_candidates(rule: dict) -> list[str]:
+    """Map an output field name back to source aliases from replacements.
+
+    Administrators configure the field they see in the final formatted post.
+    Thus, with a replacement ``电报 → 联系``, choosing ``联系`` also checks the
+    original source's ``电报`` line.
+    """
+    selected = str(rule.get("personal_report_link_field") or "").strip()
+    if not selected:
+        return []
+    candidates = [selected]
+    for replacement in rule.get("replacements", []) or []:
+        if not isinstance(replacement, dict):
+            continue
+        source = str(replacement.get("from") or "").strip()
+        target = str(replacement.get("to") or "").strip()
+        if source and target == selected and source not in candidates:
+            candidates.append(source)
+    return candidates
+
+
+def _personal_report_id(rule: dict, message) -> Optional[str]:
+    """Resolve the rule-selected report ID from the original forwarded text."""
+    if not rule.get("personal_report_link_enabled", False):
+        return None
+    return _report_id_from_message_text(message, _report_field_candidates(rule))
 
 
 async def _personal_report_link(
     context: ContextTypes.DEFAULT_TYPE,
     rule: dict,
     message,
+    report_id: Optional[str] = None,
 ) -> Optional[str]:
-    """Build a report link from the first @username in the source message."""
+    """Build a report link from the configured source field."""
     if not rule.get("personal_report_link_enabled", False):
         return None
-    report_id = _report_id_from_message_text(message)
+    report_id = report_id or _personal_report_id(rule, message)
     if not report_id:
         return None
     try:
@@ -421,8 +487,9 @@ def _rule_detail_text(rule: dict) -> str:
     cut_text = "、".join(rule.get("cut_words", [])) or "（未设置）"
     cut_mode = "保留截取词" if rule.get("cut_includes_word", True) else "不保留截取词"
     status = "开启" if rule.get("enabled", True) else "关闭"
+    report_field = str(rule.get("personal_report_link_field") or "").strip()
     report_link_status = (
-        "开启（自动识别文本中的 @用户名）"
+        (f"开启（获取字段：{report_field}）" if report_field else "开启（自动识别第一个 @用户名）")
         if rule.get("personal_report_link_enabled", False)
         else "关闭"
     )
@@ -488,12 +555,20 @@ def _personal_report_link_keyboard(rule: dict, page: int) -> InlineKeyboardMarku
     rule_id = rule["id"]
     enabled = bool(rule.get("personal_report_link_enabled", False))
     toggle_label = "🚫 关闭自动附加" if enabled else "✅ 开启自动附加"
+    field_name = str(rule.get("personal_report_link_field") or "").strip()
+    field_label = field_name if field_name else "自动（第一个 @用户名）"
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
                     toggle_label,
                     callback_data=f"{CALLBACK_PREFIX}:rule_report_link_toggle:{rule_id}:{page}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    f"🏷 获取字段：{field_label}"[:64],
+                    callback_data=f"{CALLBACK_PREFIX}:rule_report_link_field:{rule_id}:{page}",
                 )
             ],
             [
@@ -514,12 +589,17 @@ async def _show_personal_report_link(query, rule_id: int, page: int) -> None:
 
     enabled = bool(rule.get("personal_report_link_enabled", False))
     detail = "已开启" if enabled else "已关闭"
+    field_name = str(rule.get("personal_report_link_field") or "").strip()
+    field_display = html.escape(field_name) if field_name else "自动识别第一个 @用户名"
     await query.edit_message_text(
         "📋 <b>个人报告链接</b>\n\n"
-        f"自动附加：{detail}\n\n"
-        "开启后，每次按本规则格式化时，机器人会从转发文本中自动识别第一个 "
-        "<code>@用户名</code>，并在内容最下方添加对应的个人报告链接。\n\n"
-        "无需预先输入或固定报告 ID。",
+        f"自动附加：{detail}\n"
+        f"获取字段：<code>{field_display}</code>\n\n"
+        "设置获取字段后，机器人只会从该字段所在行取得第一个 <code>@用户名</code>。\n"
+        "例如设置 <code>电报</code> 时：<code>🚀电报：@sk1586</code> 会取得 "
+        "<code>@sk1586</code>，不会误取前面“🤖双向”字段的用户名。\n"
+        "若规则配置了 <code>电报 → 联系</code> 替换，设置 <code>联系</code> 也会自动回查源内容中的“电报”字段。\n\n"
+        "发送“自动”或“清空”可恢复为自动识别全文第一个 @用户名。",
         reply_markup=_personal_report_link_keyboard(rule, page),
         parse_mode="HTML",
     )
@@ -776,6 +856,26 @@ async def format_output_callback(update: Update, context: ContextTypes.DEFAULT_T
                 else "已关闭个人报告链接自动附加。"
             )
             return await _show_personal_report_link(query, rule_id, page)
+        if action == "rule_report_link_field":
+            rule_id, page = int(parts[2]), int(parts[3])
+            if not _find_rule(load_format_output_config(), rule_id):
+                return await query.answer("规则不存在。", show_alert=True)
+            context.user_data[RULE_EDIT_STATE_KEY] = {
+                "kind": "report_link_field",
+                "rule_id": rule_id,
+                "page": page,
+            }
+            await query.answer()
+            return await query.edit_message_text(
+                "请输入个人报告链接的获取字段名，例如 <code>电报</code> 或 <code>联系</code>。\n\n"
+                "机器人会读取该字段同一行中的第一个 <code>@用户名</code>。\n"
+                "如果规则有“电报 → 联系”替换，填写 <code>联系</code> 会自动回查源内容的“电报”字段。\n"
+                "发送“自动”“清空”或 <code>-</code>，可恢复为识别全文第一个 @用户名。",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:rule_report_link:{rule_id}:{page}")]]
+                ),
+                parse_mode="HTML",
+            )
         if action == "delete":
             rule_id, page = int(parts[2]), int(parts[3])
             config = load_format_output_config()
@@ -940,6 +1040,29 @@ async def format_output_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             raise ApplicationHandlerStop
 
         kind = edit_state.get("kind", "field")
+        if kind == "report_link_field":
+            if len(text_for_command) > PERSONAL_REPORT_FIELD_MAX_LENGTH:
+                await update.message.reply_text(
+                    f"获取字段不能超过 {PERSONAL_REPORT_FIELD_MAX_LENGTH} 个字符，请重新发送。"
+                )
+                raise ApplicationHandlerStop
+            rule["personal_report_link_field"] = (
+                "" if text_for_command in {"自动", "清空", "-"} else text_for_command
+            )
+            save_format_output_config(config)
+            context.user_data.pop(RULE_EDIT_STATE_KEY, None)
+            await update.message.reply_text(
+                "✅ 已保存报告链接获取字段："
+                + (rule["personal_report_link_field"] or "自动识别第一个 @用户名"),
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(
+                        "📋 返回个人报告链接设置",
+                        callback_data=f"{CALLBACK_PREFIX}:rule_report_link:{rule_id}:{page}",
+                    )]]
+                ),
+            )
+            raise ApplicationHandlerStop
+
         if kind == "replacement_add":
             if edit_state.get("step") == "from":
                 if not text_for_command:

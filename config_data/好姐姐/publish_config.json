@@ -60,5 +60,8 @@
     "collection_display_subgroup_label": "",
     "user_mark_enabled": false,
     "user_mark_report_chat_id": null,
-    "user_mark_labels": []
+    "user_mark_labels": [],
+    "channel_post_write_report_enabled": false,
+    "input_search_enabled": false,
+    "input_search_restore_private_forward": false
 }

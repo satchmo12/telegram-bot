@@ -89,6 +89,12 @@ USER_MARK_COMMAND = "帅哥"
 MASTER_BOT_NAME = str(os.getenv("MASTER_BOT_NAME", "")).strip()
 COLLECTION_DISPLAY_SETTING_KEY = "publish_collection_display_setting_field"
 TEMPLATE_KEY_PATTERN = re.compile(r"\{([\w\-一-鿿]+)\}")
+# Report links may be embedded in a channel post by a formatter. Keep their
+# historical start parameter working even when the contact field later changes.
+_REPORT_START_PARAMETER_RE = re.compile(
+    r"(?:https?://)?t\.me/[^?\s/]+\?start=report_([A-Za-z0-9_]{1,64})",
+    re.IGNORECASE,
+)
 
 # Telegram asks the client to retry after a precise delay when a bot exceeds a
 # sending/copying rate limit. Retrying the original request is safe because a
@@ -2101,6 +2107,29 @@ def _get_teacher_filter_result(token: str) -> Optional[dict]:
     return state if isinstance(state, dict) else None
 
 
+def _refresh_teacher_filter_result(config: dict, state: dict) -> dict:
+    """Refresh a saved roster filter against the current keyword index.
+
+    The inline keyboard only carries a short-lived filter token. Previously the
+    token also retained a snapshot of its matching posts for up to ten minutes.
+    As a result, an administrator could edit a channel post and successfully
+    refresh the keyword index, while users paging through an already-open
+    filtered ``老师`` list still saw the old collection fields. Rebuild the
+    matching items at callback time so the next page always reflects the
+    latest channel-post edit.
+    """
+    filter_text = str(state.get("filter_text") or "").strip()
+    posts = _load_collection_display_posts(config)
+    state["items"] = _filter_collection_display_posts(posts, config, filter_text)
+    primary_label, secondary_label = _collection_display_category_labels(config)
+    state["primary_label"] = primary_label
+    state["secondary_label"] = secondary_label
+    # Each successful interaction keeps the active result usable while the
+    # user pages it, without preserving an obsolete snapshot.
+    state["expires_at"] = time.monotonic() + TEACHER_LIST_FILTER_CACHE_TTL_SEC
+    return state
+
+
 def _teacher_list_filtered_payload(
     config: dict, token: str, state: dict, page: int
 ) -> tuple[str, list[MessageEntity], InlineKeyboardMarkup]:
@@ -2517,6 +2546,7 @@ async def handle_teacher_list_callback(
         if state is None:
             await query.answer("筛选结果已过期，请重新发送老师命令。", show_alert=True)
             return
+        state = _refresh_teacher_filter_result(config, state)
         text, entities, keyboard = _teacher_list_filtered_payload(config, token, state, page)
         await query.answer()
         await query.edit_message_text(
@@ -3692,6 +3722,10 @@ def _create_comment_report(
 ) -> None:
     message_id = _require_published_message_id(message_id, "创建评论报告")
     data = _load_comment_reports()
+    # A formatter-owned report URL may retain an older contact username. If an
+    # edit has already bound that URL as an alias, keep updating the canonical
+    # report instead of creating a second, empty report record.
+    report_id = _resolve_report_id(data, report_id)
     existing = data["reports"].get(report_id)
     comments = existing.get("comments", []) if isinstance(existing, dict) else []
     if not isinstance(comments, list):
@@ -3731,7 +3765,7 @@ def _create_comment_report(
 def _update_comment_report_subjects(
     channel_id, message_id, subject_entries: Optional[list[dict]]
 ) -> int:
-    """Replace fields in reports bound to this post after it is edited."""
+    """Replace fields in every report reference bound to an edited post."""
     channel_id = _as_int(channel_id)
     message_id = _as_int(message_id)
     if channel_id is None or message_id is None:
@@ -3742,12 +3776,31 @@ def _update_comment_report_subjects(
     for report in data.get("reports", {}).values():
         if not isinstance(report, dict):
             continue
+
+        changed = False
         if (
             _as_int(report.get("channel_id")) == channel_id
             and _as_int(report.get("message_id")) == message_id
             and report.get("subjects") != subjects
         ):
             report["subjects"] = subjects
+            changed = True
+
+        # Reports created by older releases can keep the post fields only in
+        # ``posts``. Updating the root record alone left stale city/category
+        # data behind, which later made the report and collection disagree.
+        refs = _report_post_refs(report)
+        for ref in refs:
+            if _report_post_key(ref.get("channel_id"), ref.get("message_id")) != (
+                channel_id,
+                message_id,
+            ):
+                continue
+            if ref.get("subjects") != subjects:
+                ref["subjects"] = subjects
+                changed = True
+        if changed:
+            _store_report_post_refs(report, refs)
             report["updated_at"] = int(time.time())
             updated += 1
     if updated:
@@ -7210,15 +7263,23 @@ async def _capture_comment_source_message(
         and int(getattr(getattr(msg, "chat", None), "id", 0) or 0) == main_channel_id
     ):
         entries = _extract_routing_keywords(msg, config)
+        post_text = str(getattr(msg, "text", None) or getattr(msg, "caption", None) or "")
+        authoritative = await _load_authoritative_main_post_content(
+            context, config, main_channel_id, msg.message_id
+        )
+        if authoritative is not None:
+            entries, post_text = authoritative
         count = _replace_post_keywords_from_channel_edit(
             entries, main_channel_id, msg.message_id
+        )
+        _sync_report_link_aliases_for_post(
+            main_channel_id, msg.message_id, post_text
         )
         print(
             "✅ 已更新编辑后频道帖关键词 "
             f"channel={main_channel_id} message={msg.message_id} keywords={count}"
         )
-        
-           #  新增生成链接
+
         _update_comment_report_position(
             config,
             main_channel_id,
@@ -7244,7 +7305,11 @@ async def _capture_comment_source_message(
         # A large copy may return message_id=0.  The real channel_post update
         # is the authoritative completion signal for its report link/mirror.
         
-        #  新增生成链接
+        _sync_report_link_aliases_for_post(
+            main_channel_id,
+            msg.message_id,
+            str(getattr(msg, "text", None) or getattr(msg, "caption", None) or ""),
+        )
         _update_comment_report_position(
             config,
             main_channel_id,
@@ -7339,8 +7404,17 @@ async def _capture_comment_source_message(
 
     if getattr(update, "edited_message", None) is not None:
         entries = _extract_routing_keywords(msg, config)
+        post_text = str(getattr(msg, "text", None) or getattr(msg, "caption", None) or "")
+        authoritative = await _load_authoritative_main_post_content(
+            context, config, int(channel_id), int(channel_message_id)
+        )
+        if authoritative is not None:
+            entries, post_text = authoritative
         count = _replace_post_keywords_from_channel_edit(
             entries, channel_id, channel_message_id
+        )
+        _sync_report_link_aliases_for_post(
+            int(channel_id), int(channel_message_id), post_text
         )
         print(
             "✅ 已通过讨论组编辑更新频道帖关键词 "
@@ -7401,6 +7475,114 @@ async def _capture_comment_source_message(
     _update_keyword_comment_mapping(channel_id, channel_message_id, msg.chat_id, msg.message_id)
     print(f"✅ 已通过 Bot API 写入 discussion 映射 {channel_id}/{channel_message_id} -> {msg.chat_id}/{msg.message_id}")
 
+
+
+def _sync_report_link_aliases_for_post(
+    channel_id: int,
+    message_id: int,
+    post_text: str,
+) -> int:
+    """Bind formatter-owned report links to an existing report for this post.
+
+    A contact username may change after a post has been published. The visible
+    post can still contain its old ``?start=report_<id>`` URL while the report
+    store is keyed by the newly extracted username. Resolve that old URL to a
+    report already associated with this exact channel post so recipients never
+    see a false “report expired” page.
+    """
+    linked_ids = {
+        match.group(1).strip().lower()
+        for match in _REPORT_START_PARAMETER_RE.finditer(str(post_text or ""))
+        if match.group(1).strip()
+    }
+    if not linked_ids:
+        return 0
+    channel_id = _as_int(channel_id)
+    message_id = _as_int(message_id)
+    if channel_id is None or message_id is None:
+        return 0
+
+    data = _load_comment_reports()
+    candidates = []
+    for candidate_id, report in data.get("reports", {}).items():
+        if not isinstance(report, dict) or not _report_has_post_ref(
+            report, channel_id, message_id
+        ):
+            continue
+        candidates.append((str(candidate_id), report))
+    if not candidates:
+        return 0
+
+    # Prefer the report with actual history, then the most recently maintained
+    # one. This keeps all old deep links pointed at the useful report when
+    # earlier versions created duplicate records for one post.
+    candidates.sort(
+        key=lambda item: (
+            len(item[1].get("comments", []) if isinstance(item[1].get("comments"), list) else []),
+            int(item[1].get("updated_at", 0) or item[1].get("created_at", 0) or 0),
+        ),
+        reverse=True,
+    )
+    canonical_id = candidates[0][0]
+    aliases = data.setdefault("aliases", {})
+    changed = 0
+    for linked_id in linked_ids:
+        resolved_id = _resolve_report_id(data, linked_id)
+        if linked_id == canonical_id or resolved_id == canonical_id:
+            continue
+        aliases[linked_id] = canonical_id
+        changed += 1
+    if changed:
+        _save_comment_reports(data)
+    return changed
+
+
+async def _load_authoritative_main_post_content(
+    context: ContextTypes.DEFAULT_TYPE,
+    config: dict,
+    channel_id: int,
+    message_id: int,
+) -> Optional[tuple[list[dict], str]]:
+    """Fetch the current main-channel content through the configured session.
+
+    Telegram's linked-discussion edit update can occasionally contain only a
+    partial automatic-forward payload. The protocol client sees the source
+    channel message itself, so use it as the authoritative source before
+    replacing indexed collection fields.
+    """
+    channel_id = _as_int(channel_id)
+    message_id = _as_int(message_id)
+    if channel_id is None or message_id is None or message_id <= 0:
+        return None
+    session_name = str(
+        config.get("discussion_mapping_session")
+        or _backup_channel_forward_session(config)
+        or "main"
+    ).strip()
+    try:
+        from channel.telethon_forwarder import SESSION_CLIENTS_BY_BOT, request_telethon_refresh
+    except Exception:
+        return None
+    bot_name = str(context.application.bot_data.get("name", "") or "")
+    client = SESSION_CLIENTS_BY_BOT.get(bot_name, {}).get(session_name)
+    if client is None:
+        request_telethon_refresh(bot_name)
+        return None
+    try:
+        source = await client.get_messages(channel_id, ids=message_id)
+        if source is None:
+            return None
+        text = str(getattr(source, "message", "") or "")
+        entries = _extract_routing_keywords(
+            SimpleNamespace(text=text, caption=None), config
+        )
+        return entries, text
+    except Exception as exc:
+        print(
+            "读取编辑后频道原帖失败 "
+            f"channel={channel_id} message={message_id}: {exc}"
+        )
+        return None
 
 
 def _update_comment_report_position(
@@ -7626,6 +7808,10 @@ def _serialize_format_output(
         "text": output_text,
         "entities": [entity.to_dict() for entity in entities],
         "rule_id": rule.get("id"),
+        # Formatter rules may resolve report identity from a configured source
+        # field (for example “电报” / “联系”). Persist it through review so the
+        # final channel post uses the same ID rather than a fallback UUID.
+        "report_id": str(rule.get("_personal_report_id") or ""),
     }
 
 
@@ -11338,7 +11524,10 @@ async def _handle_wall_publish_message(
         and is_owner_submission
         and submission_kind == "main"
     ):
-        report_id = _report_id_from_subject_entries(submission.get("keyword_entries", []))
+        formatter_report_id = str((format_output or {}).get("report_id") or "").strip()
+        report_id = formatter_report_id or _report_id_from_subject_entries(
+            submission.get("keyword_entries", [])
+        )
         report_url = await _report_deep_link(context, report_id) or ""
 
     # A matched format-output rule may already have appended the same report

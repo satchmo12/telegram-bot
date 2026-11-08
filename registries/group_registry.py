@@ -1,13 +1,16 @@
 from channel.channel_force import register_handle_force_handlers
 from channel.publish_setting import register_publish_setting_handlers
+from ranking_submission import register_ranking_submission_handlers
 from channel.reply_to_channel import register_reply_to_channel_handlers
 from channel.channel_config import register_channel_config_handlers
 from game.checkin import register_checkin_handlers
 from group.admin import register_admin_handlers
+from group.member_tag import register_member_tag_handlers
 from group.auto_scan import register_auto_scan_handlers
 from group.group_care import register_group_care_handlers
 from group.event_lottery import register_event_lottery_handlers
 from group.points_auction import register_points_auction_handlers
+from group.points_title import register_points_title_handlers
 from group.group_logger import register_group_logger_handlers
 from group.group_media_tools import register_group_media_tools_handlers
 from group.group_setting import register_group_setting_handlers
@@ -32,10 +35,15 @@ def register_group_handlers(app):
     # 被踢出群时，机器人不会收到处理该更新的 handler，面板会保留过期群组。
     register_group_logger_handlers(app)
 
+    # 上榜投稿是主机器人私聊能力，不依赖群功能总开关。
+    register_ranking_submission_handlers(app)
+
     if not is_feature_enabled(app, "group"):
         return
 
     register_auto_scan_handlers(app)
+    register_member_tag_handlers(app)
+    register_points_title_handlers(app)
 
     # 导航与群核心功能
     register_admin_handlers(app)
