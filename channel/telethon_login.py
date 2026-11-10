@@ -238,6 +238,12 @@ def _is_session_owner(user, session_name: str) -> bool:
 def _can_access_session(context: ContextTypes.DEFAULT_TYPE, user, session_name: str) -> bool:
     if not user:
         return False
+    # ``main`` is the shared protocol account. It must never become visible or
+    # usable merely because a cloned bot owner/delegated admin has the general
+    # protocol-management permission. Only platform super administrators may
+    # operate it from a cloned bot.
+    if is_shared_session_name(session_name):
+        return is_super_admin(user.id)
     if has_admin_permission(context, user.id, "telethon_manage"):
         return True
     if not is_channel_subscription_required():
@@ -313,10 +319,15 @@ def _list_session_names(context: ContextTypes.DEFAULT_TYPE, user=None) -> list[s
         if os.path.exists(main_path):
             names.add(SHARED_SESSION_NAME)
     names = sorted(names)
+    # ``main`` is a shared platform account rather than this clone's account.
+    # Hide it from clone owners and delegated protocol managers; they may still
+    # use every non-shared session for which they have normal access.
+    if user and not is_super_admin(user.id):
+        names = [name for name in names if not is_shared_session_name(name)]
     if not user or (user and has_admin_permission(context, user.id, "telethon_manage")):
         return names
-    # 仅返回该用户自己添加的账号
-    return [n for n in names if _is_session_owner(user, n)]
+    # 仅返回该用户自己添加且有权操作的账号
+    return [n for n in names if _can_access_session(context, user, n)]
 
 
 def _build_sessions_keyboard(sessions: list[str]) -> InlineKeyboardMarkup:

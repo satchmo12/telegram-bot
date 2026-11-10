@@ -793,6 +793,9 @@ def _clear_submission_draft(context: ContextTypes.DEFAULT_TYPE) -> None:
         "waiting_post",
         "publish_keyword_search",
         "publish_keyword_results",
+        "publish_keyword_results_page",
+        "publish_keyword_post_results",
+        "publish_keyword_post_results_page",
         "publish_comment_target",
         "publish_pending_proof_id",
     ):

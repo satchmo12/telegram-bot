@@ -4,7 +4,7 @@ import asyncio
 import copy
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from telegram import Update
 
@@ -158,6 +158,232 @@ class PublishSettingCollectionTests(unittest.TestCase):
 
         self.assertEqual(len(refreshed["items"]), 1)
         self.assertEqual(refreshed["items"][0]["post"]["fields"]["艺名"], ["新艺名"])
+
+
+class PublishSettingKeywordSearchTests(unittest.TestCase):
+    @staticmethod
+    def _route(index: int) -> dict:
+        return {
+            "label": "标签",
+            "raw": f"目标-{index}",
+            "key": f"目标-{index}",
+            "channel_id": -1001234567890,
+            "channel_message_id": index + 1,
+            "discussion_message_id": index + 100,
+            "created_at": index,
+        }
+
+    def test_keyword_route_search_keeps_all_unique_matches(self):
+        """A broad search is no longer capped at the first 30 results."""
+        records = [self._route(index) for index in range(35)]
+        # Duplicate index 0 must still be presented only once because the user
+        # selects a post, not an individual extracted field record.
+        records.append({**self._route(0), "label": "区域", "created_at": 999})
+
+        with patch.object(
+            publish,
+            "load_publish_config",
+            return_value={"channel_id": -1001234567890},
+        ):
+            routes = publish._find_keyword_routes(
+                "目标",
+                keyword_data={"目标": records},
+            )
+
+        self.assertEqual(len(routes), 35)
+        self.assertEqual(routes[0]["channel_message_id"], 1)
+
+    def test_keyword_map_save_keeps_more_than_thirty_records_per_key(self):
+        """Pagination must not be undermined by index-save truncation."""
+        data = {
+            "热门关键词": [self._route(index) for index in range(35)],
+        }
+
+        with patch.object(publish, "save_json") as save_json:
+            publish._save_keyword_map(data)
+
+        self.assertEqual(len(data["热门关键词"]), 35)
+        save_json.assert_called_once_with(publish.KEYWORD_MAP_FILE, data)
+
+    def test_post_result_keyboard_paginates_without_changing_indexes(self):
+        routes = [
+            {**self._route(index), "display_channel": "主频道"}
+            for index in range(17)
+        ]
+
+        markup = publish._keyword_post_results_keyboard(routes, page=2)
+        buttons = [button for row in markup.inline_keyboard for button in row]
+        callbacks = [button.callback_data for button in buttons if button.callback_data]
+
+        self.assertIn("publish:keyword_post_pick:8", callbacks)
+        self.assertIn("publish:keyword_post_pick:15", callbacks)
+        self.assertIn("publish:keyword_post_page:1", callbacks)
+        self.assertIn("publish:keyword_post_page:3", callbacks)
+        self.assertNotIn("publish:keyword_post_pick:16", callbacks)
+
+    def test_main_channel_display_mode_does_not_truncate_results(self):
+        routes = [self._route(index) for index in range(25)]
+
+        displayed = publish._keyword_post_display_routes(
+            routes,
+            {
+                "channel_id": -1001234567890,
+                "keyword_post_search_display_mode": "main",
+            },
+        )
+
+        self.assertEqual(len(displayed), 25)
+
+
+class PublishSettingInputSearchPriorityTests(unittest.TestCase):
+    def test_active_channel_id_prompt_blocks_global_input_search(self):
+        """A channel-ID setting must own the next text even when search is global."""
+        message = SimpleNamespace(text="-1001234567890", reply_text=AsyncMock())
+        update = SimpleNamespace(
+            message=message,
+            effective_chat=SimpleNamespace(type="private"),
+        )
+        context = SimpleNamespace(user_data={"waiting_channel_id": True})
+
+        async def attempt_search():
+            with patch.object(
+                publish,
+                "load_publish_config",
+                return_value={"input_search_enabled": True},
+            ):
+                return await publish._handle_keyword_post_search_input(update, context)
+
+        handled = asyncio.run(attempt_search())
+
+        self.assertFalse(handled)
+        message.reply_text.assert_not_awaited()
+
+    def test_channel_id_prompt_is_processed_before_private_forwarding(self):
+        message = SimpleNamespace(text="-1001234567890", reply_text=AsyncMock())
+        update = SimpleNamespace(
+            message=message,
+            effective_chat=SimpleNamespace(type="private"),
+        )
+        config = {"input_search_enabled": True, "channel_id": -1001111111111}
+        context = SimpleNamespace(user_data={"waiting_channel_id": True})
+
+        async def process_text():
+            with (
+                patch.object(publish, "load_publish_config", return_value=config),
+                patch.object(publish, "save_publish_config") as save_config,
+                patch.object(publish, "_record_publish_channel_change"),
+            ):
+                with self.assertRaises(publish.ApplicationHandlerStop):
+                    await publish._keyword_search_interceptor(update, context)
+                return save_config
+
+        save_config = asyncio.run(process_text())
+
+        self.assertEqual(config["channel_id"], -1001234567890)
+        self.assertFalse(context.user_data["waiting_channel_id"])
+        save_config.assert_called_once()
+        self.assertIn("✅ 已保存频道", message.reply_text.await_args.args[0])
+
+
+class PublishSettingReportDeletionTests(unittest.TestCase):
+    """Regression coverage for report comments deleted by an administrator."""
+
+    @staticmethod
+    def _approved_comment_submission() -> dict:
+        return {
+            "status": "approved",
+            "submission_kind": "comment",
+            "report_author": "测试用户",
+            "report_content": "给 @x9988778 的评论",
+            "forward_channel_id": -1009876543210,
+            "channel_message_id": 321,
+            "reviewed_at": 1_700_000_000,
+            "comment_target": {
+                "channel_id": -1001234567890,
+                "message_id": 456,
+            },
+        }
+
+    @classmethod
+    def _report(cls, comment: dict) -> dict:
+        return {
+            "channel_id": -1001234567890,
+            "message_id": 456,
+            "subjects": [{"label": "联系方式", "value": "@x9988778"}],
+            "comments": [comment],
+        }
+
+    def test_deleted_comment_is_not_restored_when_report_link_is_reopened(self):
+        """Backfill from approved submissions must honor report deletions."""
+        submission = self._approved_comment_submission()
+        comment = publish._report_comment_from_submission(submission)
+        report = self._report(comment)
+
+        removed = report["comments"].pop()
+        self.assertTrue(publish._mark_report_comment_deleted(report, removed))
+
+        with (
+            patch.object(publish, "_keyword_post_refs_for_report_usernames", return_value=[]),
+            patch.object(publish, "_load_pending_submissions", return_value={"comment-1": submission}),
+        ):
+            changed = publish._backfill_report_comments(report, "x9988778")
+
+        self.assertEqual(changed, 0)
+        self.assertEqual(report["comments"], [])
+        self.assertTrue(publish._is_report_comment_deleted(report, comment))
+
+    def test_deleted_comment_is_not_readded_by_late_publish_completion(self):
+        """A concurrent/late approval write must honor the same tombstone."""
+        submission = self._approved_comment_submission()
+        comment = publish._report_comment_from_submission(submission)
+        report = self._report(comment)
+        publish._mark_report_comment_deleted(report, report["comments"].pop())
+        data = {"reports": {"x9988778": report}, "aliases": {}}
+
+        with (
+            patch.object(publish, "_load_comment_reports", return_value=data),
+            patch.object(publish, "_save_comment_reports") as save_reports,
+        ):
+            publish._append_report_comment(
+                submission,
+                SimpleNamespace(message_id=submission["channel_message_id"]),
+            )
+
+        self.assertEqual(report["comments"], [])
+        save_reports.assert_not_called()
+
+    def test_delete_sync_removes_original_and_forwarding_copies(self):
+        """Deleting a report row also removes every tracked Telegram copy."""
+        comment = {
+            "main_discussion_chat_id": -1000000000001,
+            "main_discussion_message_id": 101,
+            "backup_discussion_chat_id": -1000000000002,
+            "backup_discussion_message_id": 202,
+            "forward_channel_id": -1000000000003,
+            "forward_message_id": 303,
+        }
+        calls = []
+
+        async def delete_message(*, chat_id, message_id):
+            calls.append((chat_id, message_id))
+
+        async def delete_all_copies():
+            return await publish._sync_report_comment_deletion(
+                SimpleNamespace(bot=SimpleNamespace(delete_message=delete_message)),
+                comment,
+            )
+
+        deleted, untracked, failed = asyncio.run(delete_all_copies())
+
+        self.assertEqual((deleted, untracked, failed), (3, 0, 0))
+        self.assertEqual(
+            calls,
+            [
+                (-1000000000001, 101),  # native reply below the original post
+                (-1000000000002, 202),  # optional backup-post reply
+                (-1000000000003, 303),  # optional forwarding-channel copy
+            ],
+        )
 
 
 if __name__ == "__main__":

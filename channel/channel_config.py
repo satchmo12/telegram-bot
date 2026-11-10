@@ -3,6 +3,7 @@ import os
 import random
 import re
 import time
+import uuid
 from typing import Optional
 from datetime import datetime, timedelta
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -10,6 +11,10 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, Mes
 
 from command_router import register_command
 from admin_permissions import has_admin_permission
+from channel.protocol_submission import (
+    authorize_protocol_history_request,
+    revoke_protocol_history_request,
+)
 from channel.access_control import (
     is_channel_subscription_required,
     set_channel_subscription_required,
@@ -618,6 +623,8 @@ def _new_rule_default(user_id: str, *, source_id=None, source_name: str = "", se
         "replace_submit_user": "",
         "clear_links": False,
         "skip_links": False,
+        # Also receive posts sent by this very protocol account to a channel.
+        "listen_outgoing": True,
         "start_id": "",
         "end_id": "",
         "include_words": [],
@@ -627,6 +634,9 @@ def _new_rule_default(user_id: str, *, source_id=None, source_name: str = "", se
         "suffix": "",
         "media_replace": "",
         "speed": "",
+        # When enabled, the protocol account forwards the original channel
+        # post to this bot. The bot then enters the normal 投稿 pipeline.
+        "submit_to_bot": False,
         "session_name": session_name or "",
     }
     return rule
@@ -890,6 +900,8 @@ def _build_rule_panel_keyboard(
     enabled = bool(rule.get("enabled", True))
     clear_links = bool(rule.get("clear_links", False))
     skip_links = bool(rule.get("skip_links", False))
+    listen_outgoing = bool(rule.get("listen_outgoing", True))
+    submit_to_bot = bool(rule.get("submit_to_bot", False))
     mode = str(rule.get("mode", "listen") or "listen").lower()
     en_on = "✅ 开启" if enabled else "开启"
     en_off = "✅ 关闭" if not enabled else "关闭"
@@ -921,8 +933,31 @@ def _build_rule_panel_keyboard(
                 callback_data=f"{CALLBACK_PREFIX}:panel:skip_links_off:{index}",
             ),
         ],
-        [InlineKeyboardButton("设置开始和结束消息id", callback_data=f"{CALLBACK_PREFIX}:panel:range:{index}")],
-        [InlineKeyboardButton("开始历史转发", callback_data=f"{CALLBACK_PREFIX}:panel:history_start:{index}")],
+        [
+            InlineKeyboardButton(
+                f"监听自己发帖: {'✅ 开启' if listen_outgoing else '开启'}",
+                callback_data=f"{CALLBACK_PREFIX}:panel:outgoing_on:{index}",
+            ),
+            InlineKeyboardButton(
+                f"监听自己发帖: {'✅ 关闭' if not listen_outgoing else '关闭'}",
+                callback_data=f"{CALLBACK_PREFIX}:panel:outgoing_off:{index}",
+            ),
+        ],
+        [InlineKeyboardButton("设置开始和结束消息ID", callback_data=f"{CALLBACK_PREFIX}:panel:range:{index}")],
+        [
+            InlineKeyboardButton(
+                f"投稿机器人: {'✅ 开启' if submit_to_bot else '开启'}",
+                callback_data=f"{CALLBACK_PREFIX}:panel:submit_bot_on:{index}",
+            ),
+            InlineKeyboardButton(
+                f"投稿机器人: {'✅ 关闭' if not submit_to_bot else '关闭'}",
+                callback_data=f"{CALLBACK_PREFIX}:panel:submit_bot_off:{index}",
+            ),
+        ],
+        [
+            InlineKeyboardButton("开始历史转发", callback_data=f"{CALLBACK_PREFIX}:panel:history_start:{index}"),
+            InlineKeyboardButton("停止历史转发", callback_data=f"{CALLBACK_PREFIX}:panel:history_stop:{index}"),
+        ],
         [
             InlineKeyboardButton("设置监听频道id", callback_data=f"{CALLBACK_PREFIX}:panel:source:{index}"),
             InlineKeyboardButton("设置目标频道id", callback_data=f"{CALLBACK_PREFIX}:panel:target:{index}"),
@@ -981,8 +1016,10 @@ def _format_rule_panel_text(
         f"任务类型：{mode}",
         f"清除链接：{clear_links}",
         f"含链接不转发：{'开启' if bool(rule.get('skip_links', False)) else '关闭'}",
+        f"监听自己发帖：{'开启' if bool(rule.get('listen_outgoing', True)) else '关闭'}",
         f"监听频道：{src_label or sources}",
         f"目标频道：{tgt_label or targets}",
+        f"转发到投稿机器人：{'开启' if bool(rule.get('submit_to_bot', False)) else '关闭'}",
     ]
     if _show_session(context):
         lines.append(f"协议号：{session_name}")
@@ -1072,6 +1109,10 @@ def _update_rule_field(context: ContextTypes.DEFAULT_TYPE, user_id: str, index: 
         rule["mode"] = mode
     elif field == "clear_links":
         rule["clear_links"] = bool(value)
+    elif field == "submit_to_bot":
+        rule["submit_to_bot"] = bool(value)
+    elif field == "listen_outgoing":
+        rule["listen_outgoing"] = bool(value)
     elif field == "start_id":
         rule["start_id"] = value
     elif field == "end_id":
@@ -1119,6 +1160,14 @@ def _update_rule_field(context: ContextTypes.DEFAULT_TYPE, user_id: str, index: 
         return False
     rules[index] = rule
     _set_user_rules(context, user_id, rules)
+    # Rules are normally refreshed every 30 seconds. Wake the listener now so
+    # a newly selected channel/protocol account takes effect immediately.
+    try:
+        from channel.telethon_forwarder import request_telethon_refresh
+
+        request_telethon_refresh(str(context.application.bot_data.get("name", "") or ""))
+    except Exception:
+        pass
     return True
 
 
@@ -1284,15 +1333,21 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "2. 搬运频道ID：填写来源频道ID（如 -1001234567890）。\n"
             "3. 目标频道ID：填写要发布的目标频道ID。\n"
             "4. 是否开启：决定是否执行该规则。\n"
-            "5. 任务模式：监听消息 / 转发历史（历史模式暂不执行）。\n"
+            "5. 任务模式：监听消息 / 转发历史；设置开始、结束消息 ID 后可执行历史转发。\n"
             "6. 任务类型：全部/文本/图片/视频。\n"
             "7. 联系方式：选择显示或不显示；不显示会跳过用户名配置。\n"
             "8. 频道用户名/群名/投稿用户名：用于替换文本中的联系方式。\n"
             "9. 协议号/小号：用于指定使用哪个登录的小号执行转发。\n"
+            "10. 投稿机器人：开启后，协议号会把原始频道帖子转发给当前机器人并自动投稿；目标频道可留空。\n"
+            "11. 监听自己发帖：协议号本人发布到来源频道的帖子也会被监听；默认开启。\n"
         )
         if not _show_session(context):
             help_text = help_text.replace(
                 "9. 协议号/小号：用于指定使用哪个登录的小号执行转发。\n", ""
+            ).replace(
+                "10. 投稿机器人：开启后，协议号会把原始频道帖子转发给当前机器人并自动投稿；目标频道可留空。\n", ""
+            ).replace(
+                "11. 监听自己发帖：协议号本人发布到来源频道的帖子也会被监听；默认开启。\n", ""
             )
         return await query.edit_message_text(
             help_text, reply_markup=_with_start_back(context, _build_main_menu_keyboard(context))
@@ -1333,19 +1388,90 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _update_rule_field(context, user_id, idx, "skip_links", True)
         elif sub == "skip_links_off":
             _update_rule_field(context, user_id, idx, "skip_links", False)
+        elif sub == "outgoing_on":
+            _update_rule_field(context, user_id, idx, "listen_outgoing", True)
+        elif sub == "outgoing_off":
+            _update_rule_field(context, user_id, idx, "listen_outgoing", False)
+        elif sub == "submit_bot_on":
+            if not str(getattr(context.bot, "username", "") or "").strip():
+                return await query.edit_message_text(
+                    "❗ 当前机器人未设置用户名，协议号无法私聊它完成投稿。"
+                )
+            _update_rule_field(context, user_id, idx, "submit_to_bot", True)
+        elif sub == "submit_bot_off":
+            _update_rule_field(context, user_id, idx, "submit_to_bot", False)
         elif sub == "history_start":
+            sources = rule.get("sources", []) or []
+            targets = rule.get("targets", []) or []
+            start_id = str(rule.get("start_id", "") or "").strip()
+            end_id = str(rule.get("end_id", "") or "").strip()
+            if not sources:
+                return await query.edit_message_text("❗ 请先设置监听频道 ID。")
+            if not start_id and not end_id:
+                return await query.edit_message_text(
+                    "❗ 为避免误转发全部历史消息，请先设置开始或结束消息 ID。"
+                )
+            if not targets and not bool(rule.get("submit_to_bot", False)):
+                return await query.edit_message_text("❗ 请设置目标频道 ID，或开启“投稿机器人”。")
             requests = load_json(HISTORY_REQUESTS_FILE)
             if not isinstance(requests, list):
                 requests = []
+            history_rule = dict(rule)
+            if bool(history_rule.get("submit_to_bot", False)):
+                history_rule["_submission_bot_username"] = str(
+                    getattr(context.bot, "username", "") or ""
+                ).strip().lstrip("@")
+            request_id = uuid.uuid4().hex
             requests.append(
                 {
                     "user_id": user_id,
                     "rule_index": idx,
-                    "rule": rule,
+                    "rule": history_rule,
+                    "request_id": request_id,
                     "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
             )
             save_json(HISTORY_REQUESTS_FILE, requests)
+            authorize_protocol_history_request(request_id)
+            try:
+                from channel.telethon_forwarder import request_telethon_refresh
+
+                request_telethon_refresh(str(context.application.bot_data.get("name", "") or ""))
+            except Exception:
+                pass
+            # The rule panel itself has not changed, so editing it here would
+            # trigger Telegram's “Message is not modified” error. Send an
+            # independent acknowledgement instead and retain the panel.
+            range_text = f"{start_id or '最早'} ～ {end_id or '最新'}"
+            return await query.message.reply_text(
+                f"✅ 历史转发任务已加入队列（任务 {request_id[:8]}）。\n"
+                f"消息范围：{range_text}\n"
+                "可点击原面板中的“停止历史转发”取消。"
+            )
+        elif sub == "history_stop":
+            queued_requests = load_json(HISTORY_REQUESTS_FILE)
+            request_ids = []
+            if isinstance(queued_requests, list):
+                request_ids = [
+                    str(item.get("request_id", "") or "")
+                    for item in queued_requests
+                    if isinstance(item, dict)
+                    and str(item.get("user_id", "")) == user_id
+                    and int(item.get("rule_index", -1)) == idx
+                ]
+            _clear_history_requests(user_id, idx)
+            for request_id in request_ids:
+                revoke_protocol_history_request(request_id)
+            try:
+                from channel.telethon_forwarder import request_telethon_refresh
+
+                request_telethon_refresh(str(context.application.bot_data.get("name", "") or ""))
+            except Exception:
+                pass
+            return await query.edit_message_text(
+                "✅ 已请求停止该规则的历史转发；当前正在发送的一条消息完成后会停止。",
+                reply_markup=_build_rule_panel_keyboard(context, idx, rule),
+            )
         elif sub == "session":
             if not _show_session(context):
                 return await query.edit_message_text("机器人转发无需设置小号。")
@@ -1837,9 +1963,15 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if field == "remark":
             _update_rule_field(context, user_id, idx, "name", text)
         elif field == "range":
-            parts = text.split()
+            parts = [item for item in re.split(r"[,，\s]+", text) if item]
+            if len(parts) > 2 or any(not item.isdigit() or int(item) <= 0 for item in parts):
+                await update.message.reply_text("❗ 请输入 1 个或 2 个正整数消息 ID，例如：100 200。")
+                return True
             start_id = parts[0] if parts else ""
             end_id = parts[1] if len(parts) > 1 else ""
+            if start_id and end_id and int(start_id) > int(end_id):
+                await update.message.reply_text("❗ 开始消息 ID 不能大于结束消息 ID。")
+                return True
             _update_rule_field(context, user_id, idx, "start_id", start_id)
             _update_rule_field(context, user_id, idx, "end_id", end_id)
         elif field == "source":

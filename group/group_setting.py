@@ -6,7 +6,7 @@ import re
 import time
 from typing import Optional
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity, Update
+from telegram import ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity, Update
 from telegram.error import Forbidden, RetryAfter
 from telegram.ext import (
     CallbackQueryHandler,
@@ -77,6 +77,8 @@ from admin_permissions import has_admin_permission
 
 from utils import (
     GROUP_LIST_FILE,
+    bot_now,
+    get_bot_timezone,
     get_group_whitelist,
     is_bot_owner,
     is_super_admin,
@@ -178,6 +180,37 @@ DEFAULT_AI_REPLY_DELAY_MAX_SEC = 8
 AD_PUSH_MIN_INTERVAL = 5
 AD_PUSH_MAX_INTERVAL = 1440
 MANAGE_CHECK_CACHE_TTL_SEC = 60
+# Group-close (lock) settings are stored with each group in GROUP_LIST_FILE.
+GROUP_LOCK_COMMAND_DEFAULT = "锁群"
+GROUP_UNLOCK_COMMAND_DEFAULT = "解锁群"
+GROUP_LOCK_MESSAGE_DEFAULT = "🔒 本群已关闭，暂时禁止成员发言。"
+GROUP_UNLOCK_MESSAGE_DEFAULT = "🔓 本群已解锁，成员现在可以正常发言。"
+GROUP_LOCK_TIME_DEFAULT = "00:00"
+GROUP_UNLOCK_TIME_DEFAULT = "08:00"
+GROUP_LOCK_SCHEDULER_INTERVAL_SECONDS = 60
+GROUP_LOCK_PERMISSION_FIELDS = (
+    "can_send_messages",
+    "can_send_audios",
+    "can_send_documents",
+    "can_send_photos",
+    "can_send_videos",
+    "can_send_video_notes",
+    "can_send_voice_notes",
+    "can_send_polls",
+    "can_send_other_messages",
+    "can_add_web_page_previews",
+    "can_change_info",
+    "can_invite_users",
+    "can_pin_messages",
+    "can_manage_topics",
+)
+GROUP_LOCK_TEXT_STAGES = frozenset({
+    "group_lock_command",
+    "group_unlock_command",
+    "group_lock_message",
+    "group_unlock_message",
+    "group_lock_schedule",
+})
 GROUP_LIST_PAGE_SIZE = 10
 FROZEN_ACCOUNT_SCAN_KEY = "group_setting_frozen_account_scan"
 FROZEN_ACCOUNT_SCAN_MAX_AGE_SECONDS = 10 * 60
@@ -280,6 +313,336 @@ def _mark_force_subscribe_set_ts(chat_id: str, ts: Optional[int] = None):
 
 def _toggle_text(enabled: bool) -> str:
     return "✅ 开启" if enabled else "🚫 关闭"
+
+
+def _group_lock_value(cfg: dict, key: str, default: str = "") -> str:
+    return str((cfg or {}).get(key) or default).strip()
+
+
+def _normalize_group_lock_command(value: str) -> str:
+    command = str(value or "").strip()
+    if command.startswith("/"):
+        command = command[1:].strip()
+    if "@" in command:
+        command = command.split("@", 1)[0].strip()
+    return command
+
+
+def _normalize_group_lock_time(value: str) -> Optional[str]:
+    matched = re.fullmatch(r"(\d{1,2}):(\d{2})", str(value or "").strip())
+    if not matched:
+        return None
+    hour, minute = int(matched.group(1)), int(matched.group(2))
+    if minute > 59 or hour > 24 or (hour == 24 and minute != 0):
+        return None
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _group_lock_time_minutes(value: str) -> Optional[int]:
+    normalized = _normalize_group_lock_time(value)
+    if not normalized:
+        return None
+    hour, minute = (int(part) for part in normalized.split(":"))
+    return (0 if hour == 24 else hour) * 60 + minute
+
+
+def _parse_group_lock_schedule(value: str) -> Optional[tuple[str, str]]:
+    parts = [item for item in re.split(r"[\s,，、~～至\-]+", str(value or "").strip()) if item]
+    if len(parts) != 2:
+        return None
+    lock_time = _normalize_group_lock_time(parts[0])
+    unlock_time = _normalize_group_lock_time(parts[1])
+    if not lock_time or not unlock_time:
+        return None
+    if _group_lock_time_minutes(lock_time) == _group_lock_time_minutes(unlock_time):
+        return None
+    return lock_time, unlock_time
+
+
+def _is_group_lock_schedule_locked(lock_time: str, unlock_time: str, minute_of_day: int) -> bool:
+    """Whether a daily lock window should be active at ``minute_of_day``.
+
+    A window such as ``24:00 08:00`` crosses midnight, while ``09:00 18:00``
+    locks only during the daytime interval.
+    """
+    lock_minute = _group_lock_time_minutes(lock_time)
+    unlock_minute = _group_lock_time_minutes(unlock_time)
+    if lock_minute is None or unlock_minute is None or lock_minute == unlock_minute:
+        return False
+    minute_of_day %= 24 * 60
+    if lock_minute < unlock_minute:
+        return lock_minute <= minute_of_day < unlock_minute
+    return minute_of_day >= lock_minute or minute_of_day < unlock_minute
+
+
+def _group_lock_permissions_from_chat(chat) -> dict:
+    permissions = getattr(chat, "permissions", None)
+    snapshot = {}
+    for field in GROUP_LOCK_PERMISSION_FIELDS:
+        value = getattr(permissions, field, None) if permissions is not None else None
+        if isinstance(value, bool):
+            snapshot[field] = value
+    return snapshot
+
+
+def _open_group_lock_permissions() -> ChatPermissions:
+    # Fallback for legacy groups without a pre-lock permission snapshot. Open
+    # ordinary messaging only; never grant broader chat-management powers.
+    message_fields = {
+        "can_send_messages",
+        "can_send_audios",
+        "can_send_documents",
+        "can_send_photos",
+        "can_send_videos",
+        "can_send_video_notes",
+        "can_send_voice_notes",
+        "can_send_polls",
+        "can_send_other_messages",
+        "can_add_web_page_previews",
+    }
+    return ChatPermissions(**{
+        field: field in message_fields
+        for field in GROUP_LOCK_PERMISSION_FIELDS
+    })
+
+
+def _closed_group_lock_permissions() -> ChatPermissions:
+    return ChatPermissions(**{field: False for field in GROUP_LOCK_PERMISSION_FIELDS})
+
+
+def _restored_group_lock_permissions(cfg: dict) -> ChatPermissions:
+    snapshot = (cfg or {}).get("group_lock_restore_permissions")
+    if not isinstance(snapshot, dict):
+        return _open_group_lock_permissions()
+    values = {
+        field: value
+        for field, value in snapshot.items()
+        if field in GROUP_LOCK_PERMISSION_FIELDS and isinstance(value, bool)
+    }
+    return ChatPermissions(**values) if values else _open_group_lock_permissions()
+
+
+def _group_lock_settings_text(chat_id_str: str, cfg: dict) -> str:
+    enabled = bool((cfg or {}).get("group_lock_enabled", False))
+    locked = bool((cfg or {}).get("group_lock_locked", False))
+    schedule_enabled = bool((cfg or {}).get("group_lock_schedule_enabled", False))
+    lock_command = _group_lock_value(cfg, "group_lock_command", GROUP_LOCK_COMMAND_DEFAULT)
+    unlock_command = _group_lock_value(cfg, "group_unlock_command", GROUP_UNLOCK_COMMAND_DEFAULT)
+    lock_message = _group_lock_value(cfg, "group_lock_message", GROUP_LOCK_MESSAGE_DEFAULT)
+    unlock_message = _group_lock_value(cfg, "group_unlock_message", GROUP_UNLOCK_MESSAGE_DEFAULT)
+    lock_time = _group_lock_value(cfg, "group_lock_time", GROUP_LOCK_TIME_DEFAULT)
+    unlock_time = _group_lock_value(cfg, "group_unlock_time", GROUP_UNLOCK_TIME_DEFAULT)
+    return "\n".join([
+        "🔒 <b>关群设置</b>",
+        f"群ID：<code>{chat_id_str}</code>",
+        "",
+        f"功能：{'✅ 已开启' if enabled else '🚫 未开启'}",
+        f"当前状态：{'🔒 已锁群' if locked else '🔓 未锁群'}",
+        f"锁群命令：<code>{html.escape(lock_command)}</code>",
+        f"解锁命令：<code>{html.escape(unlock_command)}</code>",
+        f"自动锁群：{'✅ 开启' if schedule_enabled else '🚫 关闭'}",
+        f"时间段：<code>{html.escape(lock_time)}</code> 锁群 → <code>{html.escape(unlock_time)}</code> 解锁",
+        "",
+        f"锁群提示：{html.escape(lock_message[:120])}",
+        f"解锁提示：{html.escape(unlock_message[:120])}",
+        "",
+        f"按机器人时区（{html.escape(get_bot_timezone())}）执行；24:00 可作为当天午夜。",
+        "机器人需要“限制成员”管理员权限。",
+    ])
+
+
+def _group_lock_settings_keyboard(chat_id_str: str, cfg: dict) -> InlineKeyboardMarkup:
+    enabled = bool((cfg or {}).get("group_lock_enabled", False))
+    schedule_enabled = bool((cfg or {}).get("group_lock_schedule_enabled", False))
+    rows = [
+        [InlineKeyboardButton(
+            f"{'✅' if enabled else '🚫'} 启用关群功能",
+            callback_data=f"{CALLBACK_PREFIX}:group_lock_toggle:{chat_id_str}",
+        )],
+        [
+            InlineKeyboardButton("🔒 立即锁群", callback_data=f"{CALLBACK_PREFIX}:group_lock_now:{chat_id_str}"),
+            InlineKeyboardButton("🔓 立即解锁", callback_data=f"{CALLBACK_PREFIX}:group_unlock_now:{chat_id_str}"),
+        ],
+        [
+            InlineKeyboardButton("✏️ 锁群命令", callback_data=f"{CALLBACK_PREFIX}:group_lock_edit:{chat_id_str}:command"),
+            InlineKeyboardButton("✏️ 解锁群命令", callback_data=f"{CALLBACK_PREFIX}:group_lock_edit:{chat_id_str}:unlock_command"),
+        ],
+        [
+            InlineKeyboardButton("💬 锁群提示语", callback_data=f"{CALLBACK_PREFIX}:group_lock_edit:{chat_id_str}:message"),
+            InlineKeyboardButton("💬 解锁提示语", callback_data=f"{CALLBACK_PREFIX}:group_lock_edit:{chat_id_str}:unlock_message"),
+        ],
+        [
+            InlineKeyboardButton(
+                f"{'✅' if schedule_enabled else '🚫'} 自动锁群",
+                callback_data=f"{CALLBACK_PREFIX}:group_lock_schedule_toggle:{chat_id_str}",
+            ),
+            InlineKeyboardButton("⏰ 设置时间段", callback_data=f"{CALLBACK_PREFIX}:group_lock_edit:{chat_id_str}:schedule"),
+        ],
+        [InlineKeyboardButton("⬅️ 返回管理与安全", callback_data=f"{CALLBACK_PREFIX}:category:{chat_id_str}:moderation")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+async def _bot_can_restrict_group_members(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
+    try:
+        member = await context.bot.get_chat_member(chat_id, context.bot.id)
+    except Exception:
+        return False
+    status = str(getattr(getattr(member, "status", ""), "value", getattr(member, "status", ""))).lower()
+    return status in {"creator", "owner"} or bool(getattr(member, "can_restrict_members", False))
+
+
+async def _apply_group_lock_state(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    cfg: dict,
+    *,
+    locked: bool,
+    announce: bool = True,
+) -> tuple[bool, str]:
+    """Apply lock permissions and update the supplied group config in place."""
+    try:
+        if locked and not bool(cfg.get("group_lock_locked", False)):
+            chat = await context.bot.get_chat(chat_id)
+            snapshot = _group_lock_permissions_from_chat(chat)
+            if snapshot:
+                cfg["group_lock_restore_permissions"] = snapshot
+        permissions = _closed_group_lock_permissions() if locked else _restored_group_lock_permissions(cfg)
+        await context.bot.set_chat_permissions(
+            chat_id=chat_id,
+            permissions=permissions,
+            use_independent_chat_permissions=True,
+        )
+    except Forbidden:
+        return False, "机器人缺少“限制成员”管理员权限，无法锁群或解锁。"
+    except Exception as exc:
+        return False, f"锁群操作失败：{str(exc)[:160]}"
+
+    cfg["group_lock_locked"] = locked
+    cfg["group_lock_last_changed_at"] = int(time.time())
+    if announce:
+        message = _group_lock_value(
+            cfg,
+            "group_lock_message" if locked else "group_unlock_message",
+            GROUP_LOCK_MESSAGE_DEFAULT if locked else GROUP_UNLOCK_MESSAGE_DEFAULT,
+        )
+        if message:
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=message)
+            except Exception as exc:
+                print(f"关群状态提示发送失败 chat={chat_id}: {exc}")
+    return True, "已锁群。" if locked else "已解锁群。"
+
+
+async def _open_group_lock_panel(query, context: ContextTypes.DEFAULT_TYPE, chat_id_str: str, user_id: int):
+    chat_id = _parse_chat_id(chat_id_str)
+    if chat_id is None:
+        return await query.answer("群ID无效。", show_alert=True)
+    if not await _can_manage_group(context, user_id, chat_id):
+        return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+    if not await _bot_can_restrict_group_members(context, chat_id):
+        return await query.answer("机器人缺少“限制成员”管理员权限。", show_alert=True)
+    cfg = get_group_whitelist(context).get(chat_id_str, {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    await query.answer()
+    return await query.edit_message_text(
+        _group_lock_settings_text(chat_id_str, cfg),
+        reply_markup=_group_lock_settings_keyboard(chat_id_str, cfg),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+def _group_lock_command_action(text: str, cfg: dict) -> Optional[bool]:
+    """Return True for lock / False for unlock / None when text is unrelated."""
+    raw = str(text or "").strip()
+    if not raw or any(char.isspace() for char in raw):
+        return None
+    command = _normalize_group_lock_command(raw)
+    lock_command = _group_lock_value(cfg, "group_lock_command", GROUP_LOCK_COMMAND_DEFAULT)
+    unlock_command = _group_lock_value(cfg, "group_unlock_command", GROUP_UNLOCK_COMMAND_DEFAULT)
+    if command == lock_command:
+        return True
+    if command == unlock_command:
+        return False
+    return None
+
+
+async def _handle_group_lock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_group_feature_enabled(context):
+        return
+    message = update.message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not chat or not user or str(getattr(chat, "type", "")) not in {"group", "supergroup"}:
+        return
+
+    chat_id = int(chat.id)
+    chat_id_str = str(chat_id)
+    data = get_group_whitelist(context)
+    cfg = data.get(chat_id_str, {})
+    if not isinstance(cfg, dict) or not bool(cfg.get("group_lock_enabled", False)):
+        return
+    locked = _group_lock_command_action(message.text, cfg)
+    if locked is None:
+        return
+
+    if not await _can_manage_group(context, user.id, chat_id):
+        await message.reply_text("❌ 仅群管理员可以执行锁群或解锁群。")
+        raise ApplicationHandlerStop
+    if not await _bot_can_restrict_group_members(context, chat_id):
+        await message.reply_text("❌ 机器人缺少“限制成员”管理员权限。")
+        raise ApplicationHandlerStop
+    if bool(cfg.get("group_lock_locked", False)) == locked:
+        await message.reply_text("当前已经是锁群状态。" if locked else "当前已经是解锁状态。")
+        raise ApplicationHandlerStop
+
+    ok, detail = await _apply_group_lock_state(
+        context, chat_id, cfg, locked=locked, announce=True
+    )
+    if not ok:
+        await message.reply_text(f"❌ {detail}")
+        raise ApplicationHandlerStop
+    data[chat_id_str] = cfg
+    save_json(GROUP_LIST_FILE, data)
+    raise ApplicationHandlerStop
+
+
+async def _run_group_lock_scheduler(context: ContextTypes.DEFAULT_TYPE):
+    """Synchronize each enabled group with its configured daily lock window."""
+    if not _is_group_feature_enabled(context):
+        return
+    now = bot_now(context)
+    minute_of_day = now.hour * 60 + now.minute
+    data = get_group_whitelist(context)
+    changed = False
+    for chat_id_str, cfg in data.items():
+        if not isinstance(cfg, dict):
+            continue
+        if not bool(cfg.get("group_lock_enabled", False)) or not bool(
+            cfg.get("group_lock_schedule_enabled", False)
+        ):
+            continue
+        chat_id = _parse_chat_id(str(chat_id_str))
+        if chat_id is None:
+            continue
+        lock_time = _group_lock_value(cfg, "group_lock_time", GROUP_LOCK_TIME_DEFAULT)
+        unlock_time = _group_lock_value(cfg, "group_unlock_time", GROUP_UNLOCK_TIME_DEFAULT)
+        desired_locked = _is_group_lock_schedule_locked(
+            lock_time, unlock_time, minute_of_day
+        )
+        if bool(cfg.get("group_lock_locked", False)) == desired_locked:
+            continue
+        ok, detail = await _apply_group_lock_state(
+            context, chat_id, cfg, locked=desired_locked, announce=True
+        )
+        if not ok:
+            print(f"自动锁群失败 chat={chat_id}: {detail}")
+            continue
+        changed = True
+    if changed:
+        save_json(GROUP_LIST_FILE, data)
 
 
 # New groups inherit the default from their saved config.  Existing groups must
@@ -1811,6 +2174,7 @@ def _build_group_category_keyboard(
                 callback_data=f"{CALLBACK_PREFIX}:ad_filter_menu:{chat_id}",
             )])
             rows.append([InlineKeyboardButton("📢 强制关注设置", callback_data=f"{CALLBACK_PREFIX}:force_subscribe_menu:{chat_id}")])
+            rows.append([InlineKeyboardButton("🔒 关群设置", callback_data=f"{CALLBACK_PREFIX}:group_lock_menu:{chat_id}")])
             rows.append([InlineKeyboardButton("🧹 清理冻结账号", callback_data=f"{CALLBACK_PREFIX}:clean_frozen:{chat_id}")])
     elif category == "automation":
         intervals = [
@@ -3018,6 +3382,108 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
                 [[InlineKeyboardButton("⬅️ 返回群配置", callback_data=f"{CALLBACK_PREFIX}:open:{chat_id_str}")]]
             ),
         )
+
+    if (action.startswith("group_lock_") or action == "group_unlock_now") and len(parts) >= 3:
+        chat_id_str = parts[2]
+        chat_id = _parse_chat_id(chat_id_str)
+        if chat_id is None:
+            return await query.answer("群ID无效。", show_alert=True)
+        if not await _can_manage_group(context, user_id, chat_id):
+            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
+        if not await _bot_can_restrict_group_members(context, chat_id):
+            return await query.answer("机器人缺少“限制成员”管理员权限。", show_alert=True)
+
+        cfg = data.get(chat_id_str, {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+
+        if action == "group_lock_menu":
+            return await _open_group_lock_panel(query, context, chat_id_str, user_id)
+
+        if action == "group_lock_toggle":
+            cfg["group_lock_enabled"] = not bool(cfg.get("group_lock_enabled", False))
+            if not cfg["group_lock_enabled"]:
+                cfg["group_lock_schedule_enabled"] = False
+            data[chat_id_str] = cfg
+            save_json(GROUP_LIST_FILE, data)
+            await query.answer("已开启关群功能。" if cfg["group_lock_enabled"] else "已关闭关群功能。")
+            return await query.edit_message_text(
+                _group_lock_settings_text(chat_id_str, cfg),
+                reply_markup=_group_lock_settings_keyboard(chat_id_str, cfg),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+
+        if action == "group_lock_schedule_toggle":
+            if not bool(cfg.get("group_lock_enabled", False)):
+                cfg["group_lock_enabled"] = True
+            cfg["group_lock_schedule_enabled"] = not bool(
+                cfg.get("group_lock_schedule_enabled", False)
+            )
+            data[chat_id_str] = cfg
+            save_json(GROUP_LIST_FILE, data)
+            await query.answer(
+                "已开启自动锁群。"
+                if cfg["group_lock_schedule_enabled"]
+                else "已关闭自动锁群。"
+            )
+            return await query.edit_message_text(
+                _group_lock_settings_text(chat_id_str, cfg),
+                reply_markup=_group_lock_settings_keyboard(chat_id_str, cfg),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+
+        if action in {"group_lock_now", "group_unlock_now"}:
+            if not bool(cfg.get("group_lock_enabled", False)):
+                return await query.answer("请先启用关群功能。", show_alert=True)
+            locked = action == "group_lock_now"
+            ok, detail = await _apply_group_lock_state(
+                context, chat_id, cfg, locked=locked, announce=True
+            )
+            if not ok:
+                return await query.answer(detail, show_alert=True)
+            data[chat_id_str] = cfg
+            save_json(GROUP_LIST_FILE, data)
+            await query.answer(detail)
+            return await query.edit_message_text(
+                _group_lock_settings_text(chat_id_str, cfg),
+                reply_markup=_group_lock_settings_keyboard(chat_id_str, cfg),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+
+        if action == "group_lock_edit" and len(parts) >= 4:
+            field = parts[3]
+            stage_by_field = {
+                "command": "group_lock_command",
+                "unlock_command": "group_unlock_command",
+                "message": "group_lock_message",
+                "unlock_message": "group_unlock_message",
+                "schedule": "group_lock_schedule",
+            }
+            prompt_by_field = {
+                "command": "请输入锁群命令，例如：锁群。支持输入 /锁群，保存时会自动去掉 /。",
+                "unlock_command": "请输入解锁群命令，例如：解锁群。支持输入 /解锁群，保存时会自动去掉 /。",
+                "message": "请输入锁群后的提示语。发送“默认”恢复默认提示。",
+                "unlock_message": "请输入解锁后的提示语。发送“默认”恢复默认提示。",
+                "schedule": "请输入“锁群时间 解锁时间”，例如：24:00 08:00 或 22:30,08:00。",
+            }
+            stage = stage_by_field.get(field)
+            if not stage:
+                return await query.answer("配置项无效。", show_alert=True)
+            context.user_data["group_setting_stage"] = stage
+            context.user_data["group_setting_chat_id"] = chat_id_str
+            await query.answer()
+            return await query.edit_message_text(
+                prompt_by_field[field],
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "⬅️ 返回关群设置",
+                    callback_data=f"{CALLBACK_PREFIX}:group_lock_menu:{chat_id_str}",
+                )]]),
+            )
+
+        return await query.answer("关群操作无效。", show_alert=True)
 
     if action == "category" and len(parts) >= 4:
         return await _open_group_category_panel(
@@ -4344,6 +4810,97 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
         return
     stage = context.user_data.get("group_setting_stage")
 
+    if isinstance(stage, str) and stage in GROUP_LOCK_TEXT_STAGES:
+        user = update.effective_user
+        chat_id_str = str(context.user_data.get("group_setting_chat_id") or "")
+        chat_id = _parse_chat_id(chat_id_str)
+        if not user or chat_id is None or not await _can_manage_group(context, user.id, chat_id):
+            context.user_data.pop("group_setting_stage", None)
+            context.user_data.pop("group_setting_chat_id", None)
+            await update.message.reply_text("❌ 你没有该群的关群配置权限。")
+            raise ApplicationHandlerStop
+        if not await _bot_can_restrict_group_members(context, chat_id):
+            await update.message.reply_text("❌ 机器人缺少“限制成员”管理员权限。")
+            raise ApplicationHandlerStop
+
+        text_value = str(update.message.text or "").strip()
+        if text_value in {"取消", "返回"}:
+            context.user_data.pop("group_setting_stage", None)
+            context.user_data.pop("group_setting_chat_id", None)
+            cfg = get_group_whitelist(context).get(chat_id_str, {})
+            await update.message.reply_text(
+                "已取消关群配置。\n\n" + _group_lock_settings_text(
+                    chat_id_str, cfg if isinstance(cfg, dict) else {}
+                ),
+                reply_markup=_group_lock_settings_keyboard(
+                    chat_id_str, cfg if isinstance(cfg, dict) else {}
+                ),
+                parse_mode="HTML",
+            )
+            raise ApplicationHandlerStop
+
+        data = get_group_whitelist(context)
+        cfg = data.get(chat_id_str, {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+
+        if stage in {"group_lock_command", "group_unlock_command"}:
+            command = _normalize_group_lock_command(text_value)
+            if not command or len(command) > 32 or any(char.isspace() for char in command):
+                await update.message.reply_text(
+                    "❗ 命令不能为空、不能有空格，且最多 32 个字符。"
+                )
+                raise ApplicationHandlerStop
+            other_key = (
+                "group_unlock_command"
+                if stage == "group_lock_command"
+                else "group_lock_command"
+            )
+            other_default = (
+                GROUP_UNLOCK_COMMAND_DEFAULT
+                if stage == "group_lock_command"
+                else GROUP_LOCK_COMMAND_DEFAULT
+            )
+            if command == _group_lock_value(cfg, other_key, other_default):
+                await update.message.reply_text("❗ 锁群命令和解锁群命令不能相同。")
+                raise ApplicationHandlerStop
+            cfg[stage] = command
+            saved_text = "✅ 已保存锁群命令。" if stage == "group_lock_command" else "✅ 已保存解锁群命令。"
+        elif stage in {"group_lock_message", "group_unlock_message"}:
+            if text_value == "默认":
+                cfg[stage] = (
+                    GROUP_LOCK_MESSAGE_DEFAULT
+                    if stage == "group_lock_message"
+                    else GROUP_UNLOCK_MESSAGE_DEFAULT
+                )
+            elif not text_value or len(text_value) > 1000:
+                await update.message.reply_text("❗ 提示语不能为空，且最多 1000 个字符。")
+                raise ApplicationHandlerStop
+            else:
+                cfg[stage] = text_value
+            saved_text = "✅ 已保存锁群提示语。" if stage == "group_lock_message" else "✅ 已保存解锁群提示语。"
+        else:  # group_lock_schedule
+            schedule = _parse_group_lock_schedule(text_value)
+            if not schedule:
+                await update.message.reply_text(
+                    "❗ 时间格式无效。请发送两个不同时间，例如：24:00 08:00 或 22:30,08:00。"
+                )
+                raise ApplicationHandlerStop
+            cfg["group_lock_time"], cfg["group_unlock_time"] = schedule
+            saved_text = "✅ 已保存自动锁群时间段。"
+
+        data[chat_id_str] = cfg
+        save_json(GROUP_LIST_FILE, data)
+        context.user_data.pop("group_setting_stage", None)
+        context.user_data.pop("group_setting_chat_id", None)
+        await update.message.reply_text(
+            saved_text + "\n\n" + _group_lock_settings_text(chat_id_str, cfg),
+            reply_markup=_group_lock_settings_keyboard(chat_id_str, cfg),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        raise ApplicationHandlerStop
+
     if isinstance(stage, str) and stage in {"talk_lottery_prize_add", "talk_lottery_prize_edit", "talk_lottery_trigger_rate"}:
         handled = await _handle_talk_lottery_text(
             update, context, stage, str(context.user_data.get("group_setting_chat_id") or "")
@@ -5341,6 +5898,23 @@ async def send_message_payload(
 
 
 def register_group_setting_handlers(app):
+    # Lock/unlock commands are handled before ordinary group command routers.
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS
+            & filters.TEXT
+            & ~filters.UpdateType.BUSINESS_MESSAGE,
+            _handle_group_lock_command,
+        ),
+        group=-30,
+    )
+    if app.job_queue:
+        app.job_queue.run_repeating(
+            _run_group_lock_scheduler,
+            interval=GROUP_LOCK_SCHEDULER_INTERVAL_SECONDS,
+            first=10,
+            name="group-lock-scheduler",
+        )
     app.add_handler(CommandHandler("group_status", group_status))
     app.add_handler(CommandHandler("welcome", toggle_welcome))
     app.add_handler(CommandHandler("toggleverify", toggle_verification))
@@ -5356,5 +5930,7 @@ def register_group_setting_handlers(app):
             filters.ChatType.PRIVATE & (~filters.COMMAND),
             handle_group_setting_text,
         ),
-        group=-5,
+        # Run immediately after the global keyword-search guard, before the
+        # generic private-forward handler can consume a configuration value.
+        group=-19,
     )

@@ -1,7 +1,69 @@
 {
     "users": {
         "6085551760": {
-            "forward_rules": []
+            "forward_rules": [
+                {
+                    "name": "成都【女儿国】老师榜单",
+                    "sources": [
+                        -1002003699777
+                    ],
+                    "targets": [],
+                    "source_title": "成都【女儿国】老师榜单",
+                    "target_title": "",
+                    "enabled": true,
+                    "mode": "listen",
+                    "filter": "all",
+                    "exclude_channels": [],
+                    "show_contact": true,
+                    "replace_channel_user": "",
+                    "replace_group_name": "",
+                    "replace_submit_user": "",
+                    "clear_links": false,
+                    "skip_links": false,
+                    "start_id": "6024",
+                    "end_id": "6938",
+                    "include_words": [],
+                    "replace_words": [],
+                    "block_words": [],
+                    "cut_words": "",
+                    "suffix": "",
+                    "media_replace": "",
+                    "speed": "",
+                    "submit_to_bot": true,
+                    "session_name": "main"
+                },
+                {
+                    "name": "上海艺术展览会总榜单",
+                    "sources": [
+                        -1001951594315
+                    ],
+                    "targets": [],
+                    "source_title": "上海艺术展览会总榜单",
+                    "target_title": "",
+                    "enabled": true,
+                    "mode": "listen",
+                    "filter": "all",
+                    "exclude_channels": [],
+                    "show_contact": true,
+                    "replace_channel_user": "",
+                    "replace_group_name": "",
+                    "replace_submit_user": "",
+                    "clear_links": false,
+                    "skip_links": false,
+                    "listen_outgoing": true,
+                    "start_id": "",
+                    "end_id": "",
+                    "include_words": [],
+                    "replace_words": [],
+                    "block_words": [],
+                    "cut_words": "",
+                    "suffix": "",
+                    "media_replace": "",
+                    "speed": "",
+                    "submit_to_bot": true,
+                    "session_name": "main"
+                }
+            ]
         }
     }
 }

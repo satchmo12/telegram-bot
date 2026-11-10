@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import os
+from types import SimpleNamespace
 from typing import Dict, List, Any, TYPE_CHECKING
 import re
 import warnings
@@ -26,9 +27,15 @@ from channel.access_control import is_channel_subscription_required
 from channel.channel_forwarder import _is_active_subscription
 from channel.telethon_login import _get_api_creds
 from channel.telethon_ai_reply import get_enabled_sessions, handle_protocol_group_message
+from channel.protocol_submission import (
+    bind_protocol_history_request_sender,
+    is_protocol_history_request_active,
+    set_protocol_submission_senders,
+)
 
 try:
     from telethon import TelegramClient, events
+    from telethon.errors import FloodWaitError
     from telethon.tl.functions.messages import (
         GetInlineBotResultsRequest,
         SendInlineBotResultRequest,
@@ -50,6 +57,7 @@ try:
 except Exception:  # pragma: no cover - 运行时缺依赖
     TelegramClient = None
     events = None
+    FloodWaitError = None
     GetInlineBotResultsRequest = None
     SendInlineBotResultRequest = None
     MessageEntityBlockquote = None
@@ -68,6 +76,17 @@ SESSION_RULES_BY_BOT: Dict[str, Dict[str, List[dict]]] = {}
 FORWARD_TASKS: Dict[str, asyncio.Task] = {}
 REFRESH_EVENTS: Dict[str, asyncio.Event] = {}
 DEBUG_FORWARD = False
+FLOOD_RETRY_MAX_ATTEMPTS = 5
+# Give the Bot API a moment to process /protocol_submit before its source
+# post arrives.  The bot also keeps a permit queue, which handles bursts where
+# updates still overlap.
+SUBMISSION_ARM_DELAY_SECONDS = 0.8
+# Telethon's Album event is normally emitted after it groups NewMessage
+# updates.  Keep a NewMessage-based fallback so albums are still forwarded if
+# that grouping callback is missed by a reconnect/update race.
+ALBUM_FALLBACK_DELAY_SECONDS = 1.25
+ALBUM_DEDUP_TTL_SECONDS = 5 * 60
+_FLOOD_WAIT_RE = re.compile(r"(?:retry in|wait of)\s+(\d+)\s+seconds?", re.IGNORECASE)
 
 
 def get_active_session_client(bot_name: str, session_name: str):
@@ -221,6 +240,79 @@ async def _send_text_split(client, target_id, text: str, *, entities=None, limit
         await _send_message_safe(client, target_id, first, entities=entities),
         await _send_message_safe(client, target_id, rest),
     ]
+
+
+def _telethon_flood_wait_seconds(exc: Exception):
+    """Extract a Telethon flood-wait duration, including older error text."""
+    if FloodWaitError is not None and isinstance(exc, FloodWaitError):
+        try:
+            return max(0.0, float(getattr(exc, "seconds", 0)))
+        except (TypeError, ValueError):
+            return 0.0
+    matched = _FLOOD_WAIT_RE.search(str(exc))
+    return float(matched.group(1)) if matched else None
+
+
+async def _retry_telethon_flood(operation, *, action: str):
+    """Retry a rejected Telethon send after Telegram's required flood wait."""
+    for attempt in range(1, FLOOD_RETRY_MAX_ATTEMPTS + 1):
+        try:
+            return await operation()
+        except Exception as exc:
+            wait_seconds = _telethon_flood_wait_seconds(exc)
+            if wait_seconds is None or attempt >= FLOOD_RETRY_MAX_ATTEMPTS:
+                raise
+            print(
+                f"Telegram 限流，{action} 将在 {wait_seconds:g} 秒后重试 "
+                f"({attempt}/{FLOOD_RETRY_MAX_ATTEMPTS - 1})"
+            )
+            await asyncio.sleep(wait_seconds + 0.25)
+
+
+def _album_event_is_outgoing(event, messages) -> bool:
+    """Read outgoing status for both NewMessage and Telethon Album events."""
+    event_out = getattr(event, "out", None)
+    if event_out is not None:
+        return bool(event_out)
+    return any(bool(getattr(message, "out", False)) for message in (messages or []))
+
+
+def _submission_bot_username(rule: dict) -> str:
+    """Return the current bot username injected into an active rule."""
+    if not bool(rule.get("submit_to_bot", False)):
+        return ""
+    return str(rule.get("_submission_bot_username", "") or "").strip().lstrip("@")
+
+
+async def _forward_to_submission_bot(
+    client,
+    bot_username: str,
+    messages,
+    *,
+    history_request_id: str = "",
+):
+    """Forward original source messages to the bot after arming auto 投稿.
+
+    ``forward_messages`` is deliberate here. Re-sending text/media would lose
+    Telegram's channel-forward origin, preventing the bot's format-output
+    rules from identifying the source channel.
+    """
+    target = f"@{bot_username.lstrip('@')}"
+    command = "/protocol_submit"
+    if history_request_id:
+        command = f"{command} {history_request_id}"
+    await _retry_telethon_flood(
+        lambda: client.send_message(target, command),
+        action="发送自动投稿指令",
+    )
+    # Telegram preserves order within the private chat, but Bot API handlers
+    # can run concurrently.  Leave enough time for the arming command to be
+    # observed before the forwarded source post is delivered.
+    await asyncio.sleep(SUBMISSION_ARM_DELAY_SECONDS)
+    return await _retry_telethon_flood(
+        lambda: client.forward_messages(target, messages),
+        action="转发自动投稿内容",
+    )
 
 
 def _load_session_owners() -> dict:
@@ -998,14 +1090,68 @@ async def _ensure_client(
     if DEBUG_FORWARD:
         print(f"✅ 协议号监听已启动: {session_name}")
 
+    # ``events.Album`` is convenient but can be missed while Telegram is
+    # catching up updates.  Buffer the regular NewMessage updates as a
+    # fallback.  The same key is claimed by the Album handler below, so a
+    # healthy Album event and this fallback can never forward an album twice.
+    pending_albums: Dict[tuple, dict] = {}
+    handled_albums: Dict[tuple, float] = {}
+
+    def _album_key(chat_id, grouped_id):
+        return (int(chat_id), int(grouped_id))
+
+    def _claim_album(chat_id, grouped_id) -> bool:
+        now = asyncio.get_running_loop().time()
+        for key, handled_at in list(handled_albums.items()):
+            if now - handled_at > ALBUM_DEDUP_TTL_SECONDS:
+                handled_albums.pop(key, None)
+        key = _album_key(chat_id, grouped_id)
+        if key in handled_albums:
+            return False
+        handled_albums[key] = now
+        return True
+
+    def _queue_album_fallback(event, message, chat_id) -> None:
+        grouped_id = getattr(message, "grouped_id", None)
+        if not grouped_id:
+            return
+        key = _album_key(chat_id, grouped_id)
+        entry = pending_albums.setdefault(
+            key,
+            {"messages": {}, "out": False, "revision": 0},
+        )
+        entry["messages"][int(message.id)] = message
+        entry["out"] = bool(entry["out"] or getattr(event, "out", False) or getattr(message, "out", False))
+        entry["revision"] = int(entry["revision"]) + 1
+        revision = entry["revision"]
+
+        async def _flush_fallback() -> None:
+            await asyncio.sleep(ALBUM_FALLBACK_DELAY_SECONDS)
+            current = pending_albums.get(key)
+            if not current or int(current.get("revision", 0)) != revision:
+                return
+            pending_albums.pop(key, None)
+            messages = [current["messages"][message_id] for message_id in sorted(current["messages"])]
+            # Use the canonical album handler, including all filters and the
+            # deduplication claim, instead of duplicating its forwarding logic.
+            await _on_album(
+                SimpleNamespace(
+                    is_channel=True,
+                    is_group=False,
+                    chat_id=chat_id,
+                    messages=messages,
+                    out=bool(current.get("out", False)),
+                )
+            )
+
+        asyncio.create_task(
+            _flush_fallback(),
+            name=f"telethon-album-fallback:{session_name}:{chat_id}:{grouped_id}",
+        )
+
     @client.on(events.NewMessage)
     async def _on_message(event):
-        if getattr(event, "out", False):
-            return
         if not getattr(event, "is_channel", False) or getattr(event, "is_group", False):
-            return
-        if getattr(event.message, "grouped_id", None):
-            # 相册消息由 Album 处理
             return
         rules = SESSION_RULES_BY_BOT.get(bot_name, {}).get(session_name, [])
         if not rules:
@@ -1013,9 +1159,14 @@ async def _ensure_client(
         chat_id = getattr(event, "chat_id", None)
         if chat_id is None:
             return
+        message = event.message
+        if getattr(message, "grouped_id", None):
+            _queue_album_fallback(event, message, chat_id)
+            # The normal Album callback processes the complete group; the
+            # fallback above covers the rare case in which it never arrives.
+            return
         if DEBUG_FORWARD:
             print(f"📥 监听到频道消息: session={session_name} source={chat_id}")
-        message = event.message
         state = _load_history_state()
         state_changed = False
         for rule in rules:
@@ -1023,6 +1174,15 @@ async def _ensure_client(
             if sources and int(chat_id) not in sources:
                 if DEBUG_FORWARD:
                     print("⛔ 跳过: 不在来源频道")
+                continue
+            print(
+                "📥 命中频道监听规则: "
+                f"session={session_name} source={chat_id} message={getattr(message, 'id', '?')} "
+                f"out={bool(getattr(event, 'out', False))}"
+            )
+            if getattr(event, "out", False) and not bool(rule.get("listen_outgoing", True)):
+                if DEBUG_FORWARD:
+                    print("⛔ 跳过: 未开启监听自己发帖")
                 continue
             if not _match_filter(message, rule.get("filter", "all")):
                 if DEBUG_FORWARD:
@@ -1067,6 +1227,17 @@ async def _ensure_client(
                         print("⛔ 跳过: 无文本且无媒体")
                     continue
                 processed_text = ""
+            submission_bot = _submission_bot_username(rule)
+            if submission_bot:
+                try:
+                    await _forward_to_submission_bot(client, submission_bot, message)
+                    print(
+                        f"✅ 已转发至投稿机器人: session={session_name} "
+                        f"source={chat_id} message={getattr(message, 'id', '?')} -> @{submission_bot}"
+                    )
+                except Exception as e:
+                    print(f"⚠️ 协议号投稿转发失败: {e} (来源: {chat_id} → @{submission_bot})")
+
             apply_processing = _needs_processing(rule)
             for target_id in targets:
                 key = f"{session_name}:{chat_id}:{target_id}"
@@ -1206,8 +1377,6 @@ async def _ensure_client(
 
     @client.on(events.Album)
     async def _on_album(event):
-        if getattr(event, "out", False):
-            return
         if not getattr(event, "is_channel", False) or getattr(event, "is_group", False):
             return
         rules = SESSION_RULES_BY_BOT.get(bot_name, {}).get(session_name, [])
@@ -1218,6 +1387,9 @@ async def _ensure_client(
             return
         messages = event.messages or []
         if not messages:
+            return
+        grouped_id = getattr(event, "grouped_id", None) or getattr(messages[0], "grouped_id", None)
+        if grouped_id and not _claim_album(chat_id, grouped_id):
             return
         if DEBUG_FORWARD:
             print(f"📥 监听到频道消息: session={session_name} source={chat_id} (相册)")
@@ -1232,6 +1404,7 @@ async def _ensure_client(
         raw_caption = _get_message_text(caption_msg)
         files = [m.media for m in messages if m.media]
 
+        album_outgoing = _album_event_is_outgoing(event, messages)
         state = _load_history_state()
         state_changed = False
         for rule in rules:
@@ -1239,6 +1412,15 @@ async def _ensure_client(
             if sources and int(chat_id) not in sources:
                 if DEBUG_FORWARD:
                     print("⛔ 跳过(相册): 不在来源频道")
+                continue
+            print(
+                "📥 命中频道监听规则（相册）: "
+                f"session={session_name} source={chat_id} messages={len(messages)} "
+                f"out={album_outgoing}"
+            )
+            if album_outgoing and not bool(rule.get("listen_outgoing", True)):
+                if DEBUG_FORWARD:
+                    print("⛔ 跳过(相册): 未开启监听自己发帖")
                 continue
             if not _match_filter(caption_msg, rule.get("filter", "all")):
                 if DEBUG_FORWARD:
@@ -1276,6 +1458,17 @@ async def _ensure_client(
                     if DEBUG_FORWARD:
                         print("⛔ 跳过(相册): 过滤后文本为空")
                     continue
+            submission_bot = _submission_bot_username(rule)
+            if submission_bot:
+                try:
+                    await _forward_to_submission_bot(client, submission_bot, messages)
+                    print(
+                        f"✅ 已转发相册至投稿机器人: session={session_name} "
+                        f"source={chat_id} -> @{submission_bot}"
+                    )
+                except Exception as e:
+                    print(f"⚠️ 协议号相册投稿失败: {e} (来源: {chat_id} → @{submission_bot})")
+
             apply_processing = _needs_processing(rule)
             if not files:
                 if DEBUG_FORWARD:
@@ -1459,8 +1652,27 @@ async def _refresh_sessions(app):
     set_runtime_bot_name(bot_name)
     api_id, api_hash = _get_api_creds()
     if not api_id or not api_hash:
+        set_protocol_submission_senders({})
         return
     rules_by_session = _collect_rules()
+    bot_username = str(getattr(app.bot, "username", "") or "").strip().lstrip("@")
+    # Only the active bot itself can receive its protocol-account submissions.
+    # Keep this runtime-only value out of the persisted forwarding rule.
+    if bot_username:
+        rules_by_session = {
+            session_name: [
+                {
+                    **rule,
+                    **(
+                        {"_submission_bot_username": bot_username}
+                        if bool(rule.get("submit_to_bot", False))
+                        else {}
+                    ),
+                }
+                for rule in rules
+            ]
+            for session_name, rules in rules_by_session.items()
+        }
     if DEBUG_FORWARD:
         if rules_by_session:
             summary = {k: len(v) for k, v in rules_by_session.items()}
@@ -1490,6 +1702,25 @@ async def _refresh_sessions(app):
         if client and session_name in ai_sessions and not was_running:
             print(f"✅ 协议号 AI 群消息监听已启动: session={session_name}")
 
+    # Refresh the allow-list used by /protocol_submit. It is derived only
+    # from running sessions that have an enabled submission destination.
+    submission_senders = {}
+    for session_name, rules in rules_by_session.items():
+        if not any(_submission_bot_username(rule) for rule in rules):
+            continue
+        client = SESSION_CLIENTS_BY_BOT.get(bot_name, {}).get(session_name)
+        if client is None:
+            continue
+        try:
+            account = await client.get_me()
+            account_id = getattr(account, "id", None)
+            if account_id:
+                entry = submission_senders.setdefault(int(account_id), {"sessions": []})
+                entry["sessions"].append(session_name)
+        except Exception as exc:
+            print(f"⚠️ 无法识别投稿协议号 session={session_name}: {exc}")
+    set_protocol_submission_senders(submission_senders)
+
     # 清理不再需要的 session
     per_bot_clients = SESSION_CLIENTS_BY_BOT.setdefault(bot_name, {})
     for session_name in list(per_bot_clients.keys()):
@@ -1503,6 +1734,129 @@ async def _refresh_sessions(app):
                 pass
 
 
+def _history_request_is_active(request_id: str) -> bool:
+    """Whether a queued history job has not been cancelled from the panel."""
+    if not request_id:
+        # Requests created before request IDs existed retain the old behavior.
+        return True
+    return is_protocol_history_request_active(request_id)
+
+
+def _history_message_matches_submission(message, rule: dict) -> bool:
+    """Apply routing filters without mutating the native forwarded post."""
+    if not _match_filter(message, rule.get("filter", "all")):
+        return False
+    raw_text = _get_message_text(message)
+    entities = getattr(message, "entities", None)
+    if _should_skip_by_links(rule, raw_text, entities):
+        return False
+    processed = _process_text(raw_text, rule)
+    if processed is None:
+        return False
+    if processed == "" and not getattr(message, "media", None):
+        return False
+    return True
+
+
+async def _forward_history_to_submission_bot(
+    client,
+    *,
+    session_name: str,
+    source_id: int,
+    rule: dict,
+    state: dict,
+    request_id: str = "",
+) -> None:
+    """Forward one configured history interval as native posts to this bot."""
+    bot_username = _submission_bot_username(rule)
+    if not bot_username:
+        return
+
+    start_id = rule.get("start_id")
+    end_id = rule.get("end_id")
+    min_id = int(start_id) - 1 if start_id else None
+    max_id = int(end_id) + 1 if end_id else None
+    key = f"{session_name}:{source_id}:submission:{bot_username}"
+    previous_max_id = _get_history_max_id(state, key)
+    # An explicitly selected start ID represents a deliberate range request.
+    # Do not let an earlier run's high-water mark suppress a lower/new range.
+    # Recent IDs still prevent accidental duplicates within the same range.
+    effective_min_id = min_id if start_id else max(min_id or 0, previous_max_id or 0)
+    recent_ids = set(_recent_ids_for_key(state, key))
+    speed = max(_parse_speed(rule.get("speed", "")), 1.5)
+
+    async def _send_one(message_or_messages, representative) -> bool:
+        if not _history_request_is_active(request_id):
+            return False
+        if not _history_message_matches_submission(representative, rule):
+            return True
+        try:
+            await _forward_to_submission_bot(
+                client,
+                bot_username,
+                message_or_messages,
+                history_request_id=request_id,
+            )
+            ids = message_or_messages if isinstance(message_or_messages, list) else [message_or_messages]
+            max_message_id = max(int(item.id) for item in ids)
+            for item in ids:
+                message_id = int(item.id)
+                _append_recent_id(state, key, message_id)
+                recent_ids.add(message_id)
+            _set_history_max_id(state, key, max_message_id)
+            await asyncio.sleep(speed)
+            return True
+        except Exception as exc:
+            print(
+                f"⚠️ 历史投稿转发失败: {exc} "
+                f"(来源: {source_id} → @{bot_username})"
+            )
+        return True
+
+    grouped_messages = []
+    grouped_id = None
+    async for message in client.iter_messages(
+        source_id,
+        min_id=effective_min_id,
+        max_id=max_id,
+        reverse=True,
+    ):
+        if not _history_request_is_active(request_id):
+            return
+        current_group_id = getattr(message, "grouped_id", None)
+        if current_group_id:
+            if grouped_id is None:
+                grouped_id = current_group_id
+            if current_group_id != grouped_id:
+                if grouped_messages:
+                    representative = next((item for item in grouped_messages if _get_message_text(item)), grouped_messages[0])
+                    if not all(int(item.id) in recent_ids for item in grouped_messages):
+                        if not await _send_one(grouped_messages, representative):
+                            return
+                grouped_messages = []
+                grouped_id = current_group_id
+            grouped_messages.append(message)
+            continue
+
+        if grouped_messages:
+            representative = next((item for item in grouped_messages if _get_message_text(item)), grouped_messages[0])
+            if not all(int(item.id) in recent_ids for item in grouped_messages):
+                if not await _send_one(grouped_messages, representative):
+                    return
+            grouped_messages = []
+            grouped_id = None
+
+        if int(message.id) in recent_ids:
+            continue
+        if not await _send_one(message, message):
+            return
+
+    if grouped_messages:
+        representative = next((item for item in grouped_messages if _get_message_text(item)), grouped_messages[0])
+        if not all(int(item.id) in recent_ids for item in grouped_messages):
+            await _send_one(grouped_messages, representative)
+
+
 async def _process_history_requests():
     requests = load_json(HISTORY_REQUESTS_FILE)
     if not isinstance(requests, list) or not requests:
@@ -1512,6 +1866,7 @@ async def _process_history_requests():
     for req in requests:
         try:
             rule = req.get("rule", {}) if isinstance(req, dict) else {}
+            request_id = str(req.get("request_id", "") or "") if isinstance(req, dict) else ""
             session_name = str(rule.get("session_name", "") or "").strip()
             if not session_name:
                 continue
@@ -1534,9 +1889,27 @@ async def _process_history_requests():
                 continue
             sources = rule.get("sources", []) or []
             targets = rule.get("targets", []) or []
-            if not sources or not targets:
+            submission_bot = _submission_bot_username(rule)
+            if not sources or (not targets and not submission_bot):
                 continue
             source_id = int(sources[0])
+            if submission_bot and request_id:
+                try:
+                    account = await client.get_me()
+                    bind_protocol_history_request_sender(
+                        request_id, getattr(account, "id", None)
+                    )
+                except Exception as exc:
+                    print(f"⚠️ 无法绑定历史投稿协议号 session={session_name}: {exc}")
+            if submission_bot:
+                await _forward_history_to_submission_bot(
+                    client,
+                    session_name=session_name,
+                    source_id=source_id,
+                    rule=rule,
+                    state=state,
+                    request_id=request_id,
+                )
             start_id = rule.get("start_id")
             end_id = rule.get("end_id")
             min_id = int(start_id) - 1 if start_id else None
@@ -1627,6 +2000,8 @@ async def _process_history_requests():
                 async for message in client.iter_messages(
                     source_id, min_id=effective_min_id, max_id=max_id, reverse=True
                 ):
+                    if not _history_request_is_active(request_id):
+                        break
                     gid = getattr(message, "grouped_id", None)
                     if gid:
                         if current_gid is None:

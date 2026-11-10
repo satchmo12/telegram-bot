@@ -1,5 +1,5 @@
 {
-    "channel_id": -1002934622997,
+    "channel_id": -1002667629429,
     "review_enabled": true,
     "daily_limit": 0,
     "ads_enabled": false,
@@ -29,7 +29,7 @@
         "keyword_post_search": true
     },
     "report_link_enabled": true,
-    "template_publish_enabled": true,
+    "template_publish_enabled": false,
     "publish_templates": [
         {
             "id": 1,
@@ -115,9 +115,9 @@
         }
     ],
     "pending_history_post_migration": {
-        "old_channel_id": -1002750050910,
-        "new_channel_id": -1002934622997,
-        "changed_at": 1790322336
+        "old_channel_id": -1002934622997,
+        "new_channel_id": -1002667629429,
+        "changed_at": 1794280866
     },
     "channel_change_history": [
         {
@@ -129,6 +129,11 @@
             "old_channel_id": -1002750050910,
             "new_channel_id": -1002934622997,
             "changed_at": 1790322336
+        },
+        {
+            "old_channel_id": -1002934622997,
+            "new_channel_id": -1002667629429,
+            "changed_at": 1794280866
         }
     ],
     "keyword_group_reply_enabled": true,
@@ -143,12 +148,12 @@
             "enabled": true
         }
     ],
-    "backup_channel_id": -1002624218219,
+    "backup_channel_id": -1004494933562,
     "keyword_post_search_display_mode": "main",
     "backup_channel_use_telethon": true,
-    "backup_channel_session": "+15313637686",
-    "backup_channel_listen_session": "+15313637686",
-    "backup_channel_forward_session": "+15313637686",
+    "backup_channel_session": "+13218329173",
+    "backup_channel_listen_session": "+13218329173",
+    "backup_channel_forward_session": "+13218329173",
     "checkin_enabled": true,
     "checkin_duration_hours": 8,
     "checkin_user_label": "联系",
@@ -185,7 +190,7 @@
     "collection_display_label": "艺名",
     "collection_display_group_label": "",
     "collection_display_subgroup_label": "",
-    "channel_post_write_report_enabled": true,
+    "channel_post_write_report_enabled": false,
     "input_search_enabled": false,
     "input_search_restore_private_forward": false
 }

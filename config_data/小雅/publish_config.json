@@ -1,196 +1,196 @@
 {
-    "channel_id": -1003878817420,
-    "review_enabled": true,
-    "daily_limit": 0,
-    "ads_enabled": false,
-    "ads": [],
-    "buttons": [
-        {
-            "id": 1,
-            "text": "Raptor加速器",
-            "url": "http://skyk.cc"
-        },
-        {
-            "id": 2,
-            "text": "测试",
-            "url": "https://t.me/example"
-        },
-        {
-            "id": 3,
-            "text": "测试",
-            "url": "https://t.me/iwoai"
-        },
-        {
-            "id": 4,
-            "text": "12312",
-            "url": "https://t.me/iwoai"
-        },
-        {
-            "id": 5,
-            "text": "234",
-            "url": "https://t.me/iwoai"
-        },
-        {
-            "id": 6,
-            "text": "123",
-            "url": "https://t.me/iwoai"
-        },
-        {
-            "id": 7,
-            "text": "123",
-            "url": "https://t.me/iwoai"
-        },
-        {
-            "id": 8,
-            "text": "123",
-            "url": "https://t.me/iwoai"
-        },
-        {
-            "id": 9,
-            "text": "12",
-            "url": "https://baidui.com"
-        },
-        {
-            "id": 10,
-            "text": "加入交流群",
-            "url": "https://t.me/iwoai"
-        }
-    ],
-    "submission_enabled": true,
-    "random_view_enabled": false,
-    "bottom_buttons_enabled": false,
-    "proof_required": true,
-    "reject_reason_required": true,
-    "comment_forward_enabled": true,
-    "forward_channel_id": -1003585759564,
-    "keyword_extract_labels": [
-        "标签",
-        "艺名",
-        "联系",
-        "区域",
-        "课费",
-        "城市"
-    ],
-    "continuous_submission_enabled": true,
-    "custom_bot_button_visible": true,
-    "custom_menu_buttons": {
-        "channel_clone": false,
-        "telethon_manage": true,
-        "bot_channel_config": false,
-        "group_config": true,
-        "global_ad_config": false,
-        "keyword_post_search": true
+  "channel_id": -1003878817420,
+  "review_enabled": true,
+  "daily_limit": 0,
+  "ads_enabled": false,
+  "ads": [],
+  "buttons": [
+    {
+      "id": 1,
+      "text": "Raptor加速器",
+      "url": "http://skyk.cc"
     },
-    "discussion_mapping_session": "main",
-    "report_link_enabled": true,
-    "template_publish_enabled": false,
-    "publish_templates": [
-        {
-            "id": 5,
-            "name": "用户名发布模版",
-            "text": "联系：{联系方式}",
-            "format": "plain",
-            "buttons": [],
-            "button_columns": 1
-        }
-    ],
-    "pending_history_post_migration": {
-        "old_channel_id": -1003968770671,
-        "new_channel_id": -1003878817420,
-        "changed_at": 1791473854
+    {
+      "id": 2,
+      "text": "测试",
+      "url": "https://t.me/example"
     },
-    "channel_change_history": [
-        {
-            "old_channel_id": -1003585759564,
-            "new_channel_id": -1004426822084,
-            "changed_at": 1789567821
-        },
-        {
-            "old_channel_id": -1004426822084,
-            "new_channel_id": -1003585759564,
-            "changed_at": 1789570371
-        },
-        {
-            "old_channel_id": -1003585759564,
-            "new_channel_id": -1003878817420,
-            "changed_at": 1791270117
-        },
-        {
-            "old_channel_id": -1004432006940,
-            "new_channel_id": -1003878817420,
-            "changed_at": 1791469188
-        },
-        {
-            "old_channel_id": -1003878817420,
-            "new_channel_id": -1004432006940,
-            "changed_at": 1791470209
-        },
-        {
-            "old_channel_id": -1004432006940,
-            "new_channel_id": -1003968770671,
-            "changed_at": 1791471405
-        },
-        {
-            "old_channel_id": -1003968770671,
-            "new_channel_id": -1003878817420,
-            "changed_at": 1791473854
-        }
-    ],
-    "keyword_group_reply_enabled": true,
-    "keyword_group_reply_rules": [
-        {
-            "id": 1,
-            "input_label": "艺名",
-            "reply_label": "",
-            "display_text": "点击联系美丽的“{keyword}”老师",
-            "default_text": "",
-            "button_text": "点击约课{keyword}",
-            "enabled": true
-        }
-    ],
-    "backup_channel_id": null,
-    "keyword_post_search_display_mode": "main",
-    "backup_channel_use_telethon": false,
-    "backup_channel_session": "",
-    "backup_channel_listen_session": "",
-    "backup_channel_forward_session": "",
-    "checkin_enabled": true,
-    "checkin_duration_hours": 12,
-    "checkin_user_label": "联系",
-    "checkin_display_label": "艺名+课费",
-    "checkin_group_label": "城市",
-    "checkin_command_text": "打卡",
-    "checkin_cancel_command_text": "取消打卡",
-    "checkin_online_command_text": "在线宝宝",
-    "checkin_online_text": "在线老师欢迎咨询",
-    "user_mark_enabled": true,
-    "user_mark_report_chat_id": -1003861180330,
-    "user_mark_labels": [
-        "广告",
-        "骗子",
-        "骚扰"
-    ],
-    "bottom_comment_buttons_enabled": false,
-    "comment_buttons": [
-        {
-            "id": 1,
-            "text": "测试",
-            "url": "https://baidui.com"
-        }
-    ],
-    "submission_reward_enabled": true,
-    "submission_reward_anonymous_points": 50,
-    "submission_reward_real_points": 100,
-    "submission_reward_group_id": -1003861180330,
-    "submission_reward_group_title": "卖白面",
-    "checkin_subgroup_label": "区域",
-    "collection_display_enabled": true,
-    "collection_display_command_text": "老师",
-    "collection_display_text": "收录老师",
-    "collection_display_label": "艺名+课费+标签",
-    "collection_display_group_label": "城市",
-    "collection_display_subgroup_label": "区域",
-    "channel_post_write_report_enabled": true,
-    "input_search_enabled": false,
-    "input_search_restore_private_forward": false
+    {
+      "id": 3,
+      "text": "测试",
+      "url": "https://t.me/iwoai"
+    },
+    {
+      "id": 4,
+      "text": "12312",
+      "url": "https://t.me/iwoai"
+    },
+    {
+      "id": 5,
+      "text": "234",
+      "url": "https://t.me/iwoai"
+    },
+    {
+      "id": 6,
+      "text": "123",
+      "url": "https://t.me/iwoai"
+    },
+    {
+      "id": 7,
+      "text": "123",
+      "url": "https://t.me/iwoai"
+    },
+    {
+      "id": 8,
+      "text": "123",
+      "url": "https://t.me/iwoai"
+    },
+    {
+      "id": 9,
+      "text": "12",
+      "url": "https://baidui.com"
+    },
+    {
+      "id": 10,
+      "text": "加入交流群",
+      "url": "https://t.me/iwoai"
+    }
+  ],
+  "submission_enabled": true,
+  "random_view_enabled": false,
+  "bottom_buttons_enabled": false,
+  "proof_required": true,
+  "reject_reason_required": true,
+  "comment_forward_enabled": true,
+  "forward_channel_id": -1003585759564,
+  "keyword_extract_labels": [
+    "标签",
+    "艺名",
+    "联系",
+    "区域",
+    "课费",
+    "城市"
+  ],
+  "continuous_submission_enabled": true,
+  "custom_bot_button_visible": true,
+  "custom_menu_buttons": {
+    "channel_clone": false,
+    "telethon_manage": true,
+    "bot_channel_config": false,
+    "group_config": true,
+    "global_ad_config": false,
+    "keyword_post_search": true
+  },
+  "discussion_mapping_session": "main",
+  "report_link_enabled": true,
+  "template_publish_enabled": false,
+  "publish_templates": [
+    {
+      "id": 5,
+      "name": "用户名发布模版",
+      "text": "联系：{联系方式}",
+      "format": "plain",
+      "buttons": [],
+      "button_columns": 1
+    }
+  ],
+  "pending_history_post_migration": {
+    "old_channel_id": -1003968770671,
+    "new_channel_id": -1003878817420,
+    "changed_at": 1791473854
+  },
+  "channel_change_history": [
+    {
+      "old_channel_id": -1003585759564,
+      "new_channel_id": -1004426822084,
+      "changed_at": 1789567821
+    },
+    {
+      "old_channel_id": -1004426822084,
+      "new_channel_id": -1003585759564,
+      "changed_at": 1789570371
+    },
+    {
+      "old_channel_id": -1003585759564,
+      "new_channel_id": -1003878817420,
+      "changed_at": 1791270117
+    },
+    {
+      "old_channel_id": -1004432006940,
+      "new_channel_id": -1003878817420,
+      "changed_at": 1791469188
+    },
+    {
+      "old_channel_id": -1003878817420,
+      "new_channel_id": -1004432006940,
+      "changed_at": 1791470209
+    },
+    {
+      "old_channel_id": -1004432006940,
+      "new_channel_id": -1003968770671,
+      "changed_at": 1791471405
+    },
+    {
+      "old_channel_id": -1003968770671,
+      "new_channel_id": -1003878817420,
+      "changed_at": 1791473854
+    }
+  ],
+  "keyword_group_reply_enabled": true,
+  "keyword_group_reply_rules": [
+    {
+      "id": 1,
+      "input_label": "艺名",
+      "reply_label": "",
+      "display_text": "点击联系美丽的“{keyword}”老师",
+      "default_text": "",
+      "button_text": "点击约课{keyword}",
+      "enabled": true
+    }
+  ],
+  "backup_channel_id": -1003909356703,
+  "keyword_post_search_display_mode": "main",
+  "backup_channel_use_telethon": false,
+  "backup_channel_session": "",
+  "backup_channel_listen_session": "",
+  "backup_channel_forward_session": "",
+  "checkin_enabled": true,
+  "checkin_duration_hours": 12,
+  "checkin_user_label": "联系",
+  "checkin_display_label": "艺名+课费",
+  "checkin_group_label": "城市",
+  "checkin_command_text": "打卡",
+  "checkin_cancel_command_text": "取消打卡",
+  "checkin_online_command_text": "在线宝宝",
+  "checkin_online_text": "在线老师欢迎咨询",
+  "user_mark_enabled": true,
+  "user_mark_report_chat_id": -1003861180330,
+  "user_mark_labels": [
+    "广告",
+    "骗子",
+    "骚扰"
+  ],
+  "bottom_comment_buttons_enabled": false,
+  "comment_buttons": [
+    {
+      "id": 1,
+      "text": "测试",
+      "url": "https://baidui.com"
+    }
+  ],
+  "submission_reward_enabled": true,
+  "submission_reward_anonymous_points": 50,
+  "submission_reward_real_points": 100,
+  "submission_reward_group_id": -1003861180330,
+  "submission_reward_group_title": "卖白面",
+  "checkin_subgroup_label": "区域",
+  "collection_display_enabled": true,
+  "collection_display_command_text": "老师",
+  "collection_display_text": "收录老师",
+  "collection_display_label": "艺名+课费+标签",
+  "collection_display_group_label": "城市",
+  "collection_display_subgroup_label": "区域",
+  "channel_post_write_report_enabled": true,
+  "input_search_enabled": false,
+  "input_search_restore_private_forward": false
 }

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from datetime import datetime, timedelta
 import asyncio
+import json
 from types import SimpleNamespace
 import html
 from typing import Optional
@@ -34,6 +35,11 @@ from command_router import register_command
 
 BJ_TZ = timezone(timedelta(hours=8))
 from channel.channel_config import USER_MESSAGE_FILE
+from channel.protocol_submission import (
+    is_protocol_history_request_active,
+    is_protocol_history_request_sender,
+    is_protocol_submission_sender,
+)
 from utils import (
     BOT_USER_FILE,
     bot_datetime_from_timestamp,
@@ -73,19 +79,41 @@ HISTORY_FORWARD_STATE_FILE = "data/history_forward_state.json"
 USER_MARK_FILE = "data/user_marks.json"
 KEYWORD_INPUT_KEY = "publish_keyword_search"
 KEYWORD_RESULTS_KEY = "publish_keyword_results"
+KEYWORD_RESULTS_PAGE_KEY = "publish_keyword_results_page"
 KEYWORD_POST_RESULTS_KEY = "publish_keyword_post_results"
+KEYWORD_POST_RESULTS_PAGE_KEY = "publish_keyword_post_results_page"
 KEYWORD_POST_SEARCH_INPUT_KEY = "publish_keyword_post_search"
+# Keep Telegram result keyboards compact.  Result lists are kept in user_data
+# and paged rather than being silently truncated to fit a single keyboard.
+KEYWORD_SEARCH_PAGE_SIZE = 8
+# Discussion-parent recovery may involve protocol requests.  Do not make a
+# broad keyword search wait on every historical result before showing it.
+KEYWORD_DISCUSSION_MAPPING_RECOVERY_LIMIT = 20
 KEYWORD_LABEL_INPUT_KEY = "publish_keyword_label_input"
 GROUP_KEYWORD_REPLY_STAGE_KEY = "publish_group_keyword_reply_stage"
 REPORT_PAGE_SIZE = 6
 MAX_COMMENT_REPORTS = 10000000
 REPORT_USERNAME_MIGRATION_KEY = "publish_report_username_migration"
 REPORT_COMMENT_EDIT_KEY = "publish_report_comment_edit"
+# Keep a durable tombstone for comments manually removed from a report.
+# The approved-submission queue is also used to recover report history, so
+# simply removing an item from ``comments`` would make it reappear on the
+# next visit to the same report deep link.
+REPORT_DELETED_COMMENT_IDENTITIES_KEY = "deleted_comment_identities"
 TEMPLATE_DRAFT_KEY = "publish_template_draft"
 TEMPLATE_FLOW_KEY = "publish_template_flow"
 USER_MARK_SETTING_KEY = "publish_user_mark_setting"
 USER_MARK_SELECTION_KEY = "publish_user_mark_selection"
 USER_MARK_COMMAND = "帅哥"
+PROTOCOL_AUTO_SUBMISSION_KEY = "publish_protocol_auto_submission"
+# A protocol account sends ``/protocol_submit`` immediately before each native
+# channel forward.  Bot updates can be processed concurrently, so more than
+# one command may arrive before its corresponding forwarded post.  Keep a
+# short-lived FIFO of permits rather than a single boolean; otherwise the
+# first post consumes the flag and the remaining already-armed posts are
+# treated as ordinary submissions.
+PROTOCOL_AUTO_SUBMISSION_TTL_SECONDS = 120
+PROTOCOL_AUTO_SUBMISSION_MAX_PENDING = 20
 MASTER_BOT_NAME = str(os.getenv("MASTER_BOT_NAME", "")).strip()
 COLLECTION_DISPLAY_SETTING_KEY = "publish_collection_display_setting_field"
 TEMPLATE_KEY_PATTERN = re.compile(r"\{([\w\-一-鿿]+)\}")
@@ -99,7 +127,10 @@ _REPORT_START_PARAMETER_RE = re.compile(
 # Telegram asks the client to retry after a precise delay when a bot exceeds a
 # sending/copying rate limit. Retrying the original request is safe because a
 # ``RetryAfter`` response means Telegram rejected it before publishing it.
-FLOOD_RETRY_MAX_ATTEMPTS = 3
+FLOOD_RETRY_MAX_ATTEMPTS = 5
+_FLOOD_RETRY_SECONDS_RE = re.compile(
+    r"(?:retry in|wait of)\s+(\d+)\s+seconds?", re.IGNORECASE
+)
 
 
 def _retry_after_seconds(exc: RetryAfter) -> float:
@@ -111,15 +142,23 @@ def _retry_after_seconds(exc: RetryAfter) -> float:
     return max(0.0, float(seconds))
 
 
+def _flood_wait_seconds_from_exception(exc: Exception):
+    """Read a retry delay from both PTB RetryAfter and raw Telegram errors."""
+    if isinstance(exc, RetryAfter):
+        return _retry_after_seconds(exc)
+    matched = _FLOOD_RETRY_SECONDS_RE.search(str(exc))
+    return float(matched.group(1)) if matched else None
+
+
 async def _retry_flood_control(operation, *, action: str):
     """Run one Bot API operation, waiting and retrying Telegram flood limits."""
     for attempt in range(1, FLOOD_RETRY_MAX_ATTEMPTS + 1):
         try:
             return await operation()
-        except RetryAfter as exc:
-            if attempt >= FLOOD_RETRY_MAX_ATTEMPTS:
+        except Exception as exc:
+            wait_seconds = _flood_wait_seconds_from_exception(exc)
+            if wait_seconds is None or attempt >= FLOOD_RETRY_MAX_ATTEMPTS:
                 raise
-            wait_seconds = _retry_after_seconds(exc)
             print(
                 f"Telegram 限流，{action} 将在 {wait_seconds:g} 秒后重试 "
                 f"({attempt}/{FLOOD_RETRY_MAX_ATTEMPTS - 1})"
@@ -3914,6 +3953,15 @@ def _merge_report_username(old_username: str, new_username: str) -> tuple[bool, 
             merged_comments.append(comment)
             seen_comments.add(key)
     new_report["comments"] = merged_comments[-1000:]
+    # Historical recovery is keyed by the report username. Carry deletion
+    # tombstones into the renamed report as well, otherwise old deleted
+    # comments would return after a username migration.
+    deleted_comment_ids = (
+        _deleted_report_comment_identity_keys(new_report)
+        | _deleted_report_comment_identity_keys(old_report)
+    )
+    if deleted_comment_ids:
+        new_report[REPORT_DELETED_COMMENT_IDENTITIES_KEY] = sorted(deleted_comment_ids)
     history = new_report.setdefault("migrated_from_report_ids", [])
     if old_id not in history:
         history.append(old_id)
@@ -4463,7 +4511,49 @@ def _report_comment_identity(comment: dict) -> tuple:
     )
 
 
+def _report_comment_identity_key(comment: dict) -> str:
+    """Return a JSON-safe key for a durable deleted-comment tombstone."""
+    return json.dumps(
+        _report_comment_identity(comment),
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+
+def _deleted_report_comment_identity_keys(report: dict) -> set[str]:
+    """Read manually deleted comment identities from a report safely."""
+    if not isinstance(report, dict):
+        return set()
+    deleted = report.get(REPORT_DELETED_COMMENT_IDENTITIES_KEY, [])
+    if not isinstance(deleted, list):
+        return set()
+    return {item for item in deleted if isinstance(item, str) and item}
+
+
+def _is_report_comment_deleted(report: dict, comment: dict) -> bool:
+    return _report_comment_identity_key(comment) in _deleted_report_comment_identity_keys(report)
+
+
+def _mark_report_comment_deleted(report: dict, comment: dict) -> bool:
+    """Persist a deletion so historical backfill cannot restore the comment."""
+    if not isinstance(report, dict) or not isinstance(comment, dict):
+        return False
+    identity_key = _report_comment_identity_key(comment)
+    deleted = list(_deleted_report_comment_identity_keys(report))
+    if identity_key in deleted:
+        return False
+    deleted.append(identity_key)
+    # Deterministic storage makes data-file changes easier to inspect and keeps
+    # duplicate deletion clicks idempotent.
+    report[REPORT_DELETED_COMMENT_IDENTITIES_KEY] = sorted(deleted)
+    return True
+
+
 def _add_report_comment_if_missing(report: dict, comment: dict) -> bool:
+    # Approved submissions are replayed when a report is opened. Respect an
+    # administrator's explicit deletion before attempting that recovery.
+    if _is_report_comment_deleted(report, comment):
+        return False
     comments = report.setdefault("comments", [])
     if not isinstance(comments, list):
         comments = []
@@ -5620,6 +5710,93 @@ async def _sync_report_comment_edit(
     return synced, untracked, failed
 
 
+async def _delete_report_comment_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    message_id: int,
+    destination: str,
+) -> bool:
+    """Delete one public copy of a report comment.
+
+    A comment can exist below the source post, below its backup-post mirror,
+    and in the optional forwarding channel.  Treat Telegram's ``not found``
+    response as success so deletion is idempotent: a second click, or a copy
+    that was removed manually, must not prevent the remaining copies from
+    being deleted.
+    """
+    try:
+        await _retry_flood_control(
+            lambda: context.bot.delete_message(
+                chat_id=chat_id,
+                message_id=message_id,
+            ),
+            action=f"删除{destination}评论",
+        )
+        return True
+    except BadRequest as exc:
+        detail = str(exc).lower()
+        if any(
+            marker in detail
+            for marker in (
+                "message to delete not found",
+                "message not found",
+                "message_id_invalid",
+            )
+        ):
+            return True
+        print(
+            f"评论删除同步失败 destination={destination} "
+            f"chat={chat_id} message={message_id}: {exc}"
+        )
+    except Exception as exc:
+        print(
+            f"评论删除同步失败 destination={destination} "
+            f"chat={chat_id} message={message_id}: {exc}"
+        )
+    return False
+
+
+async def _sync_report_comment_deletion(
+    context: ContextTypes.DEFAULT_TYPE,
+    comment: dict,
+) -> tuple[int, int, int]:
+    """Delete every recorded Telegram copy of a report comment.
+
+    Returns ``(deleted, untracked, failed)``.  The forwarding-channel copy is
+    optional, whereas the main-discussion copy is the native comment below the
+    original post.  A backup-discussion copy is removed too when the source
+    post has been mirrored.  Legacy report rows which lack a location are kept
+    as ``untracked`` rather than guessing a Telegram message ID.
+    """
+    targets = (
+        ("原帖评论区", "main_discussion_chat_id", "main_discussion_message_id"),
+        ("备用帖评论区", "backup_discussion_chat_id", "backup_discussion_message_id"),
+        ("转发频道", "forward_channel_id", "forward_message_id"),
+    )
+    deleted = untracked = failed = 0
+    seen = set()
+    for destination, chat_key, message_key in targets:
+        chat_id = _as_int(comment.get(chat_key))
+        message_id = _as_int(comment.get(message_key))
+        if chat_id is None or message_id is None:
+            untracked += 1
+            continue
+        target_key = (chat_id, message_id)
+        if target_key in seen:
+            continue
+        seen.add(target_key)
+        if await _delete_report_comment_message(
+            context,
+            chat_id,
+            message_id,
+            destination,
+        ):
+            deleted += 1
+        else:
+            failed += 1
+    return deleted, untracked, failed
+
+
 async def _handle_report_comment_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     stage = (context.user_data or {}).get(REPORT_COMMENT_EDIT_KEY)
     if not isinstance(stage, dict):
@@ -5994,14 +6171,15 @@ def _load_keyword_map() -> dict:
 
 
 def _save_keyword_map(data: dict) -> None:
-    # Keep enough history for routing while avoiding unlimited growth.
+    """Save the complete keyword index without silently dropping posts.
+
+    Search pagination can only display records that still exist in the index.
+    The former per-key ``[-30:]`` retention caused a popular keyword to appear
+    to have exactly 30 results even after pagination was added.  Keep all valid
+    records; only malformed non-list entries are discarded.
+    """
     for key, records in list(data.items()):
         if not isinstance(records, list):
-            data.pop(key, None)
-            continue
-        data[key] = records[-30:]
-    if len(data) > 3000:
-        for key in list(data)[: len(data) - 3000]:
             data.pop(key, None)
     save_json(KEYWORD_MAP_FILE, data)
 
@@ -6223,17 +6401,24 @@ def _update_keyword_comment_mapping(channel_id, message_id, discussion_chat_id, 
         _save_keyword_map(data)
 
 
-def _find_keyword_routes(query: str, *, require_discussion: bool = True) -> list[dict]:
+def _find_keyword_routes(
+    query: str,
+    *,
+    require_discussion: bool = True,
+    keyword_data: Optional[dict] = None,
+    limit: Optional[int] = None,
+) -> list[dict]:
     """Find indexed channel posts for a keyword.
 
-    Comment submission needs a linked discussion message, while ordinary post
-    lookup only needs the original channel message.  Keep the stricter behavior
-    as the default for the existing comment workflow.
+    Results are deduplicated by source post, so a post containing the same
+    matching value in multiple indexed fields is presented once.  ``limit`` is
+    intentionally opt-in: user-facing searches retain every matched post and
+    let the keyboard paginator decide what to render.
     """
     key = _normalize_routing_keyword(query)
     if not key:
         return []
-    data = _load_keyword_map()
+    data = keyword_data if isinstance(keyword_data, dict) else _load_keyword_map()
     # Keyword/comment routing is deliberately scoped to the active primary
     # channel.  During a failover, only mirrored records are rebased onto that
     # new ID, so old unavailable posts cannot be returned by a search.
@@ -6246,14 +6431,29 @@ def _find_keyword_routes(query: str, *, require_discussion: bool = True) -> list
             if not isinstance(record, dict):
                 continue
             channel_id = _as_int(record.get("channel_id"))
+            message_id = _as_int(record.get("channel_message_id"))
             if current_main_channel_id is not None and channel_id != current_main_channel_id:
                 continue
             if require_discussion and not record.get("discussion_message_id"):
                 continue
-            if channel_id is not None and record.get("channel_message_id"):
+            if channel_id is not None and message_id is not None:
                 matches.append({**record, "key": stored_key})
+
     matches.sort(key=lambda item: int(item.get("created_at", 0) or 0), reverse=True)
-    return matches[:30]
+    deduped = []
+    seen_posts = set()
+    for route in matches:
+        post_key = (
+            _as_int(route.get("channel_id")),
+            _as_int(route.get("channel_message_id")),
+        )
+        if post_key in seen_posts:
+            continue
+        seen_posts.add(post_key)
+        deduped.append(route)
+        if limit is not None and len(deduped) >= max(0, limit):
+            break
+    return deduped
 
 async def _restore_missing_discussion_mappings_for_keyword(
     context: ContextTypes.DEFAULT_TYPE,
@@ -6267,7 +6467,11 @@ async def _restore_missing_discussion_mappings_for_keyword(
     discussion parent in order to publish a native comment.  Resolve only those
     missing parents on demand through the configured protocol account.
     """
-    candidates = _find_keyword_routes(query, require_discussion=False)
+    candidates = _find_keyword_routes(
+        query,
+        require_discussion=False,
+        limit=KEYWORD_DISCUSSION_MAPPING_RECOVERY_LIMIT,
+    )
     missing_by_channel: dict[int, list[int]] = {}
     for route in candidates:
         if _as_int(route.get("discussion_message_id")) is not None:
@@ -6314,36 +6518,37 @@ def _find_keyword_routes_with_artist(
     require_discussion: bool = True,
 ) -> list[dict]:
     """Find keyword routes and attach the artist name of the same post."""
+    data = _load_keyword_map()
     routes = _find_keyword_routes(
         query,
         require_discussion=require_discussion,
+        keyword_data=data,
     )
 
     if not routes:
         return []
 
-    data = _load_keyword_map()
-
-    # (channel_id, channel_message_id) -> 艺名
+    # Only build artist labels for posts actually present in this result set.
+    # The previous implementation traversed the complete keyword index twice
+    # for every lookup.
+    result_post_keys = {
+        (_as_int(route.get("channel_id")), _as_int(route.get("channel_message_id")))
+        for route in routes
+    }
     artist_map = {}
-
     for records in data.values():
         for record in records or []:
-            if not isinstance(record, dict):
+            if not isinstance(record, dict) or record.get("label") != "艺名":
                 continue
-
-            if record.get("label") != "艺名":
+            post_key = (
+                _as_int(record.get("channel_id")),
+                _as_int(record.get("channel_message_id")),
+            )
+            if post_key not in result_post_keys:
                 continue
-
-            channel_id = record.get("channel_id")
-            message_id = record.get("channel_message_id")
-
-            if not channel_id or not message_id:
-                continue
-
             artist_name = str(record.get("raw", "")).lstrip("#").strip()
             if artist_name:
-                artist_map[(int(channel_id), int(message_id))] = artist_name
+                artist_map[post_key] = artist_name
 
     result = []
 
@@ -6389,17 +6594,34 @@ def _keyword_post_search_display_keyboard(config: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def _backup_keyword_route(route: dict, config: dict):
+def _backup_keyword_route(
+    route: dict,
+    config: dict,
+    *,
+    backup_mappings: Optional[dict] = None,
+    historic_mappings: Optional[dict] = None,
+):
     source_channel_id = _as_int(route.get("channel_id"))
     source_message_id = _as_int(route.get("channel_message_id"))
     backup_channel_id = _backup_channel_id(config, source_channel_id)
     if source_channel_id is None or source_message_id is None or backup_channel_id is None:
         return None
-    mapping = _backup_post_mapping(source_channel_id, source_message_id)
+
+    if backup_mappings is None:
+        backup_mappings = _load_backup_post_map().get("mappings", {})
+    mapping = (backup_mappings or {}).get(
+        _comment_map_key(source_channel_id, source_message_id),
+        {},
+    )
+    mapping = mapping if isinstance(mapping, dict) else {}
     backup_message_id = _as_int(mapping.get("backup_message_id"))
     if _as_int(mapping.get("backup_channel_id")) != backup_channel_id or backup_message_id is None:
-        historic = _collect_cloned_history_mappings(backup_channel_id, source_channel_id)
-        historic_item = historic.get((source_channel_id, source_message_id), {})
+        if historic_mappings is None:
+            historic_mappings = _collect_cloned_history_mappings(
+                backup_channel_id,
+                source_channel_id,
+            )
+        historic_item = (historic_mappings or {}).get((source_channel_id, source_message_id), {})
         backup_message_id = _as_int(historic_item.get("target_message_id"))
     if backup_message_id is None:
         return None
@@ -6423,11 +6645,25 @@ def _keyword_post_display_routes(routes: list[dict], config: dict) -> list[dict]
         if main_channel_id is None or _as_int(route.get("channel_id")) == main_channel_id
     ]
     if mode == "main":
-        return primary[:10]
+        return primary
 
+    # The backup-map and history-forward files are shared by all rows in this
+    # one search.  Load each once instead of scanning them for every result.
+    backup_channel_id = _backup_channel_id(config, main_channel_id)
+    backup_mappings = _load_backup_post_map().get("mappings", {})
+    historic_mappings = (
+        _collect_cloned_history_mappings(backup_channel_id, main_channel_id)
+        if backup_channel_id is not None and main_channel_id is not None
+        else {}
+    )
     result = []
     for route in primary:
-        backup_route = _backup_keyword_route(route, config)
+        backup_route = _backup_keyword_route(
+            route,
+            config,
+            backup_mappings=backup_mappings,
+            historic_mappings=historic_mappings,
+        )
         if mode == "backup":
             if backup_route:
                 result.append(backup_route)
@@ -6443,7 +6679,7 @@ def _keyword_post_display_routes(routes: list[dict], config: dict) -> list[dict]
             continue
         seen.add(key)
         deduped.append(route)
-    return deduped[:20]
+    return deduped
 
 
 def _fallback_channel_message_link(channel_id, message_id):
@@ -6468,28 +6704,81 @@ async def _route_message_link(context: ContextTypes.DEFAULT_TYPE, route: dict):
     return _fallback_channel_message_link(channel_id, message_id)
 
 
-def _keyword_post_results_keyboard(routes: list[dict]) -> InlineKeyboardMarkup:
-    """Build the selectable result list without dropping route metadata.
+def _keyword_result_page(routes: list[dict], page: int) -> tuple[list[dict], int, int, int]:
+    """Return one safe Telegram-keyboard page of keyword search routes."""
+    total = len(routes) if isinstance(routes, list) else 0
+    pages = max(1, (total + KEYWORD_SEARCH_PAGE_SIZE - 1) // KEYWORD_SEARCH_PAGE_SIZE)
+    try:
+        page = int(page or 1)
+    except (TypeError, ValueError):
+        page = 1
+    page = max(1, min(page, pages))
+    start = (page - 1) * KEYWORD_SEARCH_PAGE_SIZE
+    return routes[start : start + KEYWORD_SEARCH_PAGE_SIZE], page, pages, start
 
-    Both the initial search and the “返回” action use this function. Keeping the
-    artist name here prevents 标签 results from losing their 艺名 after returning
-    from a copied post.
-    """
+
+def _keyword_route_button_label(route: dict, *, include_channel: bool = False) -> str:
+    label = str(route.get("label", "关键词"))[:12]
+    value = str(route.get("raw", route.get("key", "")))[:30]
+    artist_name = str(route.get("艺名", "")).strip()
+    artist_suffix = (
+        f" · 艺名：{artist_name[:20]}"
+        if label == "标签" and artist_name
+        else ""
+    )
+    channel_prefix = f"{str(route.get('display_channel') or '主频道')} · " if include_channel else ""
+    return f"{channel_prefix}{label}：{value}{artist_suffix}"
+
+
+def _keyword_page_navigation(action: str, page: int, pages: int) -> list[InlineKeyboardButton]:
     rows = []
-    for index, route in enumerate(routes):
-        label = str(route.get("label", "关键词"))[:12]
-        value = str(route.get("raw", route.get("key", "")))[:30]
-        artist_name = str(route.get("艺名", "")).strip()
-        artist_suffix = (
-            f" · 艺名：{artist_name[:20]}"
-            if label == "标签" and artist_name
-            else ""
-        )
-        channel_label = str(route.get("display_channel") or "主频道")
+    if page > 1:
+        rows.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"publish:{action}:{page - 1}"))
+    if page < pages:
+        rows.append(InlineKeyboardButton("➡️ 下一页", callback_data=f"publish:{action}:{page + 1}"))
+    return rows
+
+
+def _keyword_submission_results_keyboard(
+    routes: list[dict],
+    page: int = 1,
+) -> InlineKeyboardMarkup:
+    """Build paginated target choices for the 投稿 keyword flow.
+
+    Do not resolve a Telegram URL for every result here.  A broad search used
+    to call ``get_chat`` once per row before rendering, which made large result
+    sets feel slow.  The chosen target's link is resolved only after selection.
+    """
+    visible_routes, page, pages, start = _keyword_result_page(routes, page)
+    rows = []
+    for offset, route in enumerate(visible_routes):
+        index = start + offset
         rows.append([InlineKeyboardButton(
-            f"查看 {channel_label} · {label}：{value}{artist_suffix}",
+            f"选择 {_keyword_route_button_label(route)}",
+            callback_data=f"publish:keyword_pick:{index}",
+        )])
+    navigation = _keyword_page_navigation("keyword_page", page, pages)
+    if navigation:
+        rows.append(navigation)
+    return InlineKeyboardMarkup(rows)
+
+
+def _keyword_post_results_keyboard(
+    routes: list[dict],
+    page: int = 1,
+) -> InlineKeyboardMarkup:
+    """Build a paginated selectable list for collected-post search results."""
+    visible_routes, page, pages, start = _keyword_result_page(routes, page)
+    rows = []
+    for offset, route in enumerate(visible_routes):
+        index = start + offset
+        rows.append([InlineKeyboardButton(
+            f"查看 {_keyword_route_button_label(route, include_channel=True)}",
             callback_data=f"publish:keyword_post_pick:{index}",
         )])
+    navigation = _keyword_page_navigation("keyword_post_page", page, pages)
+    if navigation:
+        rows.append(navigation)
     rows.append([InlineKeyboardButton("❌ 取消查询", callback_data="publish:keyword_post_search_cancel")])
     return InlineKeyboardMarkup(rows)
 
@@ -6555,6 +6844,91 @@ async def _send_keyword_post_result(
         await message.reply_text("❗ 已找到对应帖子，但暂时无法打开或复制该消息。")
 
 
+def _has_active_publish_text_input_state(user_data: dict) -> bool:
+    """Whether this module's group=10 input handler owns the next text.
+
+    This is separate from the broader non-search guard because these states
+    must be processed *before* bot.py's private-forward handler as well.
+    """
+    if not isinstance(user_data, dict):
+        return False
+    return any(
+        bool(user_data.get(key))
+        for key in (
+            # Prompts handled later in _handle_text_input(). Keep this list
+            # explicit so a waiting state owned by another module is not
+            # accidentally consumed here.
+            "waiting_post",
+            "waiting_submission_reward_group_id",
+            "waiting_forward_channel_id",
+            "waiting_backup_channel_id",
+            "waiting_channel_id",
+            "waiting_limit",
+            "waiting_add_ad",
+            "waiting_edit_ad",
+            REJECT_REASON_KEY,
+            KEYWORD_LABEL_INPUT_KEY,
+            PENDING_PROOF_KEY,
+            "submission_reward_points_field",
+            "publish_button_input",
+            "edit_ad_id",
+        )
+    )
+
+
+def _has_active_non_search_input_state(user_data: dict) -> bool:
+    """Whether private text currently belongs to a settings/management flow.
+
+    ``input_search_enabled`` is intentionally global only while the user is
+    idle.  Settings callbacks set a short-lived state in ``user_data`` (for
+    example ``waiting_channel_id``); allowing the global search to consume that
+    value first prevents the later settings handler from ever seeing it.
+    """
+    if not isinstance(user_data, dict):
+        return False
+
+    # All current ``waiting_*`` flags represent a prompt for the next private
+    # message.  ``waiting_post`` is included here too; a false value is harmless.
+    if any(
+        bool(value)
+        for key, value in user_data.items()
+        if isinstance(key, str) and key.startswith("waiting_")
+    ):
+        return True
+
+    input_state_keys = (
+        REJECT_REASON_KEY,
+        TEMPLATE_DRAFT_KEY,
+        TEMPLATE_FLOW_KEY,
+        KEYWORD_LABEL_INPUT_KEY,
+        PENDING_PROOF_KEY,
+        REPORT_COMMENT_EDIT_KEY,
+        REPORT_USERNAME_MIGRATION_KEY,
+        GROUP_KEYWORD_REPLY_STAGE_KEY,
+        COLLECTION_DISPLAY_SETTING_KEY,
+        USER_MARK_SETTING_KEY,
+        "publish_checkin_setting_field",
+        "submission_reward_points_field",
+        "publish_button_input",
+        "edit_ad_id",
+        "start_welcome_edit",
+        "private_forward_self_service_stage",
+        "multi_bot_stage",
+        # State keys owned by adjacent private-message configuration modules.
+        "channel_config",
+        "channel_config_default_session",
+        "channel_config_file",
+        "channel_config_panel",
+        "channel_config_session_select",
+        "format_output_waiting_for_forward",
+        "rank_admin_draft",
+        # Group-setting prompts are handled by their own private-message
+        # handler and must not be interpreted as collected-post keywords.
+        "group_setting_stage",
+    )
+    return any(bool(user_data.get(key)) for key in input_state_keys)
+
+
 async def _handle_keyword_post_search_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Handle explicit or always-on private collected-post lookup."""
     config = load_publish_config()
@@ -6563,22 +6937,10 @@ async def _handle_keyword_post_search_input(update: Update, context: ContextType
     if not always_on and not user_data.get(KEYWORD_POST_SEARCH_INPUT_KEY):
         return False
 
-    # A global input-search mode must not steal text that belongs to an active
-    # submission, review, welcome-word, or multi-bot management flow.
-    if any(
-        user_data.get(key)
-        for key in (
-            "waiting_post",
-            REJECT_REASON_KEY,
-            TEMPLATE_DRAFT_KEY,
-            TEMPLATE_FLOW_KEY,
-            KEYWORD_LABEL_INPUT_KEY,
-            PENDING_PROOF_KEY,
-            "start_welcome_edit",
-            "private_forward_self_service_stage",
-            "multi_bot_stage",
-        )
-    ):
+    # Global input search is active only while no other flow owns the next
+    # private message.  This must run before the group=10 settings handler,
+    # so it explicitly yields to every settings/management input state.
+    if _has_active_non_search_input_state(user_data):
         return False
 
     msg = update.message
@@ -6591,6 +6953,7 @@ async def _handle_keyword_post_search_input(update: Update, context: ContextType
     if query in {"取消", "返回"}:
         context.user_data.pop(KEYWORD_POST_SEARCH_INPUT_KEY, None)
         context.user_data.pop(KEYWORD_POST_RESULTS_KEY, None)
+        context.user_data.pop(KEYWORD_POST_RESULTS_PAGE_KEY, None)
         if always_on:
             await msg.reply_text(
                 "🔎 输入搜索已开启，请继续输入要查询的收录关键词。"
@@ -6608,6 +6971,9 @@ async def _handle_keyword_post_search_input(update: Update, context: ContextType
         await msg.reply_text("❗ 请发送一个不含空格的关键词，例如：悠悠 或 @youyouabc。")
         return True
 
+    # A new keyword invalidates buttons generated for the previous one.
+    context.user_data.pop(KEYWORD_POST_RESULTS_KEY, None)
+    context.user_data.pop(KEYWORD_POST_RESULTS_PAGE_KEY, None)
     config = load_publish_config()
     routes = _keyword_post_display_routes(
         _find_keyword_routes_with_artist(query, require_discussion=False),
@@ -6634,9 +7000,11 @@ async def _handle_keyword_post_search_input(update: Update, context: ContextType
         return True
 
     context.user_data[KEYWORD_POST_RESULTS_KEY] = routes
+    context.user_data[KEYWORD_POST_RESULTS_PAGE_KEY] = 1
+    _visible_routes, page, pages, _start = _keyword_result_page(routes, 1)
     await msg.reply_text(
-        "找到多个对应帖子，请选择要查看的帖子：",
-        reply_markup=_keyword_post_results_keyboard(routes),
+        f"找到 {len(routes)} 个对应帖子，请选择要查看的帖子（第 {page}/{pages} 页）：",
+        reply_markup=_keyword_post_results_keyboard(routes, page),
     )
     return True
 
@@ -9386,11 +9754,28 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "发送“取消”可放弃修改。"
             )
 
+        deleted_comment = comments[index]
+        deleted, untracked, failed = await _sync_report_comment_deletion(
+            context,
+            deleted_comment,
+        )
+
+        # Remove the entry from the report even if a Telegram copy could not be
+        # removed (for example, the bot lost delete permission).  The durable
+        # tombstone prevents report backfill from resurrecting it; the callback
+        # result tells the administrator exactly when a manual cleanup remains.
         comments.pop(index)
+        _mark_report_comment_deleted(report, deleted_comment)
         data["reports"][resolved_id] = report
         _save_comment_reports(data)
+
+        result = f"✅ 评论已删除，并清理了 {deleted} 个 Telegram 位置。"
+        if untracked:
+            result += f" {untracked} 个历史位置未保存消息定位，无法删除。"
+        if failed:
+            result += f" ⚠️ {failed} 个位置删除失败，请检查机器人删除消息权限。"
         text, markup = _report_list_view(report_id, report, page)
-        await query.answer("✅ 评论已删除。")
+        await query.answer(result, show_alert=bool(failed))
         return await query.edit_message_text(
             text,
             reply_markup=markup,
@@ -9477,6 +9862,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "keyword_post_search":
         context.user_data[KEYWORD_POST_SEARCH_INPUT_KEY] = True
         context.user_data.pop(KEYWORD_POST_RESULTS_KEY, None)
+        context.user_data.pop(KEYWORD_POST_RESULTS_PAGE_KEY, None)
         await query.answer()
         # Keep the original start/menu page untouched. The search prompt is a
         # separate message, so cancelling naturally returns the user to it.
@@ -9490,11 +9876,14 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "keyword_post_return":
         routes = (context.user_data or {}).get(KEYWORD_POST_RESULTS_KEY, [])
+        page = (context.user_data or {}).get(KEYWORD_POST_RESULTS_PAGE_KEY, 1)
         await query.answer()
         if isinstance(routes, list) and routes:
+            _visible_routes, page, pages, _start = _keyword_result_page(routes, page)
+            context.user_data[KEYWORD_POST_RESULTS_PAGE_KEY] = page
             return await query.edit_message_text(
-                "找到多个对应帖子，请选择要查看的帖子：",
-                reply_markup=_keyword_post_results_keyboard(routes),
+                f"找到 {len(routes)} 个对应帖子，请选择要查看的帖子（第 {page}/{pages} 页）：",
+                reply_markup=_keyword_post_results_keyboard(routes, page),
             )
         context.user_data[KEYWORD_POST_SEARCH_INPUT_KEY] = True
         return await query.edit_message_text(
@@ -9505,9 +9894,42 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]),
         )
 
+    if action == "keyword_post_page":
+        routes = (context.user_data or {}).get(KEYWORD_POST_RESULTS_KEY, [])
+        try:
+            requested_page = int(query.data.rsplit(":", 1)[1])
+        except (TypeError, ValueError):
+            return await query.answer("页码无效。", show_alert=True)
+        if not isinstance(routes, list) or not routes:
+            return await query.answer("关键词结果已失效，请重新搜索。", show_alert=True)
+        _visible_routes, page, pages, _start = _keyword_result_page(routes, requested_page)
+        context.user_data[KEYWORD_POST_RESULTS_PAGE_KEY] = page
+        await query.answer()
+        return await query.edit_message_text(
+            f"找到 {len(routes)} 个对应帖子，请选择要查看的帖子（第 {page}/{pages} 页）：",
+            reply_markup=_keyword_post_results_keyboard(routes, page),
+        )
+
+    if action == "keyword_page":
+        routes = (context.user_data or {}).get(KEYWORD_RESULTS_KEY, [])
+        try:
+            requested_page = int(query.data.rsplit(":", 1)[1])
+        except (TypeError, ValueError):
+            return await query.answer("页码无效。", show_alert=True)
+        if not isinstance(routes, list) or not routes:
+            return await query.answer("关键词结果已失效，请重新搜索。", show_alert=True)
+        _visible_routes, page, pages, _start = _keyword_result_page(routes, requested_page)
+        context.user_data[KEYWORD_RESULTS_PAGE_KEY] = page
+        await query.answer()
+        return await query.edit_message_text(
+            f"找到 {len(routes)} 个可评论帖子，请选择（第 {page}/{pages} 页）：",
+            reply_markup=_keyword_submission_results_keyboard(routes, page),
+        )
+
     if action == "keyword_post_search_cancel":
         context.user_data.pop(KEYWORD_POST_SEARCH_INPUT_KEY, None)
         context.user_data.pop(KEYWORD_POST_RESULTS_KEY, None)
+        context.user_data.pop(KEYWORD_POST_RESULTS_PAGE_KEY, None)
         await query.answer("已取消查询。")
         # The prompt was sent as a separate message, so deleting it exposes
         # the untouched start/menu page directly underneath.
@@ -9567,6 +9989,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (ValueError, IndexError, TypeError):
             return await query.answer("关键词结果已失效，请重新搜索。", show_alert=True)
         context.user_data.pop(KEYWORD_RESULTS_KEY, None)
+        context.user_data.pop(KEYWORD_RESULTS_PAGE_KEY, None)
         context.user_data.pop(KEYWORD_INPUT_KEY, None)
         context.user_data[COMMENT_TARGET_KEY] = {
             "channel_id": route["channel_id"],
@@ -11217,6 +11640,104 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.message.reply_text("已拒绝")
 
+def _protocol_auto_submission_permits(user_data: dict, *, now: Optional[float] = None) -> list[float]:
+    """Return unexpired automatic-submission permits from *user_data*.
+
+    Older running instances stored this state as a boolean.  Treat that value
+    as one newly-created permit so deployments can be upgraded without
+    dropping the post that was already armed.
+    """
+    now = time.time() if now is None else float(now)
+    raw = user_data.get(PROTOCOL_AUTO_SUBMISSION_KEY)
+    if raw is True:
+        return [now]
+    if not isinstance(raw, (list, tuple)):
+        return []
+
+    permits = []
+    for value in raw:
+        try:
+            created_at = float(value)
+        except (TypeError, ValueError):
+            continue
+        # A future timestamp may result from a clock adjustment.  It is still
+        # a fresh permit, rather than a reason to discard an armed post.
+        if created_at <= now + PROTOCOL_AUTO_SUBMISSION_TTL_SECONDS and (
+            now - created_at <= PROTOCOL_AUTO_SUBMISSION_TTL_SECONDS
+        ):
+            permits.append(created_at)
+    return permits[-PROTOCOL_AUTO_SUBMISSION_MAX_PENDING:]
+
+
+def _arm_protocol_auto_submission(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Append one short-lived trusted-protocol submission permit."""
+    user_data = context.user_data
+    now = time.time()
+    permits = _protocol_auto_submission_permits(user_data, now=now)
+    permits.append(now)
+    user_data[PROTOCOL_AUTO_SUBMISSION_KEY] = permits[-PROTOCOL_AUTO_SUBMISSION_MAX_PENDING:]
+
+
+def _consume_protocol_auto_submission(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Consume exactly one trusted-protocol submission permit, if available."""
+    user_data = context.user_data
+    permits = _protocol_auto_submission_permits(user_data)
+    if not permits:
+        user_data.pop(PROTOCOL_AUTO_SUBMISSION_KEY, None)
+        return False
+    permits.pop(0)
+    if permits:
+        user_data[PROTOCOL_AUTO_SUBMISSION_KEY] = permits
+    else:
+        user_data.pop(PROTOCOL_AUTO_SUBMISSION_KEY, None)
+    return True
+
+
+async def handle_protocol_submission_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Arm one trusted protocol-account message for direct automatic 投稿.
+
+    The protocol forwarder invokes this immediately before it forwards a
+    channel post.  Ordinary users cannot opt into this path: their Telegram
+    user ID has to be present in the active Telethon-rule registry.
+    """
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat or str(getattr(chat, "type", "")) != "private":
+        return
+    command_args = getattr(context, "args", None) or []
+    history_request_id = str(command_args[0] if command_args else "").strip()
+    if history_request_id:
+        if not is_protocol_history_request_active(history_request_id):
+            await update.message.reply_text("⏹ 该历史转发任务已停止，已忽略这条排队投稿。")
+            return
+        if not is_protocol_history_request_sender(history_request_id, user.id):
+            await update.message.reply_text("🚫 该历史转发任务与当前协议号不匹配。")
+            return
+    elif not is_protocol_submission_sender(user.id):
+        await update.message.reply_text("🚫 此命令仅供已启用投稿转发的协议号使用。")
+        return
+
+    # A protocol post must not be blocked by a stale keyword/proof flow from a
+    # previous manual interaction in the same account.
+    for key in (
+        KEYWORD_INPUT_KEY,
+        KEYWORD_RESULTS_KEY,
+        KEYWORD_RESULTS_PAGE_KEY,
+        KEYWORD_POST_RESULTS_KEY,
+        KEYWORD_POST_RESULTS_PAGE_KEY,
+        KEYWORD_POST_SEARCH_INPUT_KEY,
+        COMMENT_TARGET_KEY,
+        PENDING_PROOF_KEY,
+    ):
+        context.user_data.pop(key, None)
+    context.user_data["post_no_name"] = True
+    context.user_data["waiting_post"] = True
+    _arm_protocol_auto_submission(context)
+
+
 async def publish_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     context.user_data["waiting_post"] = True
@@ -11403,8 +11924,13 @@ async def _handle_wall_publish_message(
         return
 
     owner_id = _owner_id(context)
+    protocol_auto_submission = _consume_protocol_auto_submission(context)
+    # A rule-enabled protocol account is an explicit automation source. Treat
+    # its next native channel forward as a direct 投稿: it must not get stuck
+    # waiting for a manual keyword choice or proof upload.
     is_owner_submission = bool(
-        msg.from_user.id == owner_id
+        protocol_auto_submission
+        or msg.from_user.id == owner_id
         or has_admin_permission(context, msg.from_user.id, "submission_config")
     )
     comment_target = context.user_data.pop(COMMENT_TARGET_KEY, None)
@@ -11814,6 +12340,8 @@ async def _handle_keyword_search_input(update: Update, context: ContextTypes.DEF
     query = msg.text.strip()
     if query in {"取消", "返回"}:
         context.user_data.pop(KEYWORD_INPUT_KEY, None)
+        context.user_data.pop(KEYWORD_RESULTS_KEY, None)
+        context.user_data.pop(KEYWORD_RESULTS_PAGE_KEY, None)
         await msg.reply_text("✅ 已取消关键词搜索。")
         return True
     # “我要投稿” must have a linked discussion parent.  If an otherwise
@@ -11825,6 +12353,9 @@ async def _handle_keyword_search_input(update: Update, context: ContextTypes.DEF
     if recovered:
         print(f"投稿关键词搜索已恢复讨论组映射：{recovered} 条，query={query!r}")
 
+    # A new keyword invalidates buttons generated for the previous one.
+    context.user_data.pop(KEYWORD_RESULTS_KEY, None)
+    context.user_data.pop(KEYWORD_RESULTS_PAGE_KEY, None)
     routes = _find_keyword_routes(query)
     if not routes:
         if recovery_failed:
@@ -11854,15 +12385,12 @@ async def _handle_keyword_search_input(update: Update, context: ContextTypes.DEF
         return True
 
     context.user_data[KEYWORD_RESULTS_KEY] = routes
-    rows = []
-    for index, route in enumerate(routes):
-        label = str(route.get("label", "关键词"))[:12]
-        value = str(route.get("raw", route.get("key", "")))[:30]
-        rows.append([InlineKeyboardButton(f"选择 {label}：{value}", callback_data=f"publish:keyword_pick:{index}")])
-        link = await _route_message_link(context, route)
-        if link:
-            rows.append([InlineKeyboardButton(f"🔗 查看 {value}", url=link)])
-    await msg.reply_text("找到多个对应帖子，请选择：", reply_markup=InlineKeyboardMarkup(rows))
+    context.user_data[KEYWORD_RESULTS_PAGE_KEY] = 1
+    _visible_routes, page, pages, _start = _keyword_result_page(routes, 1)
+    await msg.reply_text(
+        f"找到 {len(routes)} 个可评论帖子，请选择（第 {page}/{pages} 页）：",
+        reply_markup=_keyword_submission_results_keyboard(routes, page),
+    )
     return True
 
 
@@ -12128,6 +12656,12 @@ async def _keyword_search_interceptor(update: Update, context: ContextTypes.DEFA
     if await _handle_group_keyword_reply_settings_input(update, context):
         raise ApplicationHandlerStop
     if await _handle_template_input(update, context):
+        raise ApplicationHandlerStop
+    # Publish/channel configuration prompts must be consumed before bot.py's
+    # private-forward handler.  Otherwise always-on input search would yield,
+    # but the channel ID could still be forwarded before group=10 saves it.
+    if _has_active_publish_text_input_state(context.user_data):
+        await _handle_text_input(update, context)
         raise ApplicationHandlerStop
     if await _handle_keyword_search_input(update, context):
         raise ApplicationHandlerStop
@@ -12719,6 +13253,7 @@ async def _handle_publish_action(
     elif action == "keyword_post_search":
         context.user_data[KEYWORD_POST_SEARCH_INPUT_KEY] = True
         context.user_data.pop(KEYWORD_POST_RESULTS_KEY, None)
+        context.user_data.pop(KEYWORD_POST_RESULTS_PAGE_KEY, None)
 
         keyboard = InlineKeyboardMarkup([
             [
@@ -12751,6 +13286,7 @@ async def _handle_publish_action(
 # =========================
 
 def register_publish_setting_handlers(app):
+    app.add_handler(CommandHandler("protocol_submit", handle_protocol_submission_command))
     app.add_handler(CallbackQueryHandler(_handle_callback, pattern=r"^publish:.+"))
     # Linked discussion groups receive main-channel posts as automatic forwards.
     # Keep the correspondence so approved user comments can reply below the post.

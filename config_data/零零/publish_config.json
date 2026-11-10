@@ -19,7 +19,8 @@
         "telethon_manage": true,
         "bot_channel_config": true,
         "group_config": true,
-        "global_ad_config": true
+        "global_ad_config": true,
+        "keyword_post_search": true
     },
     "report_link_enabled": false,
     "template_publish_enabled": false,
@@ -59,5 +60,8 @@
     "collection_display_text": "收录老师",
     "collection_display_label": "艺名",
     "collection_display_group_label": "",
-    "collection_display_subgroup_label": ""
+    "collection_display_subgroup_label": "",
+    "channel_post_write_report_enabled": false,
+    "input_search_enabled": false,
+    "input_search_restore_private_forward": false
 }

@@ -234,6 +234,23 @@ def _apply_content_rule(text: str, rule: dict) -> str:
     return result
 
 
+def _transformed_source_content(message, rule: dict) -> str:
+    """Return source text after all content rules, before template rendering.
+
+    Report identities must be resolved from this version rather than the raw
+    forwarded message. For example, a replacement of ``t.me/ → @`` turns
+    ``t.me/example`` into a username that can be used for a personal report.
+    """
+    source_text = message.text if message.text is not None else (message.caption or "")
+    source_entities = message.entities if message.text is not None else message.caption_entities
+    protected_source, source_tokens = _protect_custom_emojis(
+        source_text, source_entities, "source"
+    )
+    transformed = _apply_content_rule(protected_source, rule)
+    restored, _entities = _restore_custom_emojis(transformed, source_tokens)
+    return restored
+
+
 def format_forwarded_message(message, rule: dict) -> tuple[str, list[MessageEntity]]:
     source_text = message.text if message.text is not None else (message.caption or "")
     source_entities = message.entities if message.text is not None else message.caption_entities
@@ -284,8 +301,14 @@ async def format_message_for_publish(
         return None
 
     output_text, entities = format_forwarded_message(message, rule)
-    report_id = _personal_report_id(rule, message)
-    report_link = await _personal_report_link(context, rule, message, report_id)
+    # Resolve the report only after every content replacement (and cut rule)
+    # has completed. This lets rules such as ``t.me/ → @`` produce a valid
+    # report username before the personal-report link is generated.
+    transformed_source = _transformed_source_content(message, rule)
+    report_id = _personal_report_id(rule, transformed_source)
+    report_link = await _personal_report_link(
+        context, rule, transformed_source, report_id
+    )
     if report_link:
         output_text, entities = _append_personal_report_link(
             output_text, entities, report_link
@@ -318,15 +341,15 @@ def _append_personal_report_link(
     ]
 
 
-def _report_id_from_message_text(message, field_name: str | list[str] = "") -> Optional[str]:
-    """Return the report username from one or more configured field names.
+def _report_id_from_text(text: str, field_name: str | list[str] = "") -> Optional[str]:
+    """Return the report username from transformed source text.
 
-    With no field configured, preserve the old behavior and take the first
-    @username in the complete source message. With field candidates, inspect
-    only those lines, so “🤖双向：@muxuexxbot” cannot accidentally win over a
-    selected contact field.
+    With no field configured, take the first ``@username`` after the rule's
+    replacements and cut rules have run. With field candidates, inspect only
+    those lines, so “🤖双向：@muxuexxbot” cannot accidentally win over a selected
+    contact field.
     """
-    text = str(message.text if message.text is not None else (message.caption or ""))
+    text = str(text or "")
     if isinstance(field_name, (list, tuple)):
         field_names = [str(item or "").strip() for item in field_name]
     else:
@@ -371,23 +394,23 @@ def _report_field_candidates(rule: dict) -> list[str]:
     return candidates
 
 
-def _personal_report_id(rule: dict, message) -> Optional[str]:
-    """Resolve the rule-selected report ID from the original forwarded text."""
+def _personal_report_id(rule: dict, transformed_source: str) -> Optional[str]:
+    """Resolve the report ID after the source content rules have run."""
     if not rule.get("personal_report_link_enabled", False):
         return None
-    return _report_id_from_message_text(message, _report_field_candidates(rule))
+    return _report_id_from_text(transformed_source, _report_field_candidates(rule))
 
 
 async def _personal_report_link(
     context: ContextTypes.DEFAULT_TYPE,
     rule: dict,
-    message,
+    transformed_source: str,
     report_id: Optional[str] = None,
 ) -> Optional[str]:
-    """Build a report link from the configured source field."""
+    """Build a report link from the transformed source field."""
     if not rule.get("personal_report_link_enabled", False):
         return None
-    report_id = report_id or _personal_report_id(rule, message)
+    report_id = report_id or _personal_report_id(rule, transformed_source)
     if not report_id:
         return None
     try:
