@@ -124,6 +124,51 @@ class PublishSettingCollectionTests(unittest.TestCase):
         self.assertEqual(changed, 1)
         self.assertEqual(reports_data["aliases"]["ys520521"], "yunsu3t")
 
+    def test_teacher_filter_keeps_same_secondary_category_together(self):
+        """Interleaved source posts must render one section per secondary group."""
+        config = {
+            "collection_display_group_label": "城市",
+            "collection_display_subgroup_label": "区域",
+            "collection_display_label": "艺名",
+        }
+        posts = [
+            {"channel_id": -1001, "message_id": 1, "fields": {"城市": ["上海"], "区域": ["浦东"], "艺名": ["甲"]}},
+            {"channel_id": -1001, "message_id": 2, "fields": {"城市": ["上海"], "区域": ["徐汇"], "艺名": ["乙"]}},
+            {"channel_id": -1001, "message_id": 3, "fields": {"城市": ["上海"], "区域": ["浦东"], "艺名": ["丙"]}},
+        ]
+
+        items = publish._filter_collection_display_posts(posts, config, "上海")
+
+        self.assertEqual(
+            [(item["primary"], item["secondary"]) for item in items],
+            [("上海", "浦东"), ("上海", "浦东"), ("上海", "徐汇")],
+        )
+        token = publish._store_teacher_filter_result(config, "上海", items)
+        text, _entities, _keyboard = publish._teacher_list_filtered_payload(
+            config, token, publish._TEACHER_LIST_FILTER_CACHE[token], page=0
+        )
+        self.assertEqual(text.count("〔浦东〕"), 1)
+        self.assertLess(text.index("1. 甲"), text.index("2. 丙"))
+        self.assertLess(text.index("2. 丙"), text.index("〔徐汇〕"))
+
+    def test_teacher_category_filter_requires_at_least_two_characters(self):
+        config = {
+            "collection_display_group_label": "城市",
+            "collection_display_subgroup_label": "区域",
+        }
+        posts = [
+            {
+                "channel_id": -1001,
+                "message_id": 1,
+                "fields": {"城市": ["上海"], "区域": ["闵行区"]},
+            }
+        ]
+
+        self.assertEqual(len(publish._filter_collection_display_posts(posts, config, "上海")), 1)
+        self.assertEqual(len(publish._filter_collection_display_posts(posts, config, "闵行")), 1)
+        self.assertEqual(publish._filter_collection_display_posts(posts, config, "上"), [])
+        self.assertEqual(publish._filter_collection_display_posts(posts, config, "海"), [])
+
     def test_saved_teacher_filter_uses_current_collection_values(self):
         """Paging an open filtered roster must not render its old snapshot."""
         config = {

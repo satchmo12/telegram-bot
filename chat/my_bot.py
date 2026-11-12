@@ -19,6 +19,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.helpers import escape
 import requests
 from telegram.constants import ParseMode
+# from bot import MASTER_BOT_NAME
 from command_router import register_command
 from game.voice_reply import group_tts_voice, tts_voice_reply
 from forward.message_forward import send_message_payload
@@ -1745,6 +1746,9 @@ async def ad_push_to(context: ContextTypes.DEFAULT_TYPE):
 @register_command("叫", "说", "讲")
 async def speak_to_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    # bot_name = str(context.application.bot_data.get("name", "")).strip()
+    # if  bot_name == MASTER_BOT_NAME:
+    #     return
     if not update.message:
         return
 

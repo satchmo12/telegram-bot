@@ -1,0 +1,32 @@
+{
+    "admins": {
+        "5964665798": {
+            "name": "洛杉矶",
+            "username": "",
+            "permissions": [
+                "submission_review",
+                "submission_config",
+                "private_forward",
+                "group_config",
+                "global_ad_config",
+                "channel_config",
+                "telethon_manage",
+                "bot_channel_config"
+            ]
+        },
+        "5586510095": {
+            "name": "迪拜",
+            "username": "",
+            "permissions": [
+                "submission_review",
+                "submission_config",
+                "private_forward",
+                "group_config",
+                "global_ad_config",
+                "channel_config",
+                "telethon_manage",
+                "bot_channel_config"
+            ]
+        }
+    }
+}

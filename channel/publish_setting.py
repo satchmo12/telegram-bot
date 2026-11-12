@@ -86,6 +86,12 @@ KEYWORD_POST_SEARCH_INPUT_KEY = "publish_keyword_post_search"
 # Keep Telegram result keyboards compact.  Result lists are kept in user_data
 # and paged rather than being silently truncated to fit a single keyboard.
 KEYWORD_SEARCH_PAGE_SIZE = 8
+# Group keyword replies can match a large number of collected posts. Keep the
+# group response compact and let members browse ten results at a time.
+GROUP_KEYWORD_REPLY_PAGE_SIZE = 10
+GROUP_KEYWORD_REPLY_CACHE_TTL_SEC = 600
+GROUP_KEYWORD_REPLY_CACHE_MAX_ENTRIES = 100
+_GROUP_KEYWORD_REPLY_CACHE: dict[str, dict] = {}
 # Discussion-parent recovery may involve protocol requests.  Do not make a
 # broad keyword search wait on every historical result before showing it.
 KEYWORD_DISCUSSION_MAPPING_RECOVERY_LIMIT = 20
@@ -2100,15 +2106,31 @@ def _collection_display_post_categories(post: dict, config: dict) -> tuple[str, 
 def _filter_collection_display_posts(
     posts: list[dict], config: dict, filter_text: str
 ) -> list[dict]:
-    """Filter by configured first/second category values, never by post text."""
+    """Filter and keep each primary/secondary category contiguous.
+
+    Collection records are stored in post order, so records for one secondary
+    category can be interleaved with another one.  The filtered ``老师`` reply
+    renders a category heading only when its value changes; return category
+    buckets in first-seen order to ensure identical secondary categories share
+    one heading and are displayed together.
+    """
     keyword = str(filter_text or "").strip().casefold()
-    matched = []
+    # Category aliases are intentionally partial matches (e.g. “闵行” finds
+    # “闵行区”), but a single character such as “上” or “海” is too broad and
+    # would create accidental roster replies in ordinary group chat.
+    if keyword and len(keyword) < 2:
+        return []
+
+    grouped: dict[tuple[str, str], list[dict]] = {}
     for post in posts:
         primary, secondary = _collection_display_post_categories(post, config)
         if keyword and keyword not in primary.casefold() and keyword not in secondary.casefold():
             continue
-        matched.append({"primary": primary, "secondary": secondary, "post": post})
-    return matched
+        grouped.setdefault((primary, secondary), []).append(
+            {"primary": primary, "secondary": secondary, "post": post}
+        )
+
+    return [item for category_items in grouped.values() for item in category_items]
 
 
 def _purge_teacher_filter_cache() -> None:
@@ -2801,9 +2823,11 @@ async def _reply_collection_display(
     config: dict,
     *,
     filter_text: str = "",
+    posts: Optional[list[dict]] = None,
 ) -> None:
     """Reply to ``老师 [一级/二级分类]`` with a paginated linked roster."""
-    posts = _load_collection_display_posts(config)
+    if posts is None:
+        posts = _load_collection_display_posts(config)
     if not posts:
         await message.reply_text("当前暂无收录内容。")
         return
@@ -2997,6 +3021,19 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
             msg, context, config, filter_text=collection_filter
         )
         return True
+
+    # A bare category value is an alias for ``老师 <分类>``.  Only consume the
+    # message when it actually matches a configured category, so unrelated
+    # group chat can continue through the normal message pipeline.
+    if bool(config.get("collection_display_enabled", False)):
+        primary_label, secondary_label = _collection_display_category_labels(config)
+        if command and (primary_label or secondary_label):
+            posts = _load_collection_display_posts(config)
+            if _filter_collection_display_posts(posts, config, command):
+                await _reply_collection_display(
+                    msg, context, config, filter_text=command, posts=posts
+                )
+                return True
 
     if command not in {checkin_command, cancel_command, online_command}:
         return False
@@ -7060,7 +7097,8 @@ def _group_keyword_reply_settings_text(config: dict) -> str:
         f"规则数量：{len(rules)}",
         "",
         "群成员发送艺名等关键词时，机器人会从同一收录帖子中查找对应字段，",
-        "把 @用户名显示成 Telegram 联系链接；多个联系方式会显示多个按钮。",
+        "也支持直接发送已收录的标签、区域、课费、联系方式等条件，命中后返回对应老师。",
+        "没有匹配结果时不会发送关键词回复；多个联系方式会显示多个按钮。",
     ]
     if rules:
         lines.extend(["", "当前规则："])
@@ -7154,7 +7192,7 @@ def _find_group_keyword_reply_values(query: str, input_label: str, reply_label: 
         return [
             {"value": "", "channel_id": channel_id, "message_id": message_id}
             for channel_id, message_id in sorted(source_posts)
-        ][:20]
+        ]
 
     values = []
     seen = set()
@@ -7176,7 +7214,69 @@ def _find_group_keyword_reply_values(query: str, input_label: str, reply_label: 
                     "channel_id": channel_id,
                     "message_id": message_id,
                 })
-    return values[:20]
+    return values
+
+
+def _find_group_keyword_condition_values(query: str, input_label: str) -> list[dict]:
+    """Find the primary field for posts matching a non-primary condition.
+
+    For example, with ``艺名`` as the configured input field, a member can
+    directly send a stored ``标签``/``区域``/``课费`` value. The response then
+    links to the matching post(s) and uses the artist name as its label.
+    """
+    query_key = _normalize_routing_keyword(query)
+    if not query_key:
+        return []
+    data = _load_keyword_map()
+    current_main_channel_id = _as_int(load_publish_config().get("channel_id"))
+    matched_posts = set()
+    for stored_key, records in data.items():
+        if query_key != _normalize_routing_keyword(stored_key):
+            continue
+        for record in records if isinstance(records, list) else []:
+            if not isinstance(record, dict):
+                continue
+            # The configured input label is handled by the existing direct
+            # keyword lookup. This fallback is only for other post conditions.
+            if str(record.get("label") or "").strip() == input_label:
+                continue
+            channel_id = _as_int(record.get("channel_id"))
+            message_id = _as_int(record.get("channel_message_id"))
+            if (
+                channel_id is not None
+                and message_id is not None
+                and (current_main_channel_id is None or channel_id == current_main_channel_id)
+            ):
+                matched_posts.add((channel_id, message_id))
+
+    if not matched_posts:
+        return []
+
+    values = []
+    seen = set()
+    for records in data.values():
+        for record in records if isinstance(records, list) else []:
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("label") or "").strip() != input_label:
+                continue
+            channel_id = _as_int(record.get("channel_id"))
+            message_id = _as_int(record.get("channel_message_id"))
+            if (channel_id, message_id) not in matched_posts:
+                continue
+            value = str(record.get("raw") or record.get("key") or "").lstrip("#").strip()
+            if not value:
+                continue
+            item_key = (value, channel_id, message_id)
+            if item_key in seen:
+                continue
+            seen.add(item_key)
+            values.append({
+                "value": value,
+                "channel_id": channel_id,
+                "message_id": message_id,
+            })
+    return values
 
 
 def _telegram_contact_buttons(
@@ -7243,6 +7343,70 @@ def _render_group_keyword_default_text(template: str, query: str, contacts: list
         return str(template)[:500]
 
 
+def _purge_group_keyword_reply_cache() -> None:
+    now = time.monotonic()
+    for token, state in list(_GROUP_KEYWORD_REPLY_CACHE.items()):
+        if float(state.get("expires_at", 0) or 0) <= now:
+            _GROUP_KEYWORD_REPLY_CACHE.pop(token, None)
+
+
+def _store_group_keyword_reply_results(query: str, entries: list[dict]) -> str:
+    _purge_group_keyword_reply_cache()
+    while len(_GROUP_KEYWORD_REPLY_CACHE) >= GROUP_KEYWORD_REPLY_CACHE_MAX_ENTRIES:
+        oldest = min(
+            _GROUP_KEYWORD_REPLY_CACHE,
+            key=lambda key: float(_GROUP_KEYWORD_REPLY_CACHE[key].get("expires_at", 0) or 0),
+        )
+        _GROUP_KEYWORD_REPLY_CACHE.pop(oldest, None)
+    token = uuid.uuid4().hex[:12]
+    _GROUP_KEYWORD_REPLY_CACHE[token] = {
+        "expires_at": time.monotonic() + GROUP_KEYWORD_REPLY_CACHE_TTL_SEC,
+        "query": str(query or "")[:64],
+        "entries": entries,
+    }
+    return token
+
+
+def _get_group_keyword_reply_results(token: str) -> Optional[dict]:
+    _purge_group_keyword_reply_cache()
+    state = _GROUP_KEYWORD_REPLY_CACHE.get(str(token or ""))
+    return state if isinstance(state, dict) else None
+
+
+def _group_keyword_reply_payload(token: str, state: dict, page: int) -> tuple[str, InlineKeyboardMarkup]:
+    entries = state.get("entries") if isinstance(state.get("entries"), list) else []
+    total = len(entries)
+    pages = max(1, (total + GROUP_KEYWORD_REPLY_PAGE_SIZE - 1) // GROUP_KEYWORD_REPLY_PAGE_SIZE)
+    try:
+        page = int(page or 1)
+    except (TypeError, ValueError):
+        page = 1
+    page = max(1, min(page, pages))
+    start = (page - 1) * GROUP_KEYWORD_REPLY_PAGE_SIZE
+    visible_entries = entries[start : start + GROUP_KEYWORD_REPLY_PAGE_SIZE]
+
+    text = f"🔎 共找到 <b>{total}</b> 条结果 · 当前第 {page}/{pages} 页"
+    rows = []
+    for entry in visible_entries:
+        button_text = str(entry.get("button_text") or "查看对应帖子")[:64]
+        url = str(entry.get("url") or "").strip()
+        if url:
+            rows.append([InlineKeyboardButton(button_text or "查看对应帖子", url=url)])
+
+    navigation = []
+    if page > 1:
+        navigation.append(InlineKeyboardButton(
+            "⬅️ 上一页", callback_data=f"publish:group_keyword_page:{token}:{page - 1}"
+        ))
+    if page < pages:
+        navigation.append(InlineKeyboardButton(
+            "➡️ 下一页", callback_data=f"publish:group_keyword_page:{token}:{page + 1}"
+        ))
+    if navigation:
+        rows.append(navigation)
+    return text, InlineKeyboardMarkup(rows)
+
+
 async def _handle_group_keyword_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     msg = update.message
     chat = update.effective_chat
@@ -7251,6 +7415,8 @@ async def _handle_group_keyword_reply(update: Update, context: ContextTypes.DEFA
         return False
     if not msg.text or (user and user.is_bot):
         return False
+
+    config = load_publish_config()
     query = msg.text.strip()
     if (
         not query
@@ -7260,12 +7426,11 @@ async def _handle_group_keyword_reply(update: Update, context: ContextTypes.DEFA
         or query.isdigit()
     ):
         return False
-
-    config = load_publish_config()
     if not bool(config.get("keyword_group_reply_enabled", False)):
         return False
-    rows = []
-    display_messages = []
+
+    entries = []
+    seen_entries = set()
     for rule in _keyword_group_reply_rules(config):
         if not rule.get("enabled", True):
             continue
@@ -7274,56 +7439,85 @@ async def _handle_group_keyword_reply(update: Update, context: ContextTypes.DEFA
             rule["input_label"],
             rule["reply_label"],
         )
+        matched_by_condition = False
+        if not values:
+            # A label/region/price can be sent directly. Display the matched
+            # teacher's configured primary value and link to its source post.
+            values = _find_group_keyword_condition_values(query, rule["input_label"])
+            matched_by_condition = bool(values)
         if not values:
             continue
+
         reply_label = str(rule.get("reply_label") or "").strip()
         contacts = [item["value"] for item in values if item.get("value")]
-        rule_buttons = []
-        if reply_label:
-            for item in values:
-                rule_buttons.extend(
-                    _telegram_contact_buttons(
-                        item["value"],
-                        rule["button_text"],
-                        query,
-                        rule.get("default_text", ""),
-                        contacts,
-                    )
+        for item in values:
+            if reply_label and not matched_by_condition:
+                buttons = _telegram_contact_buttons(
+                    item["value"],
+                    rule["button_text"],
+                    query,
+                    rule.get("default_text", ""),
+                    contacts,
                 )
-        else:
-            # With no reply field configured, the input keyword itself locates
-            # the source post. Buttons open that post instead of a contact.
-            for item in values:
-                link = await _route_message_link(context, {
-                    "channel_id": item.get("channel_id"),
-                    "channel_message_id": item.get("message_id"),
-                })
-                if not link:
-                    continue
-                try:
-                    button_text = str(rule.get("button_text") or "查看对应帖子").format(
-                        keyword=query,
-                        value="对应帖子",
-                    )
-                except Exception:
-                    button_text = "查看对应帖子"
-                rule_buttons.append(InlineKeyboardButton(
-                    button_text[:64] or "查看对应帖子",
-                    url=link,
-                ))
-        if not rule_buttons:
-            continue
-        rows.extend([[button] for button in rule_buttons])
-        display_values = contacts or ["对应帖子"]
-        display_text = _render_group_keyword_display_text(rule, query, display_values)
-        if display_text and display_text not in display_messages:
-            display_messages.append(display_text)
+                for button in buttons:
+                    button_text = str(button.text or "联系")[:64]
+                    url = str(button.url or "").strip()
+                    key = (button_text, url)
+                    if not url or key in seen_entries:
+                        continue
+                    seen_entries.add(key)
+                    entries.append({
+                        "summary": _render_group_keyword_display_text(
+                            rule, query, [str(item.get("value") or "")]
+                        ),
+                        "button_text": button_text,
+                        "url": url,
+                    })
+                continue
 
-    if not rows:
+            link = await _route_message_link(context, {
+                "channel_id": item.get("channel_id"),
+                "channel_message_id": item.get("message_id"),
+            })
+            if not link:
+                continue
+            result_value = str(item.get("value") or "对应帖子")
+            try:
+                button_text = str(rule.get("button_text") or "查看对应帖子").format(
+                    keyword=result_value if matched_by_condition else query,
+                    value=result_value,
+                )
+            except Exception:
+                button_text = "查看对应帖子"
+            key = (button_text[:64] or "查看对应帖子", link)
+            if key in seen_entries:
+                continue
+            seen_entries.add(key)
+            entries.append({
+                "summary": (
+                    f"老师：{result_value}"
+                    if matched_by_condition
+                    else _render_group_keyword_display_text(rule, query, [result_value])
+                ),
+                "button_text": button_text[:64] or "查看对应帖子",
+                "url": link,
+            })
+
+    if not entries:
         return False
-    response_text = "\n\n".join(display_messages) or "已找到联系方式："
-    
-    await safe_reply(update, context, response_text, reply_markup=InlineKeyboardMarkup(rows), auto_delete_seconds = 30, bot_reply = True)
+    token = _store_group_keyword_reply_results(query, entries)
+    response_text, markup = _group_keyword_reply_payload(
+        token, _GROUP_KEYWORD_REPLY_CACHE[token], page=1
+    )
+    await safe_reply(
+        update,
+        context,
+        response_text,
+        html=True,
+        reply_markup=markup,
+        auto_delete_seconds=0,
+        bot_reply=True,
+    )
     return True
 
 
@@ -9662,6 +9856,25 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "comment":
         return await _start_comment_submission(query, context, config)
 
+    if action == "group_keyword_page":
+        if len(parts) != 4:
+            return await query.answer("查询分页参数无效。", show_alert=True)
+        state = _get_group_keyword_reply_results(parts[2])
+        if not state:
+            return await query.answer("查询结果已过期，请重新发送关键词。", show_alert=True)
+        try:
+            requested_page = int(parts[3])
+        except (TypeError, ValueError):
+            return await query.answer("页码无效。", show_alert=True)
+        text, markup = _group_keyword_reply_payload(parts[2], state, requested_page)
+        await query.answer()
+        return await query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=markup,
+            disable_web_page_preview=True,
+        )
+
     if action == "report_posts":
         parts = query.data.split(":")
         if len(parts) != 4:
@@ -11856,14 +12069,16 @@ async def _queue_media_group_submission(update, context: ContextTypes.DEFAULT_TY
     )
 
 
-async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_wall_publish(update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Handle one active submission and report whether it consumed the message."""
     if not context.user_data.get("waiting_post"):
-        return
+        return False
     msg = update.message
     if msg and getattr(msg, "media_group_id", None):
         await _queue_media_group_submission(update, context)
-        return
+        return True
     await _handle_wall_publish_message(update, context)
+    return True
 
 
 async def _handle_wall_publish_message(
@@ -12019,12 +12234,16 @@ async def _handle_wall_publish_message(
         await msg.reply_text("🕒 投稿已提交，等待管理员审核。")
         return
 
-    # Owner's normal post stays in main channel and receives a comment button.
+    # Direct publication can also originate from a regular user when review is
+    # disabled. Preserve their chosen anonymous/real-name mode for any public
+    # report generated from this submission.
+    anonymous_submission = bool(context.user_data.get("post_no_name", False))
     submission = {
         "user_chat_id": msg.chat_id,
         "user_message_id": source_message_ids[0],
         "source_message_ids": source_message_ids,
-        "report_author": _comment_author(msg),
+        "anonymous": anonymous_submission,
+        "report_author": "匿名投稿" if anonymous_submission else _comment_author(msg),
         "report_content": _comment_content(msg),
         "format_output": format_output,
         "format_output_is_text": msg.text is not None,
@@ -12888,7 +13107,10 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if await _handle_reject_reason_input(update, context):
         return
 
-    await handle_wall_publish(update, context)
+    if await handle_wall_publish(update, context):
+        # Submission content must not continue into private forwarding or the
+        # generic text router after it has been accepted for review/publishing.
+        raise ApplicationHandlerStop
 
     if  not update.message or not update.message.text:
         return
@@ -13299,7 +13521,8 @@ def register_publish_setting_handlers(app):
         # Must run before generic group handlers that may stop processing.
         group=-940,
     )
-    # Check-in commands run before generic group dispatch/AI handlers.
+    # Collection/category aliases and check-in commands run before keyword
+    # replies, so ``浦东`` returns the same roster as ``老师 浦东``.
     app.add_handler(
         MessageHandler(
             filters.ChatType.GROUPS
@@ -13308,7 +13531,7 @@ def register_publish_setting_handlers(app):
             & ~filters.UpdateType.BUSINESS_MESSAGE,
             _checkin_group_interceptor,
         ),
-        group=-21,
+        group=-23,
     )
     # User marking is triggered by replying “标记” to a group member's message.
     app.add_handler(
@@ -13350,7 +13573,9 @@ def register_publish_setting_handlers(app):
             & ~filters.UpdateType.BUSINESS_MESSAGE,
             _handle_text_input,
         ),
-        group=10,
+        # Claim active submission input before bot.py's group=0 private-forward
+        # handler, while allowing unrelated messages to fall through normally.
+        group=-17,
     )
     
     app.add_handler(

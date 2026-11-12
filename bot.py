@@ -397,6 +397,12 @@ async def private_forward_router(update: Update, context: ContextTypes.DEFAULT_T
         or user_data.get("publish_template_flow")
         or user_data.get("publish_keyword_label_input")
         or user_data.get("publish_pending_proof_id")
+        # A selected comment target is waiting for the user to choose a
+        # submission mode; free text here must never enter private forwarding.
+        or isinstance(user_data.get("publish_comment_target"), dict)
+        # Event-lottery management inputs (e.g. directly adding a participant)
+        # belong to the lottery flow, not the bidirectional private bot.
+        or isinstance(user_data.get("event_lottery_draft"), dict)
     ):
         print(
             "[private_forward_router] 忽略：当前正在投稿、关键词搜索或填写拒绝原因"
