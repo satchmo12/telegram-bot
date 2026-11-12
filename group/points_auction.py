@@ -61,6 +61,14 @@ def _new_auction(chat_id: int, owner_id: int) -> dict:
         "publish_at": 0,
         "end_at": 0,
         "starting_bid": 1,
+        # Every new total bid must be at least this amount above the current
+        # leading bid. Kept at 1 for auctions created before this setting.
+        "bid_increment": 1,
+        # Anti-sniping: a successful bid made within ``extend_before_min``
+        # minutes of the end postpones the current end time by
+        # ``extend_by_min`` minutes. Either value being 0 disables it.
+        "extend_before_min": 0,
+        "extend_by_min": 0,
         # Charged once on the first successful bid. It is not part of the
         # refundable frozen bid, and applies to both winner and non-winners.
         "entry_cost": 0,
@@ -124,10 +132,36 @@ def _leading_bid(record: dict) -> Optional[dict]:
     return values[0] if values else None
 
 
+def _bid_increment(record: dict) -> int:
+    """Return a safe increment for old records that predate this setting."""
+    return max(1, int(record.get("bid_increment", 1) or 1))
+
+
 def _minimum_next_bid(record: dict) -> int:
     leader = _leading_bid(record)
     start = max(1, int(record.get("starting_bid", 1) or 1))
-    return start if not leader else int(leader.get("amount", 0) or 0) + 1
+    return start if not leader else int(leader.get("amount", 0) or 0) + _bid_increment(record)
+
+
+def _anti_sniping_settings(record: dict) -> tuple[int, int]:
+    """Return enabled anti-sniping settings, or ``(0, 0)`` when disabled."""
+    before = max(0, int(record.get("extend_before_min", 0) or 0))
+    extend = max(0, int(record.get("extend_by_min", 0) or 0))
+    return (before, extend) if before and extend else (0, 0)
+
+
+def _extend_end_time_after_bid(record: dict, now: int) -> int:
+    """Extend an auction once when a successful bid is in its final window.
+
+    The extension is measured from the *current* end time. Therefore every
+    later qualifying bid can extend the auction again.
+    """
+    before, extend = _anti_sniping_settings(record)
+    end_at = int(record.get("end_at", 0) or 0)
+    if not before or not extend or not end_at or now < end_at - before * 60:
+        return 0
+    record["end_at"] = end_at + extend * 60
+    return extend
 
 
 def _bidder_display(entry: dict) -> str:
@@ -161,10 +195,13 @@ def _auction_text(record: dict, context: ContextTypes.DEFAULT_TYPE, *, include_b
         f"📅 发布时间：{_timestamp_text(int(record.get('publish_at', 0) or 0), context) if record.get('publish_at') else '立即发布'}",
         f"⏰ 拍卖结束：{_timestamp_text(int(record.get('end_at', 0) or 0), context)}（{get_bot_timezone(context)}）",
         f"💰 起拍价：{int(record.get('starting_bid', 1) or 1)} 积分",
+        f"📈 加价幅度：至少 {_bid_increment(record)} 积分",
         f"🎫 参与消耗：{int(record.get('entry_cost', 0) or 0)} 积分（首次有效出价时扣除）",
         f"🔒 停止出价：结束前 {int(record.get('stop_bidding_before_min', 0) or 0)} 分钟",
+        _anti_sniping_text(record),
         "",
         f"📊 {bid_state}",
+        "💬 回复本消息并发送整数金额，即可直接出价。",
     ]
     if include_bids:
         bids = _bids(record)
@@ -177,6 +214,13 @@ def _auction_text(record: dict, context: ContextTypes.DEFAULT_TYPE, *, include_b
             if len(bids) > 8:
                 lines.append(f"… 另有 {len(bids) - 8} 人出价")
     return "\n".join(lines)
+
+
+def _anti_sniping_text(record: dict) -> str:
+    before, extend = _anti_sniping_settings(record)
+    if not before:
+        return "⏳ 临近结束延时：未启用"
+    return f"⏳ 临近结束延时：结束前 {before} 分钟内出价，每次延长 {extend} 分钟"
 
 
 def _dashboard_text(records: list[dict]) -> str:
@@ -217,8 +261,10 @@ def _editor_text(record: dict, context: ContextTypes.DEFAULT_TYPE) -> str:
         f"发布时间：{'立即发布' if not record.get('publish_at') else _timestamp_text(int(record['publish_at']), context)}",
         f"结束时间：{_timestamp_text(int(record.get('end_at', 0) or 0), context)}",
         f"起拍价：{int(record.get('starting_bid', 1) or 1)} 积分",
+        f"加价幅度：至少 {_bid_increment(record)} 积分",
         f"参与消耗：{int(record.get('entry_cost', 0) or 0)} 积分",
         f"提前停止出价：{int(record.get('stop_bidding_before_min', 0) or 0)} 分钟",
+        _anti_sniping_text(record).removeprefix("⏳ "),
         f"封面：{'已设置' if isinstance(record.get('cover'), dict) else '未设置'}",
     ])
 
@@ -236,12 +282,17 @@ def _editor_keyboard(record: dict) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("💰 起拍价", callback_data=f"{CALLBACK_PREFIX}:field:{aid}:starting_bid"),
-            InlineKeyboardButton("🎫 参与消耗", callback_data=f"{CALLBACK_PREFIX}:field:{aid}:entry_cost"),
+            InlineKeyboardButton("📈 加价幅度", callback_data=f"{CALLBACK_PREFIX}:field:{aid}:bid_increment"),
         ],
         [
+            InlineKeyboardButton("🎫 参与消耗", callback_data=f"{CALLBACK_PREFIX}:field:{aid}:entry_cost"),
             InlineKeyboardButton("🔒 停止出价时间", callback_data=f"{CALLBACK_PREFIX}:field:{aid}:stop_before"),
-            InlineKeyboardButton("🖼 拍卖封面", callback_data=f"{CALLBACK_PREFIX}:field:{aid}:cover"),
         ],
+        [
+            InlineKeyboardButton("⏱ 延时触发窗口", callback_data=f"{CALLBACK_PREFIX}:field:{aid}:extend_before"),
+            InlineKeyboardButton("⏳ 每次延长时间", callback_data=f"{CALLBACK_PREFIX}:field:{aid}:extend_by"),
+        ],
+        [InlineKeyboardButton("🖼 拍卖封面", callback_data=f"{CALLBACK_PREFIX}:field:{aid}:cover")],
         [
             InlineKeyboardButton("👁 预览", callback_data=f"{CALLBACK_PREFIX}:preview:{aid}"),
             InlineKeyboardButton("✅ 完成发布", callback_data=f"{CALLBACK_PREFIX}:publish:{aid}"),
@@ -471,7 +522,8 @@ async def _open_bid_card(query, context: ContextTypes.DEFAULT_TYPE, record: dict
     lines = [
         "💎 <b>积分拍卖出价</b>", f"拍卖：{html.escape(str(record.get('name') or '未命名拍卖'))}",
         f"结束：{_timestamp_text(int(record.get('end_at', 0) or 0), context)}", f"当前最低可出价：{_minimum_next_bid(record)} 积分",
-        f"你的当前最高出价：{int(mine.get('amount', 0) or 0)} 积分", f"你的当前积分：{get_points(record['chat_id'], user.id)}",
+        f"加价幅度：至少 {_bid_increment(record)} 积分", f"你的当前最高出价：{int(mine.get('amount', 0) or 0)} 积分",
+        f"你的当前积分：{get_points(record['chat_id'], user.id)}", _anti_sniping_text(record),
         "", "每次改价仅补扣与自己最高出价的差额；未中标者的冻结出价会在结束后自动退还。",
     ]
     rows = []
@@ -535,7 +587,7 @@ async def _handle_editor_input(update: Update, context: ContextTypes.DEFAULT_TYP
             if value is None:
                 raise ValueError("请输入未来结束时间 YYYY-MM-DD HH:MM。")
             record["end_at"] = value
-        elif field in {"starting_bid", "entry_cost", "stop_before"}:
+        elif field in {"starting_bid", "bid_increment", "entry_cost", "stop_before", "extend_before", "extend_by"}:
             if not text.isdigit():
                 raise ValueError("请输入非负整数。")
             value = int(text)
@@ -543,7 +595,13 @@ async def _handle_editor_input(update: Update, context: ContextTypes.DEFAULT_TYP
                 raise ValueError(f"数值不能超过 {MAX_BID}。")
             if field == "starting_bid" and value < 1:
                 raise ValueError("起拍价至少为 1。")
-            record[{"stop_before": "stop_bidding_before_min"}.get(field, field)] = value
+            if field == "bid_increment" and value < 1:
+                raise ValueError("加价幅度至少为 1。")
+            record[{
+                "stop_before": "stop_bidding_before_min",
+                "extend_before": "extend_before_min",
+                "extend_by": "extend_by_min",
+            }.get(field, field)] = value
         elif field == "cover":
             if text in {"清空", "关闭"}:
                 record["cover"] = None
@@ -564,6 +622,86 @@ async def _handle_editor_input(update: Update, context: ContextTypes.DEFAULT_TYP
     return True
 
 
+async def _submit_bid(
+    context: ContextTypes.DEFAULT_TYPE,
+    record: dict,
+    user,
+    amount: int,
+) -> tuple[bool, str]:
+    """Validate, freeze, and persist one total bid from either bid entry path."""
+    if amount > MAX_BID:
+        return False, f"❗ 单次出价不能超过 {MAX_BID} 积分。"
+    if record.get("status") != "open":
+        return False, "❌ 该拍卖未开始或已经结束。"
+
+    now = int(time.time())
+    cutoff = int(record.get("end_at", 0) or 0) - int(record.get("stop_bidding_before_min", 0) or 0) * 60
+    if now >= cutoff:
+        return False, "❌ 已到停止出价时间。"
+
+    minimum = _minimum_next_bid(record)
+    bids = record.setdefault("bids", {})
+    if not isinstance(bids, dict):
+        bids = record["bids"] = {}
+    previous = bids.get(str(user.id), {})
+    previous = previous if isinstance(previous, dict) else {}
+    previous_amount = int(previous.get("amount", 0) or 0)
+    if amount < minimum or amount <= previous_amount:
+        return False, (
+            f"❗ 当前最低可出价为 {minimum} 积分（每次至少加 {_bid_increment(record)} 积分）；"
+            f"你的新出价还必须高于自己的 {previous_amount} 积分。"
+        )
+
+    first_bid = not bool(previous)
+    entry_cost = int(record.get("entry_cost", 0) or 0) if first_bid else 0
+    extra_freeze = amount - previous_amount
+    balance = get_points(record["chat_id"], user.id)
+    required = extra_freeze + entry_cost
+    if balance < required:
+        return False, (
+            f"❗ 积分不足：本次还需冻结 {extra_freeze} 积分"
+            + (f"，另需参与消耗 {entry_cost} 积分" if entry_cost else "")
+            + f"；当前仅有 {balance} 积分。"
+        )
+
+    if entry_cost:
+        change_points(
+            record["chat_id"], user.id, -entry_cost,
+            reason=f"拍卖参与消耗：{record.get('name') or '拍卖'}",
+            name=user.full_name, telegram_username=user.username,
+        )
+    change_points(
+        record["chat_id"], user.id, -extra_freeze,
+        reason=f"拍卖冻结出价：{record.get('name') or '拍卖'}",
+        name=user.full_name, telegram_username=user.username,
+    )
+    bids[str(user.id)] = {
+        "user_id": user.id, "name": user.full_name, "username": user.username,
+        "amount": amount, "first_bid_at": int(previous.get("first_bid_at", now) or now), "updated_at": now,
+        "entry_cost": int(previous.get("entry_cost", 0) or 0) + entry_cost,
+    }
+    extended_by = _extend_end_time_after_bid(record, now)
+    record["updated_at"] = now
+
+    data = _load(context)
+    saved = _record(data, record.get("id"))
+    if saved is not record:
+        # ``record`` normally comes from this current data object. This branch
+        # keeps the helper safe for callers that supplied an equivalent record.
+        data.setdefault("auctions", {})[str(record["id"])] = record
+    _save(context, data)
+    await _refresh_posts(context, record)
+    _save(context, data)
+
+    message = f"✅ 出价成功：{amount} 积分。已冻结本次新增 {extra_freeze} 积分。"
+    if extended_by:
+        message += (
+            f"\n⏳ 已触发延时，拍卖结束时间延长 {extended_by} 分钟，"
+            f"现为：{_timestamp_text(int(record['end_at']), context)}。"
+        )
+    return True, message
+
+
 async def _handle_bid_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     stage = context.user_data.get(BID_KEY)
     if not isinstance(stage, dict) or not update.message or not update.effective_user or update.effective_chat.type != "private":
@@ -576,50 +714,62 @@ async def _handle_bid_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not text.isdigit():
         await update.message.reply_text("❗ 请输入整数积分出价，例如：100")
         return True
-    amount = int(text)
+
     data = _load(context)
     record = _record(data, stage.get("id"))
-    user = update.effective_user
-    if not record or record.get("status") != "open":
+    if not record:
         context.user_data.pop(BID_KEY, None)
         await update.message.reply_text("❌ 该拍卖未开始或已经结束。")
         return True
-    now = int(time.time())
-    cutoff = int(record.get("end_at", 0) or 0) - int(record.get("stop_bidding_before_min", 0) or 0) * 60
-    if now >= cutoff:
+
+    success, message = await _submit_bid(context, record, update.effective_user, int(text))
+    if success:
         context.user_data.pop(BID_KEY, None)
-        await update.message.reply_text("❌ 已到停止出价时间。")
-        return True
-    minimum = _minimum_next_bid(record)
-    bids = record.setdefault("bids", {})
-    previous = bids.get(str(user.id), {}) if isinstance(bids, dict) else {}
-    previous_amount = int(previous.get("amount", 0) or 0)
-    if amount < minimum or amount <= previous_amount:
-        await update.message.reply_text(f"❗ 当前最低可出价为 {minimum} 积分；你的新出价必须高于自己的 {previous_amount} 积分。")
-        return True
-    first_bid = not bool(previous)
-    entry_cost = int(record.get("entry_cost", 0) or 0) if first_bid else 0
-    extra_freeze = amount - previous_amount
-    balance = get_points(record["chat_id"], user.id)
-    required = extra_freeze + entry_cost
-    if balance < required:
-        await update.message.reply_text(f"❗ 积分不足：本次还需冻结 {extra_freeze} 积分" + (f"，另需参与消耗 {entry_cost} 积分" if entry_cost else "") + f"；当前仅有 {balance} 积分。")
-        return True
-    if entry_cost:
-        change_points(record["chat_id"], user.id, -entry_cost, reason=f"拍卖参与消耗：{record.get('name') or '拍卖'}", name=user.full_name, telegram_username=user.username)
-    change_points(record["chat_id"], user.id, -extra_freeze, reason=f"拍卖冻结出价：{record.get('name') or '拍卖'}", name=user.full_name, telegram_username=user.username)
-    bids[str(user.id)] = {
-        "user_id": user.id, "name": user.full_name, "username": user.username,
-        "amount": amount, "first_bid_at": int(previous.get("first_bid_at", now) or now), "updated_at": now,
-        "entry_cost": int(previous.get("entry_cost", 0) or 0) + entry_cost,
-    }
-    record["updated_at"] = now
-    _save(context, data)
-    context.user_data.pop(BID_KEY, None)
-    await _refresh_posts(context, record)
-    _save(context, data)
-    await update.message.reply_text(f"✅ 出价成功：{amount} 积分。已冻结本次新增 {extra_freeze} 积分。")
+    await update.message.reply_text(message)
     return True
+
+
+def _auction_replied_to_record(data: dict, message) -> Optional[dict]:
+    """Find the open auction whose published post is being replied to."""
+    reply_to = getattr(message, "reply_to_message", None)
+    chat = getattr(message, "chat", None)
+    if not reply_to or not chat:
+        return None
+    for record in data.get("auctions", {}).values():
+        if not isinstance(record, dict) or record.get("status") != "open":
+            continue
+        if int(record.get("chat_id", 0) or 0) != int(chat.id):
+            continue
+        for post in record.get("post_messages", []) or []:
+            if not isinstance(post, dict):
+                continue
+            if (
+                int(post.get("chat_id", 0) or 0) == int(chat.id)
+                and int(post.get("message_id", 0) or 0) == int(reply_to.message_id)
+            ):
+                return record
+    return None
+
+
+async def auction_group_reply_bid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Accept a numeric total bid sent as a reply to the published auction."""
+    if not update.message or not update.effective_user or not update.effective_chat:
+        return
+    if update.effective_chat.type not in {"group", "supergroup"}:
+        return
+
+    record = _auction_replied_to_record(_load(context), update.message)
+    if not record:
+        return
+
+    text = (update.message.text or "").strip()
+    if not text.isdigit():
+        await update.message.reply_text("❗ 请直接回复整数总出价，例如：100。")
+        raise ApplicationHandlerStop
+
+    _success, message = await _submit_bid(context, record, update.effective_user, int(text))
+    await update.message.reply_text(message)
+    raise ApplicationHandlerStop
 
 
 async def auction_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -708,8 +858,12 @@ async def auction_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prompts = {
             "name": "请输入拍卖名称。", "description": "请输入拍卖描述。", "publish_at": _time_prompt("publish_at", context),
             "end_at": _time_prompt("end_at", context), "starting_bid": "请输入起拍价（至少 1 积分）。",
+            "bid_increment": "请输入加价幅度（至少 1 积分）。例如填 10，则必须至少比当前最高价高 10 积分。",
             "entry_cost": "请输入参与拍卖消耗的积分（可填 0）。首次有效出价时扣除。",
-            "stop_before": "请输入结束前多少分钟停止出价（可填 0）。", "cover": "请发送拍卖封面图片或视频；发送「清空」可移除。",
+            "stop_before": "请输入结束前多少分钟停止出价（可填 0）。",
+            "extend_before": "请输入结束前多少分钟内出价触发延时（可填 0；填 0 则关闭延时）。",
+            "extend_by": "请输入每次触发后拍卖延长多少分钟（可填 0；填 0 则关闭延时）。",
+            "cover": "请发送拍卖封面图片或视频；发送「清空」可移除。",
         }
         context.user_data[EDITOR_KEY] = {"id": record["id"], "field": field}
         await query.answer()
@@ -755,5 +909,12 @@ async def auction_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def register_points_auction_handlers(app):
     app.add_handler(CommandHandler("start", auction_start, filters=filters.ChatType.PRIVATE), group=-99)
     app.add_handler(CallbackQueryHandler(auction_callback, pattern=rf"^{CALLBACK_PREFIX}:"))
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS & filters.REPLY & filters.TEXT & (~filters.COMMAND),
+            auction_group_reply_bid,
+        ),
+        group=-20,
+    )
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (~filters.COMMAND), auction_text), group=17)
     app.job_queue.run_repeating(auction_tick, interval=60, first=60, name="points_auction_tick")
