@@ -54,6 +54,19 @@ from utils import (
 )
 from admin_permissions import get_delegated_admin_ids, has_admin_permission
 from info.economy import change_points
+from inline_button_settings import (
+    MAX_INLINE_BUTTONS,
+    apply_per_row_layout,
+    build_reply_markup,
+    button_at,
+    layout_description,
+    layout_detail_keyboard,
+    layout_overview_keyboard,
+    layout_swap_keyboard,
+    move_button,
+    set_button_row_mode,
+    swap_buttons,
+)
 
 PUBLISH_CONFIG_FILE = "config_data/publish_config.json"
 ANON_CHAT_FILE = "data/anon_chat.json"
@@ -63,7 +76,7 @@ PENDING_SUBMISSIONS_FILE = "data/pending_submissions.json"
 
 CALLBACK_PREFIX = "publish"
 BUTTON_TEXT_MAX_LENGTH = 64
-MAX_PUBLISH_BUTTONS = 20
+MAX_PUBLISH_BUTTONS = MAX_INLINE_BUTTONS
 BUTTON_CONFIG_KEYS = frozenset({"buttons", "comment_buttons"})
 PENDING_PROOF_KEY = "publish_pending_proof_id"
 REJECT_REASON_KEY = "publish_reject_reason"
@@ -9106,6 +9119,53 @@ def _button_settings_text(config: dict, button_key: str = "buttons") -> str:
     return "\n".join(lines)
 
 
+def _publish_button_layout_text(config: dict, button_key: str = "buttons") -> str:
+    button_key = _button_config_key(button_key)
+    subject = "评论" if button_key == "comment_buttons" else "投稿"
+    lines = [
+        f"📐 {subject}按钮 · 排版与排序",
+        "点击上方按钮后可前后移动、交换位置，或设置是否与前一个按钮同一行。",
+        "下方预设可快速设置每行 1 至 6 个按钮。",
+        "",
+        "当前排版：",
+    ]
+    for row_number, row_text in enumerate(layout_description(_publish_buttons(config, button_key)), start=1):
+        lines.append(f"第 {row_number} 行：{html.escape(row_text)}")
+    return "\n".join(lines)
+
+
+def _publish_button_layout_keyboard(config: dict, button_key: str = "buttons"):
+    button_key = _button_config_key(button_key)
+    return layout_overview_keyboard(
+        _publish_buttons(config, button_key),
+        select_callback=lambda index: f"publish:button_layout_open:{button_key}:{index}",
+        preset_callback=lambda per_row: f"publish:button_layout_preset:{button_key}:{per_row}",
+        back_callback=f"publish:{'comment_buttons' if button_key == 'comment_buttons' else 'buttons'}",
+    )
+
+
+def _publish_button_layout_detail_keyboard(config: dict, button_key: str, index: int):
+    button_key = _button_config_key(button_key)
+    return layout_detail_keyboard(
+        _publish_buttons(config, button_key),
+        index,
+        move_callback=lambda direction: f"publish:button_layout_move:{button_key}:{index}:{direction}",
+        row_callback=lambda mode: f"publish:button_layout_row:{button_key}:{index}:{mode}",
+        swap_callback=f"publish:button_layout_swap_menu:{button_key}:{index}",
+        back_callback=f"publish:button_layout:{button_key}",
+    )
+
+
+def _publish_button_layout_swap_keyboard(config: dict, button_key: str, index: int):
+    button_key = _button_config_key(button_key)
+    return layout_swap_keyboard(
+        _publish_buttons(config, button_key),
+        index,
+        swap_callback=lambda target: f"publish:button_layout_swap:{button_key}:{index}:{target}",
+        back_callback=f"publish:button_layout_open:{button_key}:{index}",
+    )
+
+
 def _comment_button_settings_text(config: dict) -> str:
     """Compatibility wrapper for the comment-button settings screen."""
     return _button_settings_text(config, "comment_buttons")
@@ -9130,13 +9190,12 @@ def publish_buttons_keyboard(
     if not bool(config.get(enabled_key, enabled_default)):
         return None
 
-    rows = []
-    for button in _publish_buttons(config, button_key):
-        button_text = str(button.get("text", "")).strip()
-        button_url = str(button.get("url", "")).strip()
-        if button_text and button_url:
-            rows.append([InlineKeyboardButton(button_text, url=button_url)])
-    return InlineKeyboardMarkup(rows) if rows else None
+    # Use the same renderer as advertisement buttons so a stored ``new_row``
+    # layout (and future visual button fields) behaves consistently everywhere.
+    return build_reply_markup(
+        _publish_buttons(config, button_key),
+        limit=MAX_PUBLISH_BUTTONS,
+    )
 
 
 def publish_button_settings_keyboard(config: dict, button_key: str = "buttons"):
@@ -9148,6 +9207,9 @@ def publish_button_settings_keyboard(config: dict, button_key: str = "buttons"):
     if buttons:
         rows.extend(
             [
+                [InlineKeyboardButton(
+                    "📐 排版与排序", callback_data=f"publish:button_layout:{button_key}"
+                )],
                 [InlineKeyboardButton(
                     "📝 修改按钮", callback_data=f"publish:button_edit:{button_key}"
                 )],
@@ -11526,6 +11588,100 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         return await query.edit_message_text(
             "请输入按钮文字（最多 64 个字符）。\n例如：加入交流群"
+        )
+
+    if action == "button_layout":
+        button_key = _button_config_key(parts[2] if len(parts) > 2 else "buttons")
+        return await query.edit_message_text(
+            _publish_button_layout_text(config, button_key),
+            reply_markup=_publish_button_layout_keyboard(config, button_key),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+    if action == "button_layout_preset":
+        button_key = _button_config_key(parts[2] if len(parts) > 2 else "buttons")
+        try:
+            per_row = int(parts[3])
+        except (IndexError, ValueError):
+            return await query.answer("排版参数无效", show_alert=True)
+        buttons = _publish_buttons(config, button_key)
+        if not apply_per_row_layout(buttons, per_row):
+            return await query.answer("每行按钮数仅支持 1 至 8 个", show_alert=True)
+        config[button_key] = buttons
+        save_publish_config(config)
+        await query.answer(f"已按每行 {per_row} 个按钮排版。")
+        return await query.edit_message_text(
+            _publish_button_layout_text(config, button_key),
+            reply_markup=_publish_button_layout_keyboard(config, button_key),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+    if action in {
+        "button_layout_open",
+        "button_layout_move",
+        "button_layout_row",
+        "button_layout_swap_menu",
+        "button_layout_swap",
+    }:
+        button_key = _button_config_key(parts[2] if len(parts) > 2 else "buttons")
+        try:
+            button_index = int(parts[3])
+        except (IndexError, ValueError):
+            return await query.answer("按钮参数无效", show_alert=True)
+        buttons = _publish_buttons(config, button_key)
+        if not button_at(buttons, button_index):
+            return await query.answer("按钮不存在或已删除", show_alert=True)
+        if action == "button_layout_open":
+            return await query.edit_message_text(
+                f"📐 {'评论' if button_key == 'comment_buttons' else '投稿'}按钮 · #{button_index} 排版设置",
+                reply_markup=_publish_button_layout_detail_keyboard(config, button_key, button_index),
+            )
+        if action == "button_layout_move":
+            direction = parts[4] if len(parts) > 4 else ""
+            new_index = move_button(buttons, button_index, direction)
+            if new_index is None:
+                return await query.answer("已经不能再移动了", show_alert=True)
+            config[button_key] = buttons
+            save_publish_config(config)
+            await query.answer("已调整按钮顺序。")
+            return await query.edit_message_text(
+                f"📐 {'评论' if button_key == 'comment_buttons' else '投稿'}按钮 · #{new_index} 排版设置",
+                reply_markup=_publish_button_layout_detail_keyboard(config, button_key, new_index),
+            )
+        if action == "button_layout_row":
+            mode = parts[4] if len(parts) > 4 else ""
+            if mode not in {"same", "new"} or not set_button_row_mode(
+                buttons, button_index, same_row=mode == "same"
+            ):
+                return await query.answer("无法应用该行布局（每行最多 8 个按钮）", show_alert=True)
+            config[button_key] = buttons
+            save_publish_config(config)
+            await query.answer("已更新按钮所在行。")
+            return await query.edit_message_text(
+                f"📐 {'评论' if button_key == 'comment_buttons' else '投稿'}按钮 · #{button_index} 排版设置",
+                reply_markup=_publish_button_layout_detail_keyboard(config, button_key, button_index),
+            )
+        if action == "button_layout_swap_menu":
+            return await query.edit_message_text(
+                f"🔀 选择要与按钮 #{button_index} 交换的位置：",
+                reply_markup=_publish_button_layout_swap_keyboard(config, button_key, button_index),
+            )
+        try:
+            target_index = int(parts[4])
+        except (IndexError, ValueError):
+            return await query.answer("交换位置参数无效", show_alert=True)
+        if not swap_buttons(buttons, button_index, target_index):
+            return await query.answer("无法交换该按钮位置", show_alert=True)
+        config[button_key] = buttons
+        save_publish_config(config)
+        await query.answer("已交换按钮位置。")
+        return await query.edit_message_text(
+            _publish_button_layout_text(config, button_key),
+            reply_markup=_publish_button_layout_keyboard(config, button_key),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
         )
 
     # New callbacks use publish:button_edit:<key>:<id>.  Parse the old

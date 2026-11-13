@@ -55,10 +55,10 @@
     "checkin_group_label": "",
     "continuous_submission_enabled": false,
     "custom_menu_buttons": {
-        "channel_clone": false,
-        "telethon_manage": false,
+        "channel_clone": true,
+        "telethon_manage": true,
         "bot_channel_config": false,
-        "group_config": false,
+        "group_config": true,
         "global_ad_config": false,
         "keyword_post_search": true
     },

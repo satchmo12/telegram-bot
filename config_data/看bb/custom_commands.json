@@ -1,0 +1,14 @@
+{
+    "commands": [
+        {
+            "id": 1,
+            "command": "moban",
+            "description": "模版",
+            "visible": true,
+            "mode": "text",
+            "content": "模版：sdfads",
+            "button_text": "点击跳转",
+            "url": ""
+        }
+    ]
+}

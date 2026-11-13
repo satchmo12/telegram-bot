@@ -1,0 +1,76 @@
+{
+    "users": {
+        "6085551760": {
+            "forward_rules": [
+                {
+                    "name": "未命名",
+                    "sources": [
+                        -1002753266064
+                    ],
+                    "targets": [
+                        -1004315254085
+                    ],
+                    "source_title": "日本精品av|中文字幕|Jav",
+                    "target_title": "日韩欧美精品无码AV每日更新100部💋💋💋💋",
+                    "enabled": true,
+                    "mode": "history",
+                    "filter": "all",
+                    "exclude_channels": [],
+                    "show_contact": true,
+                    "replace_channel_user": "",
+                    "replace_group_name": "",
+                    "replace_submit_user": "",
+                    "clear_links": false,
+                    "skip_links": false,
+                    "listen_outgoing": true,
+                    "start_id": "801",
+                    "end_id": "1200",
+                    "include_words": [],
+                    "replace_words": [],
+                    "block_words": [],
+                    "cut_words": "",
+                    "suffix": "",
+                    "media_replace": "",
+                    "speed": "",
+                    "submit_to_bot": false,
+                    "session_name": "+916364632597"
+                },
+                {
+                    "name": "未命名",
+                    "sources": [
+                        -1001460281558
+                    ],
+                    "targets": [
+                        -1004315254085
+                    ],
+                    "source_title": "国产AV | 日本AV | 抖音网红",
+                    "target_title": "日韩欧美精品无码AV每日更新100部💋💋💋💋",
+                    "enabled": true,
+                    "mode": "history",
+                    "filter": "all",
+                    "exclude_channels": [],
+                    "show_contact": true,
+                    "replace_channel_user": "",
+                    "replace_group_name": "",
+                    "replace_submit_user": "",
+                    "clear_links": false,
+                    "skip_links": true,
+                    "listen_outgoing": true,
+                    "start_id": "331",
+                    "end_id": "360",
+                    "include_words": [],
+                    "replace_words": [],
+                    "block_words": [
+                        "#群友投稿"
+                    ],
+                    "cut_words": "",
+                    "suffix": "",
+                    "media_replace": "",
+                    "speed": "",
+                    "submit_to_bot": false,
+                    "session_name": "+916364632597"
+                }
+            ]
+        }
+    }
+}

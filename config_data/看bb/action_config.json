@@ -1,0 +1,73 @@
+{
+  "购物": {
+    "type": 1,
+    "stamina": -1,
+    "balance": -200,
+    "mood": 2,
+    "cooldown": 120,
+    "success_rate": 1.0
+  },
+  "送花": {
+    "type": 2,
+    "stamina": -1,
+    "balance": -200,
+    "target_charm": 1,
+    "cooldown": 120,
+    "success_rate": 1.0
+  },
+  "当狗推": {
+    "stamina": -3,
+    "mood": -10,
+    "cooldown": 86400,
+    "balance": 5000,
+    "success_rate": 0.5
+  },
+  "骂组长": {
+    "type": 1,
+    "stamina": -1,
+    "hunger": -5,
+    "mood": 5,
+    "cooldown": 1200,
+    "success_rate": 1.0
+  },
+  "殴打主人": {
+    "type": 1,
+    "stamina": -1,
+    "hunger": -5,
+    "mood": 10,
+    "cooldown": 1200,
+    "success_rate": 1.0
+  },
+  "大保健": {
+    "type": 1,
+    "stamina": 5,
+    "balance": -3000,
+    "mood": 2,
+    "cooldown": 120,
+    "success_rate": 1.0
+  },
+  "去园区": {
+    "type": 1,
+    "stamina": -1,
+    "balance": 3000,
+    "mood": -2,
+    "cooldown": 84000,
+    "success_rate": 0.5
+  },
+  "吃猪脚饭": {
+    "type": 1,
+    "stamina": 5,
+    "balance": -1000,
+    "mood": 0,
+    "cooldown": 28000,
+    "success_rate": 1
+  },
+  "做盘总": {
+    "type": 1,
+    "stamina": -10,
+    "balance": 50000,
+    "mood": -20,
+    "cooldown": 280000,
+    "success_rate": 0.1
+  }
+}

@@ -98,6 +98,22 @@ from forward.message_forward import (
     build_message_payload,
     send_message_payload as _send_message_payload,
 )
+from inline_button_settings import (
+    MAX_INLINE_BUTTONS,
+    apply_per_row_layout,
+    build_reply_markup,
+    button_api_kwargs,
+    button_at,
+    layout_description,
+    layout_detail_keyboard,
+    layout_overview_keyboard,
+    layout_swap_keyboard,
+    move_button,
+    normalize_buttons,
+    parse_button_lines,
+    set_button_row_mode,
+    swap_buttons,
+)
 
 CALLBACK_PREFIX = "gcfg"
 FORCE_SUBSCRIBE_FILE = "config_data/force_subscribe.json"
@@ -946,6 +962,299 @@ async def _open_lottery_settings_panel(
     
 MAX_GROUP_ADS = 20
 MAX_AD_MEDIA = 10
+# Telegram supports up to 100 inline buttons per message. Keep advertising
+# keyboards below that ceiling while allowing substantially more than the
+# former three-button restriction.
+MAX_AD_BUTTONS = MAX_INLINE_BUTTONS
+AD_BUTTON_STYLE_LABELS = {
+    "": "默认",
+    "primary": "蓝色",
+    "success": "绿色",
+    "danger": "红色",
+}
+
+
+def _normalize_ad_buttons(raw_buttons) -> list[dict]:
+    """Compatibility wrapper for shared URL-button normalization."""
+    return normalize_buttons(raw_buttons, limit=MAX_AD_BUTTONS)
+
+def _ad_button_style_label(button: dict) -> str:
+    return AD_BUTTON_STYLE_LABELS.get(str(button.get("style") or "").lower(), "默认")
+
+
+def _ad_button_summary(button: dict) -> str:
+    emoji = " · 会员表情" if button.get("icon_custom_emoji_id") else ""
+    return f"{_ad_button_style_label(button)}{emoji}"
+
+
+def _ad_button_at(ad: dict, index) -> Optional[dict]:
+    buttons = ad.get("buttons") if isinstance(ad.get("buttons"), list) else []
+    return button_at(buttons, index)
+
+def _ad_button_markup_kwargs(button: dict) -> dict:
+    """Compatibility wrapper for the shared Bot API field renderer."""
+    return button_api_kwargs(button)
+
+def _ad_button_manager_text(title: str, ad: dict) -> str:
+    buttons = ad.get("buttons") if isinstance(ad.get("buttons"), list) else []
+    lines = [
+        f"🔘 {title}",
+        f"当前：{len(buttons)} / {MAX_AD_BUTTONS} 个按钮",
+        "",
+        "点击已有按钮可单独修改文字、链接、颜色或会员表情。",
+        "使用“排版与排序”可把多个按钮放在同一行、调整顺序或交换位置。",
+    ]
+    if not buttons:
+        lines.append("\n当前未设置按钮。")
+    else:
+        lines.append("")
+        for index, button in enumerate(buttons, start=1):
+            lines.append(
+                f"{index}. {html.escape(str(button.get('text') or '未命名'))}"
+                f" · {_ad_button_summary(button)}"
+            )
+    return "\n".join(lines)
+
+
+def _ad_button_layout_text(title: str, ad: dict) -> str:
+    buttons = ad.get("buttons") if isinstance(ad.get("buttons"), list) else []
+    lines = [
+        f"📐 {title} · 排版与排序",
+        "点击上方的按钮选择它，再调整位置、交换位置或设置是否与前一个同一行。",
+        "也可以用下方预设快速按每行 1 至 6 个按钮排版。",
+        "",
+        "当前排版：",
+    ]
+    for row_number, row_text in enumerate(layout_description(buttons), start=1):
+        lines.append(f"第 {row_number} 行：{html.escape(row_text)}")
+    return "\n".join(lines)
+
+
+def _ad_button_layout_markup(ad: dict, *, select_callback, preset_callback, back_callback: str) -> InlineKeyboardMarkup:
+    buttons = ad.get("buttons") if isinstance(ad.get("buttons"), list) else []
+    return layout_overview_keyboard(
+        buttons,
+        select_callback=select_callback,
+        preset_callback=preset_callback,
+        back_callback=back_callback,
+    )
+
+
+def _ad_button_layout_detail_markup(ad: dict, index: int, *, move_callback, row_callback, swap_callback: str, back_callback: str) -> InlineKeyboardMarkup:
+    buttons = ad.get("buttons") if isinstance(ad.get("buttons"), list) else []
+    return layout_detail_keyboard(
+        buttons,
+        index,
+        move_callback=move_callback,
+        row_callback=row_callback,
+        swap_callback=swap_callback,
+        back_callback=back_callback,
+    )
+
+
+def _ad_button_layout_swap_markup(ad: dict, index: int, *, swap_callback, back_callback: str) -> InlineKeyboardMarkup:
+    buttons = ad.get("buttons") if isinstance(ad.get("buttons"), list) else []
+    return layout_swap_keyboard(
+        buttons,
+        index,
+        swap_callback=swap_callback,
+        back_callback=back_callback,
+    )
+
+
+def _ad_button_detail_text(title: str, index: int, button: dict) -> str:
+    emoji_id = str(button.get("icon_custom_emoji_id") or "").strip()
+    return "\n".join([
+        f"🔘 {title} · 按钮 #{index}",
+        f"文字：{html.escape(str(button.get('text') or '未设置'))}",
+        f"链接：{html.escape(str(button.get('url') or '未设置'))}",
+        f"颜色：{_ad_button_style_label(button)}",
+        f"会员表情：{'已设置' if emoji_id else '未设置'}",
+        "",
+        "会员表情会显示在按钮文字前；发送时需要机器人具备 Telegram Premium 或符合 Telegram 的按钮图标权限。",
+    ])
+
+
+def _ad_button_manager_keyboard(ad: dict, *, button_callback, add_callback: str, clear_callback: str, bulk_callback: str, layout_callback: str, back_callback: str) -> InlineKeyboardMarkup:
+    buttons = ad.get("buttons") if isinstance(ad.get("buttons"), list) else []
+    rows = []
+    for index, button in enumerate(buttons, start=1):
+        label = str(button.get("text") or "未命名")[:32]
+        rows.append([
+            InlineKeyboardButton(f"⚙️ #{index} {label}", callback_data=button_callback("open", index)),
+            InlineKeyboardButton("🗑", callback_data=button_callback("delete", index)),
+        ])
+    if len(buttons) < MAX_AD_BUTTONS:
+        rows.append([InlineKeyboardButton("➕ 添加按钮", callback_data=add_callback)])
+    if buttons:
+        rows.extend([
+            [InlineKeyboardButton("📐 排版与排序", callback_data=layout_callback)],
+            [
+                InlineKeyboardButton("📋 批量覆盖", callback_data=bulk_callback),
+                InlineKeyboardButton("🧹 清空全部", callback_data=clear_callback),
+            ],
+        ])
+    rows.append([InlineKeyboardButton("⬅️ 返回广告", callback_data=back_callback)])
+    return InlineKeyboardMarkup(rows)
+
+
+def _ad_button_detail_keyboard(button: dict, *, field_callback, style_menu_callback: str, layout_callback: str, delete_callback: str, back_callback: str) -> InlineKeyboardMarkup:
+    icon_state = "✅" if button.get("icon_custom_emoji_id") else "➕"
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✏️ 修改文字", callback_data=field_callback("text")),
+            InlineKeyboardButton("🔗 修改链接", callback_data=field_callback("url")),
+        ],
+        [
+            InlineKeyboardButton(f"🎨 颜色：{_ad_button_style_label(button)}", callback_data=style_menu_callback),
+            InlineKeyboardButton(f"{icon_state} 会员表情", callback_data=field_callback("emoji")),
+        ],
+        [InlineKeyboardButton("📐 排版与排序", callback_data=layout_callback)],
+        [InlineKeyboardButton("🗑 删除此按钮", callback_data=delete_callback)],
+        [InlineKeyboardButton("⬅️ 返回按钮列表", callback_data=back_callback)],
+    ])
+
+
+def _ad_button_style_keyboard(*, style_callback, back_callback: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("⚪ 默认", callback_data=style_callback("default")),
+            InlineKeyboardButton("🔵 蓝色", callback_data=style_callback("primary")),
+        ],
+        [
+            InlineKeyboardButton("🟢 绿色", callback_data=style_callback("success")),
+            InlineKeyboardButton("🔴 红色", callback_data=style_callback("danger")),
+        ],
+        [InlineKeyboardButton("⬅️ 返回按钮", callback_data=back_callback)],
+    ])
+
+
+def _custom_emoji_id_from_message(message) -> str:
+    for entities in (
+        getattr(message, "entities", None) or [],
+        getattr(message, "caption_entities", None) or [],
+    ):
+        for entity in entities:
+            if getattr(entity, "type", None) != "custom_emoji":
+                continue
+            emoji_id = str(getattr(entity, "custom_emoji_id", "") or "").strip()
+            if emoji_id:
+                return emoji_id
+    return ""
+
+
+def _global_ad_button_manager_markup(ad: dict) -> InlineKeyboardMarkup:
+    ad_id = ad["id"]
+    return _ad_button_manager_keyboard(
+        ad,
+        button_callback=lambda action, index: f"{CALLBACK_PREFIX}:global_ad_button_{action}:{ad_id}:{index}",
+        add_callback=f"{CALLBACK_PREFIX}:global_ad_button_add:{ad_id}",
+        clear_callback=f"{CALLBACK_PREFIX}:global_ad_button_clear:{ad_id}",
+        bulk_callback=f"{CALLBACK_PREFIX}:global_ad_button_bulk:{ad_id}",
+        layout_callback=f"{CALLBACK_PREFIX}:global_ad_button_layout:{ad_id}",
+        back_callback=f"{CALLBACK_PREFIX}:global_ad_open:{ad_id}",
+    )
+
+
+def _global_ad_button_detail_markup(ad: dict, index: int, button: dict) -> InlineKeyboardMarkup:
+    ad_id = ad["id"]
+    return _ad_button_detail_keyboard(
+        button,
+        field_callback=lambda field: f"{CALLBACK_PREFIX}:global_ad_button_field:{ad_id}:{index}:{field}",
+        style_menu_callback=f"{CALLBACK_PREFIX}:global_ad_button_style_menu:{ad_id}:{index}",
+        layout_callback=f"{CALLBACK_PREFIX}:global_ad_button_layout:{ad_id}",
+        delete_callback=f"{CALLBACK_PREFIX}:global_ad_button_delete:{ad_id}:{index}",
+        back_callback=f"{CALLBACK_PREFIX}:global_ad_buttons:{ad_id}",
+    )
+
+
+def _global_ad_button_layout_markup(ad: dict) -> InlineKeyboardMarkup:
+    ad_id = ad["id"]
+    return _ad_button_layout_markup(
+        ad,
+        select_callback=lambda index: f"{CALLBACK_PREFIX}:global_ad_button_layout_open:{ad_id}:{index}",
+        preset_callback=lambda per_row: f"{CALLBACK_PREFIX}:global_ad_button_layout_preset:{ad_id}:{per_row}",
+        back_callback=f"{CALLBACK_PREFIX}:global_ad_buttons:{ad_id}",
+    )
+
+
+def _global_ad_button_layout_detail_markup(ad: dict, index: int) -> InlineKeyboardMarkup:
+    ad_id = ad["id"]
+    return _ad_button_layout_detail_markup(
+        ad,
+        index,
+        move_callback=lambda direction: f"{CALLBACK_PREFIX}:global_ad_button_layout_move:{ad_id}:{index}:{direction}",
+        row_callback=lambda mode: f"{CALLBACK_PREFIX}:global_ad_button_layout_row:{ad_id}:{index}:{mode}",
+        swap_callback=f"{CALLBACK_PREFIX}:global_ad_button_layout_swap_menu:{ad_id}:{index}",
+        back_callback=f"{CALLBACK_PREFIX}:global_ad_button_layout:{ad_id}",
+    )
+
+
+def _global_ad_button_layout_swap_markup(ad: dict, index: int) -> InlineKeyboardMarkup:
+    ad_id = ad["id"]
+    return _ad_button_layout_swap_markup(
+        ad,
+        index,
+        swap_callback=lambda target: f"{CALLBACK_PREFIX}:global_ad_button_layout_swap:{ad_id}:{index}:{target}",
+        back_callback=f"{CALLBACK_PREFIX}:global_ad_button_layout_open:{ad_id}:{index}",
+    )
+
+
+def _group_ad_button_manager_markup(chat_id: str, ad: dict) -> InlineKeyboardMarkup:
+    ad_id = ad["id"]
+    return _ad_button_manager_keyboard(
+        ad,
+        button_callback=lambda action, index: f"{CALLBACK_PREFIX}:ad_multi_button_{action}:{chat_id}:{ad_id}:{index}",
+        add_callback=f"{CALLBACK_PREFIX}:ad_multi_button_add:{chat_id}:{ad_id}",
+        clear_callback=f"{CALLBACK_PREFIX}:ad_multi_button_clear:{chat_id}:{ad_id}",
+        bulk_callback=f"{CALLBACK_PREFIX}:ad_multi_button_bulk:{chat_id}:{ad_id}",
+        layout_callback=f"{CALLBACK_PREFIX}:ad_multi_button_layout:{chat_id}:{ad_id}",
+        back_callback=f"{CALLBACK_PREFIX}:ad_multi_open:{chat_id}:{ad_id}",
+    )
+
+
+def _group_ad_button_detail_markup(chat_id: str, ad: dict, index: int, button: dict) -> InlineKeyboardMarkup:
+    ad_id = ad["id"]
+    return _ad_button_detail_keyboard(
+        button,
+        field_callback=lambda field: f"{CALLBACK_PREFIX}:ad_multi_button_field:{chat_id}:{ad_id}:{index}:{field}",
+        style_menu_callback=f"{CALLBACK_PREFIX}:ad_multi_button_style_menu:{chat_id}:{ad_id}:{index}",
+        layout_callback=f"{CALLBACK_PREFIX}:ad_multi_button_layout:{chat_id}:{ad_id}",
+        delete_callback=f"{CALLBACK_PREFIX}:ad_multi_button_delete:{chat_id}:{ad_id}:{index}",
+        back_callback=f"{CALLBACK_PREFIX}:ad_multi_ad_buttons:{chat_id}:{ad_id}",
+    )
+
+
+def _group_ad_button_layout_markup(chat_id: str, ad: dict) -> InlineKeyboardMarkup:
+    ad_id = ad["id"]
+    return _ad_button_layout_markup(
+        ad,
+        select_callback=lambda index: f"{CALLBACK_PREFIX}:ad_multi_button_layout_open:{chat_id}:{ad_id}:{index}",
+        preset_callback=lambda per_row: f"{CALLBACK_PREFIX}:ad_multi_button_layout_preset:{chat_id}:{ad_id}:{per_row}",
+        back_callback=f"{CALLBACK_PREFIX}:ad_multi_ad_buttons:{chat_id}:{ad_id}",
+    )
+
+
+def _group_ad_button_layout_detail_markup(chat_id: str, ad: dict, index: int) -> InlineKeyboardMarkup:
+    ad_id = ad["id"]
+    return _ad_button_layout_detail_markup(
+        ad,
+        index,
+        move_callback=lambda direction: f"{CALLBACK_PREFIX}:ad_multi_button_layout_move:{chat_id}:{ad_id}:{index}:{direction}",
+        row_callback=lambda mode: f"{CALLBACK_PREFIX}:ad_multi_button_layout_row:{chat_id}:{ad_id}:{index}:{mode}",
+        swap_callback=f"{CALLBACK_PREFIX}:ad_multi_button_layout_swap_menu:{chat_id}:{ad_id}:{index}",
+        back_callback=f"{CALLBACK_PREFIX}:ad_multi_button_layout:{chat_id}:{ad_id}",
+    )
+
+
+def _group_ad_button_layout_swap_markup(chat_id: str, ad: dict, index: int) -> InlineKeyboardMarkup:
+    ad_id = ad["id"]
+    return _ad_button_layout_swap_markup(
+        ad,
+        index,
+        swap_callback=lambda target: f"{CALLBACK_PREFIX}:ad_multi_button_layout_swap:{chat_id}:{ad_id}:{index}:{target}",
+        back_callback=f"{CALLBACK_PREFIX}:ad_multi_button_layout_open:{chat_id}:{ad_id}:{index}",
+    )
 
 
 def _normalize_ad_media(raw_media, legacy_cover=None) -> list[dict]:
@@ -1007,27 +1316,7 @@ def _normalize_group_ad(raw: dict, ad_id: int) -> dict:
     # Keep a normalized single-cover mirror so existing saved configurations remain compatible.
     ad["cover"] = ad["media"][0] if ad["media"] else None
 
-    buttons = ad.get("buttons")
-    if not isinstance(buttons, list):
-        buttons = []
-
-    normalized_buttons = []
-    for button in buttons[:3]:
-        if not isinstance(button, dict):
-            continue
-
-        button_text = str(button.get("text") or "").strip()
-        button_url = str(button.get("url") or "").strip()
-
-        if not button_text or not button_url:
-            continue
-
-        normalized_buttons.append({
-            "text": button_text[:64],
-            "url": button_url,
-        })
-
-    ad["buttons"] = normalized_buttons
+    ad["buttons"] = _normalize_ad_buttons(ad.get("buttons"))
     
     return ad
 
@@ -1241,27 +1530,7 @@ def _normalize_global_ad(raw: dict, ad_id: int) -> dict:
     # Keep a normalized single-cover mirror so existing saved configurations remain compatible.
     ad["cover"] = ad["media"][0] if ad["media"] else None
 
-    buttons = ad.get("buttons")
-    if not isinstance(buttons, list):
-        buttons = []
-
-    normalized_buttons = []
-    for button in buttons[:3]:
-        if not isinstance(button, dict):
-            continue
-
-        button_text = str(button.get("text") or "").strip()
-        button_url = str(button.get("url") or "").strip()
-
-        if not button_text or not button_url:
-            continue
-
-        normalized_buttons.append({
-            "text": button_text[:64],
-            "url": button_url,
-        })
-
-    ad["buttons"] = normalized_buttons
+    ad["buttons"] = _normalize_ad_buttons(ad.get("buttons"))
 
     return ad
 
@@ -3029,6 +3298,11 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         if not ad:
             return await query.answer("广告不存在或已删除。", show_alert=True)
 
+        if action == "global_ad_buttons" or action.startswith("global_ad_button_"):
+            # Navigating within the button editor cancels any older text-entry
+            # stage before opening the next panel.
+            context.user_data.pop("group_setting_stage", None)
+
         if action == "global_ad_open":
             await query.answer()
             return await query.edit_message_text(
@@ -3136,29 +3410,208 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             )
 
         if action == "global_ad_buttons":
-            context.user_data["group_setting_stage"] = {
-                "kind": "global_ad",
-                "field": "buttons",
-                "ad_id": ad_id,
-            }
-
+            await query.answer()
             return await query.edit_message_text(
-                "🔘 请设置底部按钮。\n\n"
-                "每行一个按钮，格式：\n"
-                "按钮文字 | https://链接\n\n"
-                "最多 3 个按钮。\n"
-                "例如：\n"
-                "联系客服 | https://t.me/xxx\n"
-                "加入频道 | https://t.me/abc\n\n"
-                "发送“清空”可移除全部按钮。",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            "⬅️ 返回广告",
-                            callback_data=f"{CALLBACK_PREFIX}:global_ad_open:{ad_id}",
-                        )
-                    ]
-                ]),
+                _ad_button_manager_text("全群广告底部按钮", ad),
+                reply_markup=_global_ad_button_manager_markup(ad),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        if action == "global_ad_button_add":
+            buttons = ad.setdefault("buttons", [])
+            if len(buttons) >= MAX_AD_BUTTONS:
+                return await query.answer(f"最多只能设置 {MAX_AD_BUTTONS} 个按钮。", show_alert=True)
+            buttons.append({"text": "新按钮", "url": "https://t.me/"})
+            _save_global_ad_push_config(cfg)
+            index = len(buttons)
+            await query.answer("已添加按钮，请继续修改文字和链接。")
+            return await query.edit_message_text(
+                _ad_button_detail_text("全群广告底部按钮", index, buttons[-1]),
+                reply_markup=_global_ad_button_detail_markup(ad, index, buttons[-1]),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        if action == "global_ad_button_clear":
+            ad["buttons"] = []
+            _save_global_ad_push_config(cfg)
+            await query.answer("已清空全部按钮。")
+            return await query.edit_message_text(
+                _ad_button_manager_text("全群广告底部按钮", ad),
+                reply_markup=_global_ad_button_manager_markup(ad),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        if action == "global_ad_button_bulk":
+            context.user_data["group_setting_stage"] = {
+                "kind": "global_ad", "field": "buttons", "ad_id": ad_id,
+            }
+            await query.answer()
+            return await query.edit_message_text(
+                "📋 请批量覆盖底部按钮。每行一个按钮，格式：\n"
+                "<code>按钮文字 | https://链接</code>\n"
+                "若要与前一个按钮同一行：<code>按钮文字 | https://链接 | 同行</code>\n\n"
+                f"最多 {MAX_AD_BUTTONS} 个按钮；发送“清空”可移除全部按钮。",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⬅️ 返回按钮列表", callback_data=f"{CALLBACK_PREFIX}:global_ad_buttons:{ad_id}")
+                ]]),
+            )
+        if action == "global_ad_button_layout":
+            await query.answer()
+            return await query.edit_message_text(
+                _ad_button_layout_text("全群广告底部按钮", ad),
+                reply_markup=_global_ad_button_layout_markup(ad),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        if action == "global_ad_button_layout_preset":
+            try:
+                per_row = int(parts[3])
+            except (IndexError, ValueError):
+                return await query.answer("排版参数无效。", show_alert=True)
+            if not apply_per_row_layout(ad["buttons"], per_row):
+                return await query.answer("每行按钮数仅支持 1 至 8 个。", show_alert=True)
+            _save_global_ad_push_config(cfg)
+            await query.answer(f"已按每行 {per_row} 个按钮排版。")
+            return await query.edit_message_text(
+                _ad_button_layout_text("全群广告底部按钮", ad),
+                reply_markup=_global_ad_button_layout_markup(ad),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        if action in {
+            "global_ad_button_layout_open",
+            "global_ad_button_layout_move",
+            "global_ad_button_layout_row",
+            "global_ad_button_layout_swap_menu",
+            "global_ad_button_layout_swap",
+        }:
+            try:
+                button_index = int(parts[3])
+            except (IndexError, ValueError):
+                return await query.answer("按钮参数无效。", show_alert=True)
+            button = _ad_button_at(ad, button_index)
+            if not button:
+                return await query.answer("按钮不存在或已删除。", show_alert=True)
+            if action == "global_ad_button_layout_open":
+                await query.answer()
+                return await query.edit_message_text(
+                    f"📐 全群广告底部按钮 · #{button_index} 排版设置",
+                    reply_markup=_global_ad_button_layout_detail_markup(ad, button_index),
+                )
+            if action == "global_ad_button_layout_move":
+                direction = parts[4] if len(parts) >= 5 else ""
+                new_index = move_button(ad["buttons"], button_index, direction)
+                if new_index is None:
+                    return await query.answer("已经不能再移动了。", show_alert=True)
+                _save_global_ad_push_config(cfg)
+                await query.answer("已调整按钮顺序。")
+                return await query.edit_message_text(
+                    f"📐 全群广告底部按钮 · #{new_index} 排版设置",
+                    reply_markup=_global_ad_button_layout_detail_markup(ad, new_index),
+                )
+            if action == "global_ad_button_layout_row":
+                mode = parts[4] if len(parts) >= 5 else ""
+                if mode not in {"same", "new"} or not set_button_row_mode(
+                    ad["buttons"], button_index, same_row=mode == "same"
+                ):
+                    return await query.answer("无法应用该行布局（每行最多 8 个按钮）。", show_alert=True)
+                _save_global_ad_push_config(cfg)
+                await query.answer("已更新按钮所在行。")
+                return await query.edit_message_text(
+                    f"📐 全群广告底部按钮 · #{button_index} 排版设置",
+                    reply_markup=_global_ad_button_layout_detail_markup(ad, button_index),
+                )
+            if action == "global_ad_button_layout_swap_menu":
+                await query.answer()
+                return await query.edit_message_text(
+                    f"🔀 选择要与按钮 #{button_index} 交换的位置：",
+                    reply_markup=_global_ad_button_layout_swap_markup(ad, button_index),
+                )
+            try:
+                target_index = int(parts[4])
+            except (IndexError, ValueError):
+                return await query.answer("交换位置参数无效。", show_alert=True)
+            if not swap_buttons(ad["buttons"], button_index, target_index):
+                return await query.answer("无法交换该按钮位置。", show_alert=True)
+            _save_global_ad_push_config(cfg)
+            await query.answer("已交换按钮位置。")
+            return await query.edit_message_text(
+                _ad_button_layout_text("全群广告底部按钮", ad),
+                reply_markup=_global_ad_button_layout_markup(ad),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+
+        if action in {"global_ad_button_open", "global_ad_button_delete", "global_ad_button_field", "global_ad_button_style_menu", "global_ad_button_style"}:
+            try:
+                button_index = int(parts[3])
+            except (IndexError, ValueError):
+                return await query.answer("按钮参数无效。", show_alert=True)
+            button = _ad_button_at(ad, button_index)
+            if not button:
+                return await query.answer("按钮不存在或已删除。", show_alert=True)
+            if action == "global_ad_button_open":
+                await query.answer()
+                return await query.edit_message_text(
+                    _ad_button_detail_text("全群广告底部按钮", button_index, button),
+                    reply_markup=_global_ad_button_detail_markup(ad, button_index, button),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            if action == "global_ad_button_delete":
+                ad["buttons"].pop(button_index - 1)
+                _save_global_ad_push_config(cfg)
+                await query.answer("已删除按钮。")
+                return await query.edit_message_text(
+                    _ad_button_manager_text("全群广告底部按钮", ad),
+                    reply_markup=_global_ad_button_manager_markup(ad),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            if action == "global_ad_button_field":
+                field = parts[4] if len(parts) >= 5 else ""
+                if field not in {"text", "url", "emoji"}:
+                    return await query.answer("按钮设置项无效。", show_alert=True)
+                context.user_data["group_setting_stage"] = {
+                    "kind": "global_ad", "field": f"button_{field}",
+                    "ad_id": ad_id, "button_index": button_index,
+                }
+                prompts = {
+                    "text": "请输入新的按钮文字（最多 64 个字符）。",
+                    "url": "请输入新的按钮链接，必须以 http://、https:// 或 tg:// 开头。",
+                    "emoji": "请发送一个会员表情，系统会读取其中第一个表情作为按钮图标；发送“清空”可移除。",
+                }
+                await query.answer()
+                return await query.edit_message_text(
+                    prompts[field],
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("⬅️ 返回按钮", callback_data=f"{CALLBACK_PREFIX}:global_ad_button_open:{ad_id}:{button_index}")
+                    ]]),
+                )
+            if action == "global_ad_button_style_menu":
+                await query.answer()
+                return await query.edit_message_text(
+                    "🎨 请选择按钮颜色。",
+                    reply_markup=_ad_button_style_keyboard(
+                        style_callback=lambda style: f"{CALLBACK_PREFIX}:global_ad_button_style:{ad_id}:{button_index}:{style}",
+                        back_callback=f"{CALLBACK_PREFIX}:global_ad_button_open:{ad_id}:{button_index}",
+                    ),
+                )
+            style = parts[4] if len(parts) >= 5 else ""
+            if style not in {"default", "primary", "success", "danger"}:
+                return await query.answer("按钮颜色无效。", show_alert=True)
+            if style == "default":
+                button.pop("style", None)
+            else:
+                button["style"] = style
+            _save_global_ad_push_config(cfg)
+            await query.answer("已更新按钮颜色。")
+            return await query.edit_message_text(
+                _ad_button_detail_text("全群广告底部按钮", button_index, button),
+                reply_markup=_global_ad_button_detail_markup(ad, button_index, button),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
             )
         if action in {"global_ad_name", "global_ad_text", "global_ad_message", "global_ad_interval", "global_ad_times"}:
             field = action.removeprefix("global_ad_")
@@ -3882,6 +4335,11 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         if not ad:
             return await query.answer("广告不存在或已删除。", show_alert=True)
 
+        if action == "ad_multi_ad_buttons" or action.startswith("ad_multi_button_"):
+            # Navigating within the button editor cancels any older text-entry
+            # stage before opening the next panel.
+            context.user_data.pop("group_setting_stage", None)
+
         if action == "ad_multi_open":
             await query.answer()
             return await query.edit_message_text(
@@ -3963,30 +4421,217 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             )
 
         if action == "ad_multi_ad_buttons":
-            context.user_data["group_setting_stage"] = {
-                "kind": "group_ad",
-                "field": "buttons",
-                "chat_id": chat_id_str,
-                "ad_id": ad_id,
-            }
-
+            await query.answer()
             return await query.edit_message_text(
-                "🔘 请设置底部按钮。\n\n"
-                "每行一个按钮，格式：\n"
-                "按钮文字 | https://链接\n\n"
-                "最多 3 个按钮。\n"
-                "例如：\n"
-                "联系客服 | https://t.me/xxx\n"
-                "加入频道 | https://t.me/abc\n\n"
-                "发送“清空”可移除全部按钮。",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            "⬅️ 返回广告",
-                            callback_data=f"{CALLBACK_PREFIX}:ad_multi_open:{chat_id_str}:{ad_id}",
-                        )
-                    ]
-                ]),
+                _ad_button_manager_text("本群广告底部按钮", ad),
+                reply_markup=_group_ad_button_manager_markup(chat_id_str, ad),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        if action == "ad_multi_button_add":
+            buttons = ad.setdefault("buttons", [])
+            if len(buttons) >= MAX_AD_BUTTONS:
+                return await query.answer(f"最多只能设置 {MAX_AD_BUTTONS} 个按钮。", show_alert=True)
+            buttons.append({"text": "新按钮", "url": "https://t.me/"})
+            data[chat_id_str] = cfg
+            save_json(GROUP_LIST_FILE, data)
+            index = len(buttons)
+            await query.answer("已添加按钮，请继续修改文字和链接。")
+            return await query.edit_message_text(
+                _ad_button_detail_text("本群广告底部按钮", index, buttons[-1]),
+                reply_markup=_group_ad_button_detail_markup(chat_id_str, ad, index, buttons[-1]),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        if action == "ad_multi_button_clear":
+            ad["buttons"] = []
+            data[chat_id_str] = cfg
+            save_json(GROUP_LIST_FILE, data)
+            await query.answer("已清空全部按钮。")
+            return await query.edit_message_text(
+                _ad_button_manager_text("本群广告底部按钮", ad),
+                reply_markup=_group_ad_button_manager_markup(chat_id_str, ad),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        if action == "ad_multi_button_bulk":
+            context.user_data["group_setting_stage"] = {
+                "kind": "group_ad", "field": "buttons",
+                "chat_id": chat_id_str, "ad_id": ad_id,
+            }
+            await query.answer()
+            return await query.edit_message_text(
+                "📋 请批量覆盖底部按钮。每行一个按钮，格式：\n"
+                "<code>按钮文字 | https://链接</code>\n"
+                "若要与前一个按钮同一行：<code>按钮文字 | https://链接 | 同行</code>\n\n"
+                f"最多 {MAX_AD_BUTTONS} 个按钮；发送“清空”可移除全部按钮。",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⬅️ 返回按钮列表", callback_data=f"{CALLBACK_PREFIX}:ad_multi_ad_buttons:{chat_id_str}:{ad_id}")
+                ]]),
+            )
+        if action == "ad_multi_button_layout":
+            await query.answer()
+            return await query.edit_message_text(
+                _ad_button_layout_text("本群广告底部按钮", ad),
+                reply_markup=_group_ad_button_layout_markup(chat_id_str, ad),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        if action == "ad_multi_button_layout_preset":
+            try:
+                per_row = int(parts[4])
+            except (IndexError, ValueError):
+                return await query.answer("排版参数无效。", show_alert=True)
+            if not apply_per_row_layout(ad["buttons"], per_row):
+                return await query.answer("每行按钮数仅支持 1 至 8 个。", show_alert=True)
+            data[chat_id_str] = cfg
+            save_json(GROUP_LIST_FILE, data)
+            await query.answer(f"已按每行 {per_row} 个按钮排版。")
+            return await query.edit_message_text(
+                _ad_button_layout_text("本群广告底部按钮", ad),
+                reply_markup=_group_ad_button_layout_markup(chat_id_str, ad),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        if action in {
+            "ad_multi_button_layout_open",
+            "ad_multi_button_layout_move",
+            "ad_multi_button_layout_row",
+            "ad_multi_button_layout_swap_menu",
+            "ad_multi_button_layout_swap",
+        }:
+            try:
+                button_index = int(parts[4])
+            except (IndexError, ValueError):
+                return await query.answer("按钮参数无效。", show_alert=True)
+            button = _ad_button_at(ad, button_index)
+            if not button:
+                return await query.answer("按钮不存在或已删除。", show_alert=True)
+            if action == "ad_multi_button_layout_open":
+                await query.answer()
+                return await query.edit_message_text(
+                    f"📐 本群广告底部按钮 · #{button_index} 排版设置",
+                    reply_markup=_group_ad_button_layout_detail_markup(chat_id_str, ad, button_index),
+                )
+            if action == "ad_multi_button_layout_move":
+                direction = parts[5] if len(parts) >= 6 else ""
+                new_index = move_button(ad["buttons"], button_index, direction)
+                if new_index is None:
+                    return await query.answer("已经不能再移动了。", show_alert=True)
+                data[chat_id_str] = cfg
+                save_json(GROUP_LIST_FILE, data)
+                await query.answer("已调整按钮顺序。")
+                return await query.edit_message_text(
+                    f"📐 本群广告底部按钮 · #{new_index} 排版设置",
+                    reply_markup=_group_ad_button_layout_detail_markup(chat_id_str, ad, new_index),
+                )
+            if action == "ad_multi_button_layout_row":
+                mode = parts[5] if len(parts) >= 6 else ""
+                if mode not in {"same", "new"} or not set_button_row_mode(
+                    ad["buttons"], button_index, same_row=mode == "same"
+                ):
+                    return await query.answer("无法应用该行布局（每行最多 8 个按钮）。", show_alert=True)
+                data[chat_id_str] = cfg
+                save_json(GROUP_LIST_FILE, data)
+                await query.answer("已更新按钮所在行。")
+                return await query.edit_message_text(
+                    f"📐 本群广告底部按钮 · #{button_index} 排版设置",
+                    reply_markup=_group_ad_button_layout_detail_markup(chat_id_str, ad, button_index),
+                )
+            if action == "ad_multi_button_layout_swap_menu":
+                await query.answer()
+                return await query.edit_message_text(
+                    f"🔀 选择要与按钮 #{button_index} 交换的位置：",
+                    reply_markup=_group_ad_button_layout_swap_markup(chat_id_str, ad, button_index),
+                )
+            try:
+                target_index = int(parts[5])
+            except (IndexError, ValueError):
+                return await query.answer("交换位置参数无效。", show_alert=True)
+            if not swap_buttons(ad["buttons"], button_index, target_index):
+                return await query.answer("无法交换该按钮位置。", show_alert=True)
+            data[chat_id_str] = cfg
+            save_json(GROUP_LIST_FILE, data)
+            await query.answer("已交换按钮位置。")
+            return await query.edit_message_text(
+                _ad_button_layout_text("本群广告底部按钮", ad),
+                reply_markup=_group_ad_button_layout_markup(chat_id_str, ad),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+
+        if action in {"ad_multi_button_open", "ad_multi_button_delete", "ad_multi_button_field", "ad_multi_button_style_menu", "ad_multi_button_style"}:
+            try:
+                button_index = int(parts[4])
+            except (IndexError, ValueError):
+                return await query.answer("按钮参数无效。", show_alert=True)
+            button = _ad_button_at(ad, button_index)
+            if not button:
+                return await query.answer("按钮不存在或已删除。", show_alert=True)
+            if action == "ad_multi_button_open":
+                await query.answer()
+                return await query.edit_message_text(
+                    _ad_button_detail_text("本群广告底部按钮", button_index, button),
+                    reply_markup=_group_ad_button_detail_markup(chat_id_str, ad, button_index, button),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            if action == "ad_multi_button_delete":
+                ad["buttons"].pop(button_index - 1)
+                data[chat_id_str] = cfg
+                save_json(GROUP_LIST_FILE, data)
+                await query.answer("已删除按钮。")
+                return await query.edit_message_text(
+                    _ad_button_manager_text("本群广告底部按钮", ad),
+                    reply_markup=_group_ad_button_manager_markup(chat_id_str, ad),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            if action == "ad_multi_button_field":
+                field = parts[5] if len(parts) >= 6 else ""
+                if field not in {"text", "url", "emoji"}:
+                    return await query.answer("按钮设置项无效。", show_alert=True)
+                context.user_data["group_setting_stage"] = {
+                    "kind": "group_ad", "field": f"button_{field}",
+                    "chat_id": chat_id_str, "ad_id": ad_id, "button_index": button_index,
+                }
+                prompts = {
+                    "text": "请输入新的按钮文字（最多 64 个字符）。",
+                    "url": "请输入新的按钮链接，必须以 http://、https:// 或 tg:// 开头。",
+                    "emoji": "请发送一个会员表情，系统会读取其中第一个表情作为按钮图标；发送“清空”可移除。",
+                }
+                await query.answer()
+                return await query.edit_message_text(
+                    prompts[field],
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("⬅️ 返回按钮", callback_data=f"{CALLBACK_PREFIX}:ad_multi_button_open:{chat_id_str}:{ad_id}:{button_index}")
+                    ]]),
+                )
+            if action == "ad_multi_button_style_menu":
+                await query.answer()
+                return await query.edit_message_text(
+                    "🎨 请选择按钮颜色。",
+                    reply_markup=_ad_button_style_keyboard(
+                        style_callback=lambda style: f"{CALLBACK_PREFIX}:ad_multi_button_style:{chat_id_str}:{ad_id}:{button_index}:{style}",
+                        back_callback=f"{CALLBACK_PREFIX}:ad_multi_button_open:{chat_id_str}:{ad_id}:{button_index}",
+                    ),
+                )
+            style = parts[5] if len(parts) >= 6 else ""
+            if style not in {"default", "primary", "success", "danger"}:
+                return await query.answer("按钮颜色无效。", show_alert=True)
+            if style == "default":
+                button.pop("style", None)
+            else:
+                button["style"] = style
+            data[chat_id_str] = cfg
+            save_json(GROUP_LIST_FILE, data)
+            await query.answer("已更新按钮颜色。")
+            return await query.edit_message_text(
+                _ad_button_detail_text("本群广告底部按钮", button_index, button),
+                reply_markup=_group_ad_button_detail_markup(chat_id_str, ad, button_index, button),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
             )
             
         if action in {"ad_multi_name", "ad_multi_text", "ad_multi_message", "ad_multi_interval", "ad_multi_times" }:
@@ -5003,6 +5648,37 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
         if text_value in {"取消", "返回"}:
             context.user_data.pop("group_setting_stage", None)
             return await update.message.reply_text("✅ 已取消。")
+        if field in {"button_text", "button_url", "button_emoji"}:
+            button_index = stage.get("button_index")
+            button = _ad_button_at(ad, button_index)
+            if not button:
+                context.user_data.pop("group_setting_stage", None)
+                return await update.message.reply_text("❌ 该按钮不存在或已删除。")
+            if field == "button_text":
+                if not text_value or text_value in {"清空", "关闭"}:
+                    return await update.message.reply_text("❗ 按钮文字不能为空。")
+                button["text"] = text_value[:64]
+            elif field == "button_url":
+                if not text_value.startswith(("http://", "https://", "tg://")):
+                    return await update.message.reply_text("❗ 链接必须以 http://、https:// 或 tg:// 开头。")
+                button["url"] = text_value
+            elif text_value in {"清空", "关闭", "无"}:
+                button.pop("icon_custom_emoji_id", None)
+            else:
+                emoji_id = _custom_emoji_id_from_message(update.message)
+                if not emoji_id:
+                    return await update.message.reply_text("❗ 请发送一个会员表情，或发送“清空”移除图标。")
+                button["icon_custom_emoji_id"] = emoji_id
+            context.user_data.pop("group_setting_stage", None)
+            data[chat_id_str] = cfg
+            save_json(GROUP_LIST_FILE, data)
+            await update.message.reply_text(
+                _ad_button_detail_text("本群广告底部按钮", int(button_index), button),
+                reply_markup=_group_ad_button_detail_markup(chat_id_str, ad, int(button_index), button),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            raise ApplicationHandlerStop
         if field == "message":
             if text_value in {"清空", "关闭"}:
                 ad[AD_PUSH_MESSAGE_KEY] = None
@@ -5083,43 +5759,13 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
             if text_value in {"清空", "关闭", "无"}:
                 ad["buttons"] = []
             else:
-                buttons = []
-
-                for line in update.message.text.splitlines():
-                    line = line.strip()
-
-                    if not line:
-                        continue
-
-                    if "|" not in line:
-                        return await update.message.reply_text(
-                            "❗ 格式错误。\n"
-                            "每行应该是：按钮文字 | https://链接"
-                        )
-
-                    label, url = [part.strip() for part in line.split("|", 1)]
-
-                    if not label or not url:
-                        return await update.message.reply_text(
-                            "❗ 按钮文字和链接不能为空。"
-                        )
-
-                    if not url.startswith(("http://", "https://", "tg://")):
-                        return await update.message.reply_text(
-                            "❗ 链接必须以 http://、https:// 或 tg:// 开头。"
-                        )
-
-                    buttons.append({
-                        "text": label[:64],
-                        "url": url,
-                    })
-
-                if len(buttons) > 3:
-                    return await update.message.reply_text(
-                        "❗ 最多只能设置 3 个按钮。"
+                try:
+                    ad["buttons"] = parse_button_lines(
+                        update.message.text,
+                        limit=MAX_AD_BUTTONS,
                     )
-
-                ad["buttons"] = buttons
+                except ValueError as exc:
+                    return await update.message.reply_text(f"❗ {exc}")
 
             context.user_data.pop("group_setting_stage", None)
             data[chat_id_str] = cfg
@@ -5160,6 +5806,36 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
         if text_value in {"取消", "返回"}:
             context.user_data.pop("group_setting_stage", None)
             return await update.message.reply_text("✅ 已取消。")
+        if field in {"button_text", "button_url", "button_emoji"}:
+            button_index = stage.get("button_index")
+            button = _ad_button_at(ad, button_index)
+            if not button:
+                context.user_data.pop("group_setting_stage", None)
+                return await update.message.reply_text("❌ 该按钮不存在或已删除。")
+            if field == "button_text":
+                if not text_value or text_value in {"清空", "关闭"}:
+                    return await update.message.reply_text("❗ 按钮文字不能为空。")
+                button["text"] = text_value[:64]
+            elif field == "button_url":
+                if not text_value.startswith(("http://", "https://", "tg://")):
+                    return await update.message.reply_text("❗ 链接必须以 http://、https:// 或 tg:// 开头。")
+                button["url"] = text_value
+            elif text_value in {"清空", "关闭", "无"}:
+                button.pop("icon_custom_emoji_id", None)
+            else:
+                emoji_id = _custom_emoji_id_from_message(update.message)
+                if not emoji_id:
+                    return await update.message.reply_text("❗ 请发送一个会员表情，或发送“清空”移除图标。")
+                button["icon_custom_emoji_id"] = emoji_id
+            context.user_data.pop("group_setting_stage", None)
+            _save_global_ad_push_config(cfg)
+            await update.message.reply_text(
+                _ad_button_detail_text("全群广告底部按钮", int(button_index), button),
+                reply_markup=_global_ad_button_detail_markup(ad, int(button_index), button),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            raise ApplicationHandlerStop
 
         if field == "message":
             if text_value in {"清空", "关闭"}:
@@ -5244,43 +5920,13 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
             if text_value in {"清空", "关闭", "无"}:
                 ad["buttons"] = []
             else:
-                buttons = []
-
-                for line in update.message.text.splitlines():
-                    line = line.strip()
-
-                    if not line:
-                        continue
-
-                    if "|" not in line:
-                        return await update.message.reply_text(
-                            "❗ 格式错误。\n"
-                            "每行应该是：按钮文字 | https://链接"
-                        )
-
-                    label, url = [part.strip() for part in line.split("|", 1)]
-
-                    if not label or not url:
-                        return await update.message.reply_text(
-                            "❗ 按钮文字和链接不能为空。"
-                        )
-
-                    if not url.startswith(("http://", "https://", "tg://")):
-                        return await update.message.reply_text(
-                            "❗ 链接必须以 http://、https:// 或 tg:// 开头。"
-                        )
-
-                    buttons.append({
-                        "text": label[:64],
-                        "url": url,
-                    })
-
-                if len(buttons) > 3:
-                    return await update.message.reply_text(
-                        "❗ 最多只能设置 3 个按钮。"
+                try:
+                    ad["buttons"] = parse_button_lines(
+                        update.message.text,
+                        limit=MAX_AD_BUTTONS,
                     )
-
-                ad["buttons"] = buttons
+                except ValueError as exc:
+                    return await update.message.reply_text(f"❗ {exc}")
 
             context.user_data.pop("group_setting_stage", None)
             _save_global_ad_push_config(cfg)
@@ -5855,28 +6501,10 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
     raise ApplicationHandlerStop
 
 def _global_ad_reply_markup(ad: dict):
-    buttons = ad.get("buttons", [])
+    """Render ad buttons through the shared layout-aware button helper."""
+    buttons = ad.get("buttons", []) if isinstance(ad, dict) else []
+    return build_reply_markup(buttons, limit=MAX_AD_BUTTONS)
 
-    if not isinstance(buttons, list) or not buttons:
-        return None
-
-    rows = []
-
-    for button in buttons[:3]:
-        text = str(button.get("text") or "").strip()
-        url = str(button.get("url") or "").strip()
-
-        if not text or not url:
-            continue
-
-        rows.append([
-            InlineKeyboardButton(
-                text=text[:64],
-                url=url,
-            )
-        ])
-
-    return InlineKeyboardMarkup(rows) if rows else None
 
 async def send_message_payload(
     bot,

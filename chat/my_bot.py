@@ -23,6 +23,7 @@ from telegram.constants import ParseMode
 from command_router import register_command
 from game.voice_reply import group_tts_voice, tts_voice_reply
 from forward.message_forward import send_message_payload
+from inline_button_settings import MAX_INLINE_BUTTONS, build_reply_markup
 from utils import (
     bot_now,
     AD_KEYWORDS_FILE,
@@ -1442,20 +1443,13 @@ async def _pin_ad_message_if_enabled(bot, chat_id: int, sent_message, ad: dict) 
         return False
 
 
+MAX_AD_BUTTONS = MAX_INLINE_BUTTONS
+
+
 def _ad_reply_markup(ad: dict):
-    """Build the configured inline keyboard for both scheduled ad modes."""
+    """Render scheduled-ad buttons with the shared layout-aware renderer."""
     buttons = ad.get("buttons", []) if isinstance(ad, dict) else []
-    if not isinstance(buttons, list):
-        return None
-    rows = []
-    for button in buttons[:3]:
-        if not isinstance(button, dict):
-            continue
-        label = str(button.get("text") or "").strip()
-        url = str(button.get("url") or "").strip()
-        if label and url:
-            rows.append([InlineKeyboardButton(label[:64], url=url)])
-    return InlineKeyboardMarkup(rows) if rows else None
+    return build_reply_markup(buttons, limit=MAX_AD_BUTTONS)
 
 
 def _global_ad_records(cfg: dict) -> list[dict]:
