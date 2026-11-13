@@ -87,5 +87,20 @@
     "user_mark_labels": [],
     "channel_post_write_report_enabled": false,
     "input_search_enabled": false,
-    "input_search_restore_private_forward": false
+    "input_search_restore_private_forward": false,
+    "submission_targets": [
+        {
+            "id": 1,
+            "name": "默认频道",
+            "channel_id": -1003998380855,
+            "enabled": true
+        }
+    ],
+    "submission_target_next_id": 2,
+    "bot_publish_rule_enabled": true,
+    "bot_publish_rule_fields": [
+        "名字",
+        "区域",
+        "电报号"
+    ]
 }

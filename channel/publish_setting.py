@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from datetime import datetime, timedelta
 import asyncio
+import copy
 import json
 from types import SimpleNamespace
 import html
@@ -73,6 +74,7 @@ ANON_CHAT_FILE = "data/anon_chat.json"
 USER_MESSAGE_FILE = "data/user_message_file.json"
 BOTTLE_HISTORY_FILE = "data/bottle_history.json"
 PENDING_SUBMISSIONS_FILE = "data/pending_submissions.json"
+ORIGINAL_PUBLISH_INFO_FILE = "data/publish_original_info.json"
 
 CALLBACK_PREFIX = "publish"
 BUTTON_TEXT_MAX_LENGTH = 64
@@ -133,6 +135,14 @@ PROTOCOL_AUTO_SUBMISSION_KEY = "publish_protocol_auto_submission"
 # treated as ordinary submissions.
 PROTOCOL_AUTO_SUBMISSION_TTL_SECONDS = 120
 PROTOCOL_AUTO_SUBMISSION_MAX_PENDING = 20
+SUBMISSION_TARGETS_KEY = "submission_targets"
+SUBMISSION_TARGET_NEXT_ID_KEY = "submission_target_next_id"
+SUBMISSION_TARGET_SELECTION_KEY = "selected_submission_target_id"
+SUBMISSION_TARGET_INPUT_KEY = "submission_target_input"
+MAX_SUBMISSION_TARGETS = 20
+PUBLISH_PROFILE_DIR = "config_data/publish_profiles"
+PUBLISH_SETTINGS_PROFILE_KEY = "publish_settings_profile_id"
+PUBLISH_PROFILE_META_KEY = "_publish_profile_id"
 MASTER_BOT_NAME = str(os.getenv("MASTER_BOT_NAME", "")).strip()
 COLLECTION_DISPLAY_SETTING_KEY = "publish_collection_display_setting_field"
 TEMPLATE_KEY_PATTERN = re.compile(r"\{([\w\-一-鿿]+)\}")
@@ -190,6 +200,10 @@ async def _retry_flood_control(operation, *, action: str):
 # update. Buffer them briefly so a 投稿 album is reviewed and copied as one post.
 MEDIA_GROUP_BUFFER_KEY = "publish_pending_media_groups"
 MEDIA_GROUP_WAIT_SECONDS = 20.0
+PUBLISH_SOURCE_DEDUP_KEY = "publish_source_dedup"
+PUBLISH_SOURCE_DEDUP_TTL_SECONDS = 600
+BOT_RULE_POST_GUARD_KEY = "bot_publish_rule_post_guard"
+BOT_RULE_POST_GUARD_TTL_SECONDS = 3600
 # Posts published by the 投稿 flow already add their own write-report action.
 # Keep their later channel_post update from adding it a second time when the
 # direct-channel feature below is enabled.
@@ -207,6 +221,64 @@ MAIN_CHANNEL_MEDIA_GROUP_BACKUP_BUFFER_KEY = "publish_main_channel_media_group_b
 MAIN_CHANNEL_MEDIA_GROUP_BACKUP_WAIT_SECONDS = 8.0
 
 # =========================
+# 多投稿频道（规则）
+# =========================
+
+def _submission_targets(config: dict) -> list[dict]:
+    """Return valid named publication targets in stable ID order."""
+    raw_targets = config.get(SUBMISSION_TARGETS_KEY, []) if isinstance(config, dict) else []
+    if not isinstance(raw_targets, list):
+        return []
+    targets = []
+    used_ids = set()
+    for index, raw in enumerate(raw_targets, start=1):
+        if not isinstance(raw, dict):
+            continue
+        channel_id = _as_int(raw.get("channel_id"))
+        if channel_id is None:
+            continue
+        try:
+            target_id = int(raw.get("id", index))
+        except (TypeError, ValueError):
+            target_id = index
+        while target_id in used_ids or target_id <= 0:
+            target_id += 1
+        used_ids.add(target_id)
+        targets.append({
+            "id": target_id,
+            "name": str(raw.get("name") or f"频道 {target_id}").strip()[:50] or f"频道 {target_id}",
+            "channel_id": channel_id,
+            "enabled": bool(raw.get("enabled", True)),
+        })
+    return targets[:MAX_SUBMISSION_TARGETS]
+
+
+def _find_submission_target(config: dict, target_id) -> Optional[dict]:
+    try:
+        target_id = int(target_id)
+    except (TypeError, ValueError):
+        return None
+    return next((target for target in _submission_targets(config) if target["id"] == target_id), None)
+
+
+def _selected_submission_target(config: dict, context: ContextTypes.DEFAULT_TYPE) -> Optional[dict]:
+    """Resolve the target selected in the current administrator's session."""
+    target = _find_submission_target(config, (context.user_data or {}).get(SUBMISSION_TARGET_SELECTION_KEY))
+    return target if target and target.get("enabled", False) else None
+
+
+def _is_submission_administrator(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    return bool(
+        user_id
+        and (
+            user_id == _owner_id(context)
+            or is_super_admin(user_id)
+            or has_admin_permission(context, user_id, "submission_config")
+        )
+    )
+
+
+# =========================
 # 配置读写
 # =========================
 
@@ -217,6 +289,10 @@ def load_publish_config():
     refresh_json_cache_if_changed(PUBLISH_CONFIG_FILE)
     default = {
         "channel_id": None,
+        # Apply a simple field whitelist after an administrator submits through
+        # the bot, before the message is copied to this channel.
+        "bot_publish_rule_enabled": False,
+        "bot_publish_rule_fields": [],
         # Optional mirror for every main-channel post. It is never used for
         # keyword indexing/search, which always stays on channel_id.
         "backup_channel_id": None,
@@ -317,6 +393,11 @@ def load_publish_config():
             "keyword_post_search": True,
         },
         "submission_enabled": False,
+        # Named destinations used when administrators publish. All existing
+        # settings remain shared; selecting a target changes only the channel
+        # that the unchanged publication flow sends to.
+        SUBMISSION_TARGETS_KEY: [],
+        SUBMISSION_TARGET_NEXT_ID_KEY: 1,
         "random_view_enabled": False,
     }
 
@@ -326,6 +407,7 @@ def load_publish_config():
         save_json(PUBLISH_CONFIG_FILE, data)
         return data
 
+    had_submission_targets = SUBMISSION_TARGETS_KEY in data
     changed = False
     for key, value in default.items():
         if key not in data:
@@ -339,6 +421,36 @@ def load_publish_config():
                 if nested_key not in data[key]:
                     data[key][nested_key] = nested_value
                     changed = True
+    # Migrate the former single main channel into the first named target.
+    # An explicitly empty target list remains valid, so an owner can keep the
+    # legacy main channel as the only automatic/default destination.
+    normalized_targets = _submission_targets(data)
+    if not had_submission_targets:
+        legacy_channel_id = _as_int(data.get("channel_id"))
+        if legacy_channel_id is not None:
+            normalized_targets = [{
+                "id": 1,
+                "name": "默认频道",
+                "channel_id": legacy_channel_id,
+                "enabled": True,
+            }]
+        data[SUBMISSION_TARGETS_KEY] = normalized_targets
+        data[SUBMISSION_TARGET_NEXT_ID_KEY] = max(
+            [target["id"] for target in normalized_targets] or [0]
+        ) + 1
+        changed = True
+    elif data.get(SUBMISSION_TARGETS_KEY) != normalized_targets:
+        data[SUBMISSION_TARGETS_KEY] = normalized_targets
+        changed = True
+    try:
+        next_target_id = max(1, int(data.get(SUBMISSION_TARGET_NEXT_ID_KEY, 1) or 1))
+    except (TypeError, ValueError):
+        next_target_id = 1
+    used_target_ids = [target["id"] for target in normalized_targets]
+    if next_target_id <= max(used_target_ids or [0]):
+        data[SUBMISSION_TARGET_NEXT_ID_KEY] = max(used_target_ids or [0]) + 1
+        changed = True
+
     normalized_labels = _keyword_labels(data)
     if data.get("keyword_extract_labels") != normalized_labels:
         data["keyword_extract_labels"] = normalized_labels
@@ -349,7 +461,43 @@ def load_publish_config():
     return data
 
 
+def _publish_profile_path(profile_id: int) -> str:
+    return os.path.join(PUBLISH_PROFILE_DIR, f"{int(profile_id)}.json")
+
+
+def load_publish_profile(profile_id: int) -> dict:
+    """Load an independent settings profile for one configured publish channel."""
+    root = load_publish_config()
+    target = _find_submission_target(root, profile_id)
+    if not target:
+        return root
+    path = _publish_profile_path(target["id"])
+    profile = load_json(path)
+    if not isinstance(profile, dict) or not profile:
+        profile = copy.deepcopy(root)
+        # Destination registry belongs to the root file, never to a profile.
+        profile.pop(SUBMISSION_TARGETS_KEY, None)
+        profile.pop(SUBMISSION_TARGET_NEXT_ID_KEY, None)
+    profile["channel_id"] = target["channel_id"]
+    profile[PUBLISH_PROFILE_META_KEY] = target["id"]
+    return profile
+
+
 def save_publish_config(data):
+    profile_id = data.get(PUBLISH_PROFILE_META_KEY) if isinstance(data, dict) else None
+    if profile_id is not None:
+        try:
+            profile_id = int(profile_id)
+        except (TypeError, ValueError):
+            profile_id = None
+    if profile_id is not None:
+        payload = copy.deepcopy(data)
+        payload.pop(PUBLISH_PROFILE_META_KEY, None)
+        payload.pop(SUBMISSION_TARGETS_KEY, None)
+        payload.pop(SUBMISSION_TARGET_NEXT_ID_KEY, None)
+        os.makedirs(PUBLISH_PROFILE_DIR, exist_ok=True)
+        save_json(_publish_profile_path(profile_id), payload)
+        return
     save_json(PUBLISH_CONFIG_FILE, data)
 
 
@@ -560,6 +708,43 @@ async def _get_backup_telethon_client(
     return client
 
 
+async def _resolve_backup_telethon_target(client, channel_id: int):
+    """Resolve a backup channel using the selected protocol account's cache.
+
+    A raw ``-100…`` channel ID has no access hash. Telethon can only send to it
+    after that protocol account has seen the channel as a dialog, so refresh
+    the dialog list before producing an actionable configuration error.
+    """
+    try:
+        return await client.get_input_entity(int(channel_id))
+    except Exception as initial_exc:
+        try:
+            from telethon.utils import get_peer_id
+        except Exception:
+            get_peer_id = None
+        async for dialog in client.iter_dialogs():
+            entity = getattr(dialog, "entity", None)
+            candidates = {
+                getattr(dialog, "id", None),
+                getattr(entity, "id", None),
+            }
+            if get_peer_id and entity is not None:
+                try:
+                    candidates.add(get_peer_id(entity))
+                except Exception:
+                    pass
+            # Channel entities expose a positive bare ID; Bot API uses -100…
+            # for the same peer, so accept either representation.
+            raw_id = str(channel_id)
+            bare_id = int(raw_id[4:]) if raw_id.startswith("-100") else abs(int(channel_id))
+            if int(channel_id) in candidates or bare_id in candidates:
+                return getattr(dialog, "input_entity", None) or await client.get_input_entity(entity)
+        raise RuntimeError(
+            f"协议号无法识别备用频道 {channel_id}。请确认所选转发协议号已加入该频道，"
+            "并用该账号打开过频道/刷新一次协议号频道列表后重试。"
+        ) from initial_exc
+
+
 async def _mirror_main_post_via_telethon(
     context: ContextTypes.DEFAULT_TYPE,
     config: dict,
@@ -572,6 +757,7 @@ async def _mirror_main_post_via_telethon(
     """Copy a post or full media album through protocol accounts without a forward source."""
     listen_client = await _get_backup_telethon_client(context, config, role="listen")
     forward_client = await _get_backup_telethon_client(context, config, role="forward")
+    forward_target = await _resolve_backup_telethon_target(forward_client, backup_channel_id)
     try:
         from channel.telethon_forwarder import _send_album_with_caption, _send_message_safe
     except Exception as exc:
@@ -612,7 +798,7 @@ async def _mirror_main_post_via_telethon(
         if files:
             return await _send_album_with_caption(
                 forward_client,
-                backup_channel_id,
+                forward_target,
                 files,
                 caption=getattr(caption_message, "message", None) or "",
                 entities=getattr(caption_message, "entities", None),
@@ -631,7 +817,7 @@ async def _mirror_main_post_via_telethon(
     # not display “转发自 …” in the backup channel.
     return await _send_message_safe(
         forward_client,
-        backup_channel_id,
+        forward_target,
         text,
         entities=entities,
         file=media,
@@ -652,6 +838,7 @@ async def _edit_backup_post_via_telethon(
         config,
         role="forward",
     )
+    target = await _resolve_backup_telethon_target(client, backup_channel_id)
 
     text = (
         getattr(source_message, "text", None)
@@ -698,7 +885,7 @@ async def _edit_backup_post_via_telethon(
         media_file.name = file_name
 
         await client.edit_message(
-            backup_channel_id,
+            target,
             backup_message_id,
             edit_text,
             file=media_file,
@@ -708,7 +895,7 @@ async def _edit_backup_post_via_telethon(
 
     # 纯文字或网页链接：只修改文字
     await client.edit_message(
-        backup_channel_id,
+        target,
         backup_message_id,
         edit_text,
         parse_mode=parse_mode,
@@ -4122,6 +4309,68 @@ def _comment_author(msg) -> str:
     return f"{name} (@{username})" if username else name
 
 
+def _load_original_publish_info() -> dict:
+    data = load_json(ORIGINAL_PUBLISH_INFO_FILE)
+    return data if isinstance(data, dict) else {}
+
+
+def _save_original_publish_info(data: dict) -> None:
+    # Keep the store bounded while retaining recent links for operational review.
+    records = [
+        (str(token), item)
+        for token, item in (data or {}).items()
+        if isinstance(item, dict)
+    ]
+    records.sort(key=lambda item: int(item[1].get("created_at") or 0), reverse=True)
+    # save_json(ORIGINAL_PUBLISH_INFO_FILE, dict(records[:5000]))
+    save_json(ORIGINAL_PUBLISH_INFO_FILE, dict(records))
+
+
+def _store_original_publish_info(message, *, channel_id=None) -> str:
+    text = str(getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
+    if not text:
+        return ""
+    token = uuid.uuid4().hex[:20]
+    data = _load_original_publish_info()
+    data[token] = {
+        "text": text,
+        "created_at": int(time.time()),
+        "channel_id": _as_int(channel_id),
+        "source_chat_id": _as_int(getattr(message, "chat_id", None)),
+        "source_message_id": _as_int(getattr(message, "message_id", None)),
+    }
+    _save_original_publish_info(data)
+    return token
+
+
+async def _original_info_deep_link(context: ContextTypes.DEFAULT_TYPE, token: str) -> Optional[str]:
+    username = str(getattr(context.bot, "username", "") or "").strip().lstrip("@")
+    if not username:
+        try:
+            username = str((await context.bot.get_me()).username or "").strip().lstrip("@")
+        except Exception:
+            return None
+    return f"https://t.me/{username}?start=original_{token}" if username and token else None
+
+
+async def handle_original_info_start_parameter(update: Update, context: ContextTypes.DEFAULT_TYPE, parameter: str) -> bool:
+    if not isinstance(parameter, str) or not parameter.startswith("original_"):
+        return False
+    token = parameter.removeprefix("original_").strip()
+    record = _load_original_publish_info().get(token)
+    if not isinstance(record, dict):
+        if update.message:
+            await update.message.reply_text("❗ 原始信息不存在、已清理或链接已失效。")
+        return True
+    text = str(record.get("text") or "")
+    if update.message:
+        await update.message.reply_text(
+            "📄 发布前原始信息：\n\n" + text[:3900],
+            disable_web_page_preview=True,
+        )
+    return True
+
+
 async def _report_deep_link(context: ContextTypes.DEFAULT_TYPE, report_id: str):
     username = str(getattr(context.bot, "username", "") or "").strip().lstrip("@")
     if not username:
@@ -4391,6 +4640,26 @@ async def _capture_queued_main_publication(
         )
 
 
+def _mark_bot_rule_post(context: ContextTypes.DEFAULT_TYPE, channel_id: int, message_id: int) -> None:
+    guard = context.application.bot_data.setdefault(BOT_RULE_POST_GUARD_KEY, {})
+    if not isinstance(guard, dict):
+        guard = {}
+        context.application.bot_data[BOT_RULE_POST_GUARD_KEY] = guard
+    now = time.time()
+    for key, created_at in list(guard.items()):
+        if now - float(created_at or 0) > BOT_RULE_POST_GUARD_TTL_SECONDS:
+            guard.pop(key, None)
+    guard[(int(channel_id), int(message_id))] = now
+
+
+def _is_bot_rule_post(context: ContextTypes.DEFAULT_TYPE, channel_id: int, message_id: int) -> bool:
+    guard = context.application.bot_data.get(BOT_RULE_POST_GUARD_KEY, {})
+    if not isinstance(guard, dict):
+        return False
+    created_at = guard.get((int(channel_id), int(message_id)))
+    return created_at is not None and time.time() - float(created_at or 0) <= BOT_RULE_POST_GUARD_TTL_SECONDS
+
+
 async def _append_post_deep_links(
     context: ContextTypes.DEFAULT_TYPE,
     source_message,
@@ -4407,6 +4676,12 @@ async def _append_post_deep_links(
     entities are retained and the newly appended links receive their own
     ``TEXT_LINK`` entities, so formatted posts are safe too.
     """
+    # A field-filtered bot post already has its final text at first send. Never
+    # let delayed report/comment-link jobs edit it with a stale source payload.
+    if _is_bot_rule_post(context, channel_id, message_id):
+        print(f"ℹ️ 已跳过机器人发布规则帖的延后编辑 channel={channel_id} message={message_id}")
+        return False
+
     lines: list[tuple[str, int, int, str]] = []
     if report_url:
         prefix = "📋 老师个人报告："
@@ -6913,6 +7188,7 @@ def _has_active_publish_text_input_state(user_data: dict) -> bool:
             "waiting_forward_channel_id",
             "waiting_backup_channel_id",
             "waiting_channel_id",
+            SUBMISSION_TARGET_INPUT_KEY,
             "waiting_limit",
             "waiting_add_ad",
             "waiting_edit_ad",
@@ -8543,6 +8819,51 @@ async def _copy_formatted_submission_to_channel(
     )
 
 
+async def _send_bot_rule_message_directly(
+    context: ContextTypes.DEFAULT_TYPE,
+    message,
+    target_channel_id: int,
+    text: str,
+    config: dict,
+    *,
+    add_comment_button: bool,
+):
+    """Send a filtered single message without copying the original payload.
+
+    ``copy_message`` is ideal for ordinary submissions, but a field-filtered
+    post must never rely on Telegram later replacing a copied caption/text with
+    the source payload. Sending the media/file ID directly makes the filtered
+    body the only body Telegram receives.
+    """
+    reply_markup = None if add_comment_button else publish_buttons_keyboard(config)
+    common = {"chat_id": target_channel_id, "reply_markup": reply_markup}
+    if getattr(message, "text", None) is not None:
+        sent = await context.bot.send_message(text=text, disable_web_page_preview=True, **common)
+    elif getattr(message, "photo", None):
+        sent = await context.bot.send_photo(
+            photo=message.photo[-1].file_id, caption=text, **common
+        )
+    elif getattr(message, "video", None):
+        sent = await context.bot.send_video(
+            video=message.video.file_id, caption=text, **common
+        )
+    elif getattr(message, "animation", None):
+        sent = await context.bot.send_animation(
+            animation=message.animation.file_id, caption=text, **common
+        )
+    elif getattr(message, "document", None):
+        sent = await context.bot.send_document(
+            document=message.document.file_id, caption=text, **common
+        )
+    else:
+        return None
+    return SimpleNamespace(
+        message_id=sent.message_id,
+        message_ids=[sent.message_id],
+        scheduled=False,
+    )
+
+
 async def _copy_submission_to_channel(
     context: ContextTypes.DEFAULT_TYPE,
     submission: dict,
@@ -8910,6 +9231,12 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
     if not isinstance(submission, dict):
         return await query.answer("该投稿不存在或已清理。", show_alert=True)
 
+    profile_id = submission.get("publish_profile_id")
+    if profile_id is not None:
+        profile_config = load_publish_profile(profile_id)
+        if profile_config.get(PUBLISH_PROFILE_META_KEY) == profile_id:
+            config = profile_config
+
     status = submission.get("status", "pending")
     if status != "pending":
         status_text = {
@@ -8931,8 +9258,10 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
         )
 
     if action == "review_approve":
-        channel_id = config.get("channel_id")
-        if not channel_id:
+        target_channel_id = _as_int(submission.get("target_channel_id")) or _as_int(
+            config.get("channel_id")
+        )
+        if target_channel_id is None:
             return await query.answer("未配置发布频道，无法发布。", show_alert=True)
 
         # Persist a transient state first to prevent two owner clicks from publishing twice.
@@ -8941,7 +9270,6 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
         _save_pending_submissions(pending)
 
         submission_kind = str(submission.get("submission_kind", "main"))
-        target_channel_id = _as_int(submission.get("target_channel_id")) or channel_id
         try:
             # Only original submission content is published; proof is review-only.
             if submission_kind == "comment":
@@ -8955,12 +9283,15 @@ async def _handle_review_callback(query, context: ContextTypes.DEFAULT_TYPE, con
                     config,
                 )
                 if not getattr(published, "scheduled", False):
-                    await _mirror_main_post_to_backup(
-                        context,
-                        config,
-                        int(target_channel_id),
-                        published.message_id,
-                        main_message_ids=getattr(published, "message_ids", None),
+                    context.application.create_task(
+                        _mirror_main_post_to_backup(
+                            context,
+                            config,
+                            int(target_channel_id),
+                            published.message_id,
+                            main_message_ids=getattr(published, "message_ids", None),
+                        ),
+                        name=f"review-backup:{target_channel_id}:{published.message_id}",
                     )
         except Exception as exc:
             submission["status"] = "pending"
@@ -9695,6 +10026,27 @@ def _grant_approved_submission_reward(config: dict, submission: dict) -> dict:
 # =========================
 # 键盘
 # =========================
+def _publish_profile_selector_text(root_config: dict) -> str:
+    targets = _submission_targets(root_config)
+    return "\n".join([
+        "⚙️ 投稿配置",
+        "请选择需要独立配置的投稿频道。每个频道的审核、按钮、关键词、评论转发等设置互不影响。",
+        "模板发布暂时已隐藏。",
+        "",
+        f"当前已配置 {len(targets)} 个投稿频道。",
+    ])
+
+
+def _publish_profile_selector_keyboard(root_config: dict) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(
+        f"⚙️ {target['name'][:35]}",
+        callback_data=f"publish:profile_open:{target['id']}",
+    )] for target in _submission_targets(root_config)]
+    rows.append([InlineKeyboardButton("📚 管理投稿频道", callback_data="publish:submission_targets")])
+    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
+    return InlineKeyboardMarkup(rows)
+
+
 def publish_setting_keyboard(config: dict):
     bottom_buttons_enabled = bool(config.get("bottom_buttons_enabled", True))
     bottom_comment_buttons_enabled = bool(config.get("bottom_comment_buttons_enabled", False))
@@ -9799,13 +10151,6 @@ def publish_setting_keyboard(config: dict):
             "🔗 关联已克隆历史主帖到当前发布频道",
             callback_data="publish:migrate_history_posts",
         )],
-        [
-            InlineKeyboardButton(
-                f"{'✅' if template_publish_enabled else '🚫'} 模板发布",
-                callback_data="publish:toggle_template_publish",
-            ),
-            InlineKeyboardButton("🧩 模板配置", callback_data="publish:template_settings"),
-        ],
         [InlineKeyboardButton("⬅️ 返回", callback_data="start:back")]
     ]
     # 去掉主机器限制
@@ -9819,9 +10164,141 @@ def publish_setting_keyboard(config: dict):
     return InlineKeyboardMarkup(rows)
 
 
+def _submission_targets_text(config: dict) -> str:
+    targets = _submission_targets(config)
+    lines = [
+        "📚 投稿频道规则",
+        "管理员发起投稿时，可先选择要发布到哪个启用的频道；其余投稿、审核和发送流程保持不变。",
+        "",
+        f"当前：{len(targets)} / {MAX_SUBMISSION_TARGETS} 个频道规则",
+    ]
+    if not targets:
+        lines.append("\n暂未设置额外投稿频道，管理员将继续使用主发布频道。")
+    else:
+        lines.append("")
+        for target in targets:
+            lines.append(
+                f"{'✅' if target['enabled'] else '🚫'} #{target['id']} "
+                f"{html.escape(target['name'])} · <code>{target['channel_id']}</code>"
+            )
+    return "\n".join(lines)
+
+
+def _submission_targets_keyboard(config: dict) -> InlineKeyboardMarkup:
+    targets = _submission_targets(config)
+    rows = [
+        [InlineKeyboardButton(
+            f"⚙️ #{target['id']} {target['name'][:35]}",
+            callback_data=f"publish:submission_target_open:{target['id']}",
+        )]
+        for target in targets
+    ]
+    if len(targets) < MAX_SUBMISSION_TARGETS:
+        rows.append([InlineKeyboardButton("➕ 新增投稿频道", callback_data="publish:submission_target_add")])
+    # This manager is opened from the top-level 投稿配置 selector, not from a
+    # single profile's channel settings. Return there so users do not land in
+    # whichever profile happened to be open previously.
+    rows.append([InlineKeyboardButton("⬅️ 返回投稿配置", callback_data="publish:publishset")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _submission_target_detail_text(target: dict) -> str:
+    return "\n".join([
+        f"📚 投稿频道规则 #{target['id']}",
+        f"名称：{html.escape(target['name'])}",
+        f"发布频道：<code>{target['channel_id']}</code>",
+        f"状态：{'✅ 启用' if target['enabled'] else '🚫 停用'}",
+        "",
+        "启用后，管理员点击“我要投稿”会看到该频道的选择项。",
+    ])
+
+
+def _submission_target_detail_keyboard(target: dict) -> InlineKeyboardMarkup:
+    target_id = target["id"]
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"{'✅' if target['enabled'] else '🚫'} 启用此频道",
+            callback_data=f"publish:submission_target_toggle:{target_id}",
+        )],
+        [
+            InlineKeyboardButton("✏️ 修改名称", callback_data=f"publish:submission_target_edit_name:{target_id}"),
+            InlineKeyboardButton("✏️ 修改频道", callback_data=f"publish:submission_target_edit_channel:{target_id}"),
+        ],
+        [InlineKeyboardButton("🗑 删除此频道", callback_data=f"publish:submission_target_delete:{target_id}")],
+        [InlineKeyboardButton("⬅️ 返回频道规则", callback_data="publish:submission_targets")],
+    ])
+
+
+def _submission_target_selection_keyboard(targets: list[dict]) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(
+        f"📢 {target['name'][:35]}",
+        callback_data=f"publish:submission_target_choose:{target['id']}",
+    )] for target in targets if target.get("enabled")]
+    rows.append([InlineKeyboardButton("⬅️ 返回", callback_data="start:back")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _bot_publish_rule_fields(config: dict) -> list[str]:
+    raw = config.get("bot_publish_rule_fields", []) if isinstance(config, dict) else []
+    if isinstance(raw, str):
+        raw = re.split(r"[,，、\n]+", raw)
+    if not isinstance(raw, list):
+        return []
+    fields = []
+    seen = set()
+    for raw_field in raw:
+        field = str(raw_field or "").strip().rstrip("：:")[:30]
+        key = field.lower()
+        if field and key not in seen:
+            fields.append(field)
+            seen.add(key)
+    return fields[:20]
+
+
+def _apply_bot_publish_rule(text: str, config: dict) -> Optional[str]:
+    """Keep only configured ``字段：内容`` lines for admin bot submissions."""
+    if not bool(config.get("bot_publish_rule_enabled", False)):
+        return None
+    fields = _bot_publish_rule_fields(config)
+    if not fields:
+        return None
+    allowed = {field.casefold() for field in fields}
+    kept = []
+    for line in str(text or "").splitlines():
+        match = re.match(r"^\s*([^：:]{1,30})\s*[：:]\s*(.+?)\s*$", line)
+        if match and match.group(1).strip().casefold() in allowed:
+            kept.append(f"{match.group(1).strip()}：{match.group(2).strip()}")
+    return "\n".join(kept) if kept else None
+
+
+def _bot_publish_rule_text(config: dict) -> str:
+    fields = _bot_publish_rule_fields(config)
+    return "\n".join([
+        "🤖 机器人发布规则",
+        f"状态：{'✅ 开启' if config.get('bot_publish_rule_enabled', False) else '🚫 关闭'}",
+        f"保留字段：{html.escape('、'.join(fields) if fields else '未设置')}",
+        "",
+        "开启后，管理员通过机器人投稿到本频道时，会在格式化后仅保留匹配的“字段：内容”行。",
+        "例如设置 名字、区域、电报号 后，仅会保留这些字段的内容。",
+    ])
+
+
+def _bot_publish_rule_keyboard(config: dict) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"{'✅' if config.get('bot_publish_rule_enabled', False) else '🚫'} 启用规则",
+            callback_data="publish:bot_publish_rule_toggle",
+        )],
+        [InlineKeyboardButton("✏️ 设置保留字段", callback_data="publish:bot_publish_rule_fields")],
+        [InlineKeyboardButton("⬅️ 返回频道设置", callback_data="publish:channel")],
+    ])
+
+
 def publish_channel_keyboard(config: dict):
     backup_channel_id = _backup_channel_id(config)
     rows = [
+        [InlineKeyboardButton("📚 投稿频道规则", callback_data="publish:submission_targets")],
+        [InlineKeyboardButton("🤖 机器人发布规则", callback_data="publish:bot_publish_rule")],
         [InlineKeyboardButton("✏️ 修改主频道", callback_data="publish:set_channel")],
         [InlineKeyboardButton(
             "✏️ 设置备用频道" if backup_channel_id is None else "✏️ 修改备用频道",
@@ -9903,11 +10380,42 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not query.data.startswith("publish:"):
         return
 
-    config = load_publish_config()
-    channel_id = config.get("channel_id")
+    root_config = load_publish_config()
     action = query.data.split(":")[1]
-    
     parts = query.data.split(":")
+
+    if action == "publishset":
+        if not has_admin_permission(context, query.from_user.id, "submission_config"):
+            return await query.answer("你没有投稿配置权限。", show_alert=True)
+        context.user_data.pop(PUBLISH_SETTINGS_PROFILE_KEY, None)
+        await query.answer()
+        return await query.edit_message_text(
+            _publish_profile_selector_text(root_config),
+            reply_markup=_publish_profile_selector_keyboard(root_config),
+        )
+
+    if action == "profile_open":
+        if not has_admin_permission(context, query.from_user.id, "submission_config"):
+            return await query.answer("你没有投稿配置权限。", show_alert=True)
+        try:
+            profile_id = int(parts[2])
+        except (IndexError, ValueError):
+            return await query.answer("投稿频道参数无效。", show_alert=True)
+        if not _find_submission_target(root_config, profile_id):
+            return await query.answer("投稿频道不存在或已删除。", show_alert=True)
+        context.user_data[PUBLISH_SETTINGS_PROFILE_KEY] = profile_id
+        config = load_publish_profile(profile_id)
+        await query.answer()
+        return await query.edit_message_text(
+            f"⚙️ 投稿配置 · {html.escape(_find_submission_target(root_config, profile_id)['name'])}",
+            reply_markup=publish_setting_keyboard(config),
+            parse_mode="HTML",
+        )
+
+    root_actions = {"submission_targets", "submission_target_add", "submission_target_open", "submission_target_toggle", "submission_target_edit_name", "submission_target_edit_channel", "submission_target_delete", "submission_target_choose", "publish"}
+    profile_id = context.user_data.get(PUBLISH_SETTINGS_PROFILE_KEY)
+    config = root_config if action in root_actions else (load_publish_profile(profile_id) if profile_id else root_config)
+    channel_id = config.get("channel_id")
 
     if action in {"user_mark_open", "user_mark_toggle", "user_mark_confirm", "user_mark_reset"}:
         return await _handle_user_mark_callback(query, context, config)
@@ -10626,6 +11134,10 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ):
             _register_post_keywords(entries, channel_id_int, published.message_id)
         _register_checkin_post(config, channel_id_int, published.message_id, entries)
+
+        if bot_publish_rule_text and submission_kind == "main":
+            _mark_bot_rule_post(context, int(target_channel_id), published.message_id)
+
         if report_id and report_url:
             _create_comment_report(
                 channel_id_int,
@@ -10651,13 +11163,6 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.edit_message_text(
             "✅ 模板已按投稿规则发布到频道。",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ 返回首页", callback_data="start:back")]]),
-        )
-
-    if action == "publishset":
-        help_text = "📣 请设置发布的频道"
-        await query.edit_message_text(
-            help_text,
-            reply_markup=publish_setting_keyboard(config)
         )
 
     if action == "toggle_submission":
@@ -11167,6 +11672,129 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬅️ 返回", callback_data="publish:back")]
             ]),
+        )
+
+    if action == "submission_targets":
+        return await query.edit_message_text(
+            _submission_targets_text(config),
+            reply_markup=_submission_targets_keyboard(config),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+    if action == "submission_target_add":
+        targets = _submission_targets(config)
+        if len(targets) >= MAX_SUBMISSION_TARGETS:
+            return await query.answer(f"最多只能设置 {MAX_SUBMISSION_TARGETS} 个投稿频道。", show_alert=True)
+        context.user_data[SUBMISSION_TARGET_INPUT_KEY] = {"mode": "add", "field": "name"}
+        return await query.edit_message_text(
+            "请输入投稿频道规则名称，例如：福利频道。",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ 返回频道规则", callback_data="publish:submission_targets")]]),
+        )
+
+    if action in {
+        "submission_target_open",
+        "submission_target_toggle",
+        "submission_target_edit_name",
+        "submission_target_edit_channel",
+        "submission_target_delete",
+        "submission_target_choose",
+    }:
+        try:
+            target_id = int(parts[2])
+        except (IndexError, ValueError):
+            return await query.answer("投稿频道参数无效。", show_alert=True)
+        target = _find_submission_target(config, target_id)
+        if not target:
+            return await query.answer("投稿频道不存在或已删除。", show_alert=True)
+
+        if action == "submission_target_choose":
+            if not _is_submission_administrator(context, query.from_user.id):
+                return await query.answer("只有管理员可以选择投稿频道。", show_alert=True)
+            if not target.get("enabled"):
+                return await query.answer("该投稿频道已停用。", show_alert=True)
+            context.user_data[SUBMISSION_TARGET_SELECTION_KEY] = target_id
+            await query.answer(f"已选择：{target['name']}")
+            return await publish_message(update, context)
+
+        if action == "submission_target_open":
+            return await query.edit_message_text(
+                _submission_target_detail_text(target),
+                reply_markup=_submission_target_detail_keyboard(target),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        if action == "submission_target_toggle":
+            targets = _submission_targets(config)
+            for item in targets:
+                if item["id"] == target_id:
+                    item["enabled"] = not item["enabled"]
+                    target = item
+                    break
+            config[SUBMISSION_TARGETS_KEY] = targets
+            save_publish_config(config)
+            await query.answer("已启用投稿频道。" if target["enabled"] else "已停用投稿频道。")
+            return await query.edit_message_text(
+                _submission_target_detail_text(target),
+                reply_markup=_submission_target_detail_keyboard(target),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        if action in {"submission_target_edit_name", "submission_target_edit_channel"}:
+            field = "name" if action.endswith("_name") else "channel"
+            context.user_data[SUBMISSION_TARGET_INPUT_KEY] = {
+                "mode": "edit", "field": field, "target_id": target_id,
+            }
+            prompt = (
+                "请输入新的频道规则名称（最多 50 个字符）。"
+                if field == "name"
+                else "请输入新的发布频道 ID，例如：-1001234567890"
+            )
+            return await query.edit_message_text(
+                prompt,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "⬅️ 返回此频道规则", callback_data=f"publish:submission_target_open:{target_id}"
+                )]]),
+            )
+        targets = [item for item in _submission_targets(config) if item["id"] != target_id]
+        config[SUBMISSION_TARGETS_KEY] = targets
+        save_publish_config(config)
+        if context.user_data.get(SUBMISSION_TARGET_SELECTION_KEY) == target_id:
+            context.user_data.pop(SUBMISSION_TARGET_SELECTION_KEY, None)
+        await query.answer("已删除投稿频道。")
+        return await query.edit_message_text(
+            _submission_targets_text(config),
+            reply_markup=_submission_targets_keyboard(config),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+    if action == "bot_publish_rule":
+        return await query.edit_message_text(
+            _bot_publish_rule_text(config),
+            reply_markup=_bot_publish_rule_keyboard(config),
+            parse_mode="HTML",
+        )
+
+    if action == "bot_publish_rule_toggle":
+        config["bot_publish_rule_enabled"] = not bool(config.get("bot_publish_rule_enabled", False))
+        save_publish_config(config)
+        return await query.edit_message_text(
+            _bot_publish_rule_text(config),
+            reply_markup=_bot_publish_rule_keyboard(config),
+            parse_mode="HTML",
+        )
+
+    if action == "bot_publish_rule_fields":
+        context.user_data["bot_publish_rule_fields_input"] = True
+        return await query.edit_message_text(
+            "请输入需要保留的字段，用逗号或换行分隔。\n"
+            "例如：<code>名字, 区域, 电报号</code>\n\n"
+            "发送“清空”可移除全部字段。",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                "⬅️ 返回机器人发布规则", callback_data="publish:bot_publish_rule"
+            )]]),
         )
 
     if action == "channel":
@@ -11744,30 +12372,19 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     if action == "back":
+        if context.user_data.get(PUBLISH_SETTINGS_PROFILE_KEY):
+            context.user_data.pop(PUBLISH_SETTINGS_PROFILE_KEY, None)
+            return await query.edit_message_text(
+                _publish_profile_selector_text(root_config),
+                reply_markup=_publish_profile_selector_keyboard(root_config),
+            )
         return await query.edit_message_text(
             "⚙️ 发布设置",
             reply_markup=publish_setting_keyboard(config)
         )
 
     if action == "publish":
-        owner_id = _owner_id(context)
-        if (
-            bool(config.get("comment_forward_enabled", False))
-            and query.from_user.id != owner_id
-            and not is_super_admin(query.from_user.id)
-            and not isinstance(context.user_data.get(COMMENT_TARGET_KEY), dict)
-        ):
-            if not _keyword_labels(config):
-                return await query.edit_message_text(
-                    "❗ 当前未配置关键词提取标签，请联系管理员在投稿设置中配置。"
-                )
-            context.user_data[KEYWORD_INPUT_KEY] = True
-            context.user_data["waiting_post"] = False
-            return await query.edit_message_text(
-                "🔎 请输入需要投稿的收录老师关键词，例如：悠悠 或 @××××（名字或联系方式）\n"
-                "找到对应帖子后，再发送投稿内容。"
-            )
-        await publish_message(update, context)
+        return await _start_publish_flow(update, context, config)
 
     if action == "channel_message":
 
@@ -12107,16 +12724,79 @@ async def handle_protocol_submission_command(
     _arm_protocol_auto_submission(context)
 
 
+async def _start_publish_flow(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    config: Optional[dict] = None,
+):
+    """Begin a submission, selecting a destination for administrators first."""
+    config = config if isinstance(config, dict) else load_publish_config()
+    query = update.callback_query
+    user = query.from_user if query else update.effective_user
+    user_id = user.id if user else 0
+
+    # The “继续发” action reopens the input prompt for an already selected
+    # destination; it must not ask the administrator to select it again.
+    if not context.user_data.get("waiting_post") and _is_submission_administrator(context, user_id):
+        targets = [target for target in _submission_targets(config) if target.get("enabled")]
+        if len(targets) > 1:
+            context.user_data.pop(SUBMISSION_TARGET_SELECTION_KEY, None)
+            text = "📚 请选择本次投稿要发布到的频道：\n\n后续投稿、审核与发送流程保持不变。"
+            if query:
+                return await query.edit_message_text(
+                    text,
+                    reply_markup=_submission_target_selection_keyboard(targets),
+                )
+            return await update.message.reply_text(
+                text,
+                reply_markup=_submission_target_selection_keyboard(targets),
+            )
+        if len(targets) == 1:
+            context.user_data[SUBMISSION_TARGET_SELECTION_KEY] = targets[0]["id"]
+        else:
+            context.user_data.pop(SUBMISSION_TARGET_SELECTION_KEY, None)
+
+    owner_id = _owner_id(context)
+    if (
+        bool(config.get("comment_forward_enabled", False))
+        and user_id != owner_id
+        and not is_super_admin(user_id)
+        and not isinstance(context.user_data.get(COMMENT_TARGET_KEY), dict)
+    ):
+        if not _keyword_labels(config):
+            message = "❗ 当前未配置关键词提取标签，请联系管理员在投稿设置中配置。"
+            if query:
+                return await query.edit_message_text(message)
+            return await update.message.reply_text(message)
+        context.user_data[KEYWORD_INPUT_KEY] = True
+        context.user_data["waiting_post"] = False
+        message = (
+            "🔎 请输入需要投稿的收录老师关键词，例如：悠悠 或 @××××（名字或联系方式）\n"
+            "找到对应帖子后，再发送投稿内容。"
+        )
+        if query:
+            return await query.edit_message_text(message)
+        return await update.message.reply_text(message)
+
+    return await publish_message(update, context)
+
+
 async def publish_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     context.user_data["waiting_post"] = True
 
     enabled = context.user_data.get("post_no_name", True)
 
+    selected_target = _selected_submission_target(load_publish_config(), context)
+    target_note = (
+        f"\n\n📍 本次发布频道：{selected_target['name']}（{selected_target['channel_id']}）"
+        if selected_target else ""
+    )
     help_text = (
         "📣 请发送您要投稿的内容。\n\n"
         "支持文字、图片、视频等消息。\n"
         "转发频道消息时，若该来源频道已启用格式输出规则，发布时会自动套用一次。"
+        + target_note
     )
 
     context.user_data["post_no_name"] = enabled
@@ -12161,6 +12841,7 @@ def _finish_submission_if_needed(context: ContextTypes.DEFAULT_TYPE, config: dic
     context.user_data["waiting_post"] = False
     context.user_data.pop(PENDING_PROOF_KEY, None)
     context.user_data.pop(COMMENT_TARGET_KEY, None)
+    context.user_data.pop(SUBMISSION_TARGET_SELECTION_KEY, None)
 
 
 async def _flush_media_group_submission(context: ContextTypes.DEFAULT_TYPE):
@@ -12253,7 +12934,24 @@ async def _handle_wall_publish_message(
     source_message_ids = source_message_ids or [msg.message_id]
     source_message_ids = sorted({int(message_id) for message_id in source_message_ids})
 
-    config = load_publish_config()
+    # The same private update can reach this flow through overlapping routing
+    # handlers. Publish it only once; otherwise the second path may copy the
+    # original message after the first path has already sent the filtered one.
+    source_key = f"{msg.chat_id}:{','.join(str(message_id) for message_id in source_message_ids)}"
+    dedup = context.application.bot_data.setdefault(PUBLISH_SOURCE_DEDUP_KEY, {})
+    now = time.time()
+    if isinstance(dedup, dict):
+        for key, timestamp in list(dedup.items()):
+            if now - float(timestamp or 0) > PUBLISH_SOURCE_DEDUP_TTL_SECONDS:
+                dedup.pop(key, None)
+        if source_key in dedup:
+            print(f"ℹ️ 已跳过重复投稿处理 source={source_key}")
+            return
+        dedup[source_key] = now
+
+    root_config = load_publish_config()
+    selected_target = _selected_submission_target(root_config, context)
+    config = load_publish_profile(selected_target["id"]) if selected_target else root_config
     main_channel_id = _as_int(config.get("channel_id"))
     if main_channel_id is None:
         await msg.reply_text("✅ 暂未配置发布频道，感谢参与！")
@@ -12319,12 +13017,51 @@ async def _handle_wall_publish_message(
             await msg.reply_text("❌ 未设置转发频道，暂时无法提交投稿。")
             return
 
-    try:
-        format_output = await _format_submission_once(context, msg)
-    except Exception as exc:
-        print("投稿格式化失败:", exc)
-        await msg.reply_text(f"❌ 投稿格式化失败：{exc}")
-        return
+    bot_publish_rule_text = None
+    # The field whitelist replaces the normal formatter output completely.
+    # Do it first so we do not spend time resolving a format-output rule whose
+    # result would immediately be discarded by this channel rule.
+    if submission_kind == "main" and bool(config.get("bot_publish_rule_enabled", False)):
+        filtered_text = _apply_bot_publish_rule(
+            str(msg.text or msg.caption or ""), config
+        )
+        if filtered_text is None:
+            fields = "、".join(_bot_publish_rule_fields(config)) or "未设置"
+            await msg.reply_text(
+                f"❌ 机器人发布规则未匹配到可保留字段。当前字段：{fields}。"
+            )
+            return
+        bot_publish_rule_text = filtered_text
+        format_output = {
+            "text": filtered_text,
+            "entities": [],
+            "rule_id": "bot_publish_rule",
+            "report_id": "",
+        }
+    else:
+        try:
+            format_output = await _format_submission_once(context, msg)
+        except Exception as exc:
+            print("投稿格式化失败:", exc)
+            await msg.reply_text(f"❌ 投稿格式化失败：{exc}")
+            return
+
+    original_info_token = (
+        _store_original_publish_info(msg, channel_id=main_channel_id)
+        if bot_publish_rule_text else ""
+    )
+    if original_info_token:
+        original_url = await _original_info_deep_link(context, original_info_token)
+        if original_url:
+            original_link_line = f"📄 原始信息：{original_url}"
+            final_text = f"{str(format_output.get('text') or '').rstrip()}\n\n{original_link_line}"
+            max_length = 4096 if msg.text is not None else 1024
+            if len(final_text) > max_length:
+                await msg.reply_text(
+                    "❌ 筛选后的内容加上原始信息链接超出 Telegram 长度限制，请缩短内容。"
+                )
+                return
+            format_output["text"] = final_text
 
     # Non-owner submissions use review when it is enabled.
     if bool(config.get("review_enabled", False)) and not is_owner_submission:
@@ -12355,6 +13092,9 @@ async def _handle_wall_publish_message(
             "target_channel_id": target_channel_id,
             "format_output": format_output,
             "format_output_is_text": msg.text is not None,
+            "publish_profile_id": config.get(PUBLISH_PROFILE_META_KEY),
+            "bot_publish_rule_text": bot_publish_rule_text,
+            "original_info_token": original_info_token,
         }
         if comment_target:
             submission["comment_target"] = comment_target
@@ -12403,6 +13143,9 @@ async def _handle_wall_publish_message(
         "report_content": _comment_content(msg),
         "format_output": format_output,
         "format_output_is_text": msg.text is not None,
+        "publish_profile_id": config.get(PUBLISH_PROFILE_META_KEY),
+        "bot_publish_rule_text": bot_publish_rule_text,
+        "original_info_token": original_info_token,
         "keyword_entries": (
             _extract_routing_keywords(msg, config)
             if (
@@ -12446,17 +13189,29 @@ async def _handle_wall_publish_message(
             }, config)
             target_channel_id = _as_int(config.get("forward_channel_id"))
         else:
-            published = await _copy_submission_to_channel(
-                context,
-                submission,
-                target_channel_id,
-                config,
-                add_comment_button=(
-                    comment_forward_enabled
-                    and is_owner_submission
-                    and submission_kind == "main"
-                ),
+            add_comment_button = bool(
+                comment_forward_enabled
+                and is_owner_submission
+                and submission_kind == "main"
             )
+            published = None
+            if bot_publish_rule_text and len(source_message_ids) == 1:
+                published = await _send_bot_rule_message_directly(
+                    context,
+                    msg,
+                    int(target_channel_id),
+                    str(format_output.get("text") or ""),
+                    config,
+                    add_comment_button=add_comment_button,
+                )
+            if published is None:
+                published = await _copy_submission_to_channel(
+                    context,
+                    submission,
+                    target_channel_id,
+                    config,
+                    add_comment_button=add_comment_button,
+                )
         if getattr(published, "scheduled", False):
             if submission_kind == "main" and _as_int(target_channel_id) is not None:
                 _queue_main_publication_follow_up(
@@ -12512,12 +13267,18 @@ async def _handle_wall_publish_message(
                 report_url,
             )
         if submission_kind == "main":
-            await _mirror_main_post_to_backup(
-                context,
-                config,
-                int(target_channel_id),
-                published.message_id,
-                main_message_ids=getattr(published, "message_ids", None),
+            # Backup replication is optional and can involve a slow protocol
+            # account/entity lookup. Do it in the background so a successful
+            # primary-channel publication returns immediately.
+            context.application.create_task(
+                _mirror_main_post_to_backup(
+                    context,
+                    config,
+                    int(target_channel_id),
+                    published.message_id,
+                    main_message_ids=getattr(published, "message_ids", None),
+                ),
+                name=f"publish-backup:{target_channel_id}:{published.message_id}",
             )
         _append_published_submission(msg, published.message_id, target_channel_id)
         _finish_submission_if_needed(context, config)
@@ -13271,7 +14032,109 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if  not update.message or not update.message.text:
         return
 
-    config = load_publish_config()
+    root_config = load_publish_config()
+    target_input = context.user_data.get(SUBMISSION_TARGET_INPUT_KEY)
+    config = root_config if isinstance(target_input, dict) else (
+        load_publish_profile(context.user_data.get(PUBLISH_SETTINGS_PROFILE_KEY))
+        if context.user_data.get(PUBLISH_SETTINGS_PROFILE_KEY) else root_config
+    )
+
+    if isinstance(target_input, dict):
+        value = (update.message.text or "").strip()
+        if value in {"取消", "返回"}:
+            context.user_data.pop(SUBMISSION_TARGET_INPUT_KEY, None)
+            return await update.message.reply_text(
+                "✅ 已取消投稿频道编辑。",
+                reply_markup=_submission_targets_keyboard(config),
+            )
+        mode = str(target_input.get("mode") or "")
+        field = str(target_input.get("field") or "")
+        if mode == "add" and field == "name":
+            if not value:
+                return await update.message.reply_text("❗ 频道规则名称不能为空。")
+            target_input["name"] = value[:50]
+            target_input["field"] = "channel"
+            return await update.message.reply_text(
+                "请输入该规则的发布频道 ID，例如：-1001234567890"
+            )
+        if field == "channel":
+            try:
+                channel_id = int(value)
+            except (TypeError, ValueError):
+                return await update.message.reply_text("❗ 频道 ID 格式错误，例如：-1001234567890")
+            targets = _submission_targets(config)
+            if mode == "add":
+                if len(targets) >= MAX_SUBMISSION_TARGETS:
+                    context.user_data.pop(SUBMISSION_TARGET_INPUT_KEY, None)
+                    return await update.message.reply_text(f"❗ 最多只能设置 {MAX_SUBMISSION_TARGETS} 个投稿频道。")
+                try:
+                    target_id = int(config.get(SUBMISSION_TARGET_NEXT_ID_KEY, 1) or 1)
+                except (TypeError, ValueError):
+                    target_id = 1
+                used_ids = {target["id"] for target in targets}
+                while target_id in used_ids or target_id <= 0:
+                    target_id += 1
+                targets.append({
+                    "id": target_id,
+                    "name": str(target_input.get("name") or f"频道 {target_id}")[:50],
+                    "channel_id": channel_id,
+                    "enabled": True,
+                })
+                config[SUBMISSION_TARGET_NEXT_ID_KEY] = target_id + 1
+                notice = "✅ 已新增投稿频道规则。"
+            else:
+                target = next((item for item in targets if item["id"] == target_input.get("target_id")), None)
+                if not target:
+                    context.user_data.pop(SUBMISSION_TARGET_INPUT_KEY, None)
+                    return await update.message.reply_text("❗ 投稿频道不存在或已删除。")
+                target["channel_id"] = channel_id
+                notice = "✅ 已更新发布频道。"
+            config[SUBMISSION_TARGETS_KEY] = targets
+            save_publish_config(config)
+            context.user_data.pop(SUBMISSION_TARGET_INPUT_KEY, None)
+            return await update.message.reply_text(
+                notice + "\n\n" + _submission_targets_text(config),
+                reply_markup=_submission_targets_keyboard(config),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        if mode == "edit" and field == "name":
+            if not value:
+                return await update.message.reply_text("❗ 频道规则名称不能为空。")
+            targets = _submission_targets(config)
+            target = next((item for item in targets if item["id"] == target_input.get("target_id")), None)
+            if not target:
+                context.user_data.pop(SUBMISSION_TARGET_INPUT_KEY, None)
+                return await update.message.reply_text("❗ 投稿频道不存在或已删除。")
+            target["name"] = value[:50]
+            config[SUBMISSION_TARGETS_KEY] = targets
+            save_publish_config(config)
+            context.user_data.pop(SUBMISSION_TARGET_INPUT_KEY, None)
+            return await update.message.reply_text(
+                _submission_target_detail_text(target),
+                reply_markup=_submission_target_detail_keyboard(target),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        context.user_data.pop(SUBMISSION_TARGET_INPUT_KEY, None)
+        return await update.message.reply_text("❌ 投稿频道编辑状态无效。")
+
+    if context.user_data.get("bot_publish_rule_fields_input"):
+        value = (update.message.text or "").strip()
+        if value in {"清空", "关闭", "无"}:
+            fields = []
+        else:
+            fields = _bot_publish_rule_fields({"bot_publish_rule_fields": value})
+            if not fields:
+                return await update.message.reply_text("❗ 请至少输入一个字段名称。")
+        config["bot_publish_rule_fields"] = fields
+        context.user_data.pop("bot_publish_rule_fields_input", None)
+        save_publish_config(config)
+        return await update.message.reply_text(
+            _bot_publish_rule_text(config),
+            reply_markup=_bot_publish_rule_keyboard(config),
+            parse_mode="HTML",
+        )
 
     if context.user_data.get(KEYWORD_LABEL_INPUT_KEY):
         labels = [
@@ -13391,6 +14254,25 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         old_channel_id = _as_int(config.get("channel_id"))
         _record_publish_channel_change(config, old_channel_id, new_channel_id)
         config["channel_id"] = new_channel_id
+        profile_id = config.get(PUBLISH_PROFILE_META_KEY)
+        if profile_id is not None:
+            root_config = load_publish_config()
+            targets = _submission_targets(root_config)
+            for target in targets:
+                if target["id"] == profile_id:
+                    target["channel_id"] = new_channel_id
+                    break
+            root_config[SUBMISSION_TARGETS_KEY] = targets
+            save_publish_config(root_config)
+        else:
+            # Keep the automatically migrated legacy/default rule pointing at
+            # the edited main channel. Explicitly added rules are unchanged.
+            targets = _submission_targets(config)
+            for target in targets:
+                if target["name"] == "默认频道" and target["channel_id"] == old_channel_id:
+                    target["channel_id"] = new_channel_id
+                    config[SUBMISSION_TARGETS_KEY] = targets
+                    break
         save_publish_config(config)
 
         note = ""
@@ -13590,40 +14472,7 @@ async def _handle_publish_action(
     # 我要投稿
     # =========================================================
     if action == "publish":
-        owner_id = _owner_id(context)
-
-        if (
-            bool(config.get("comment_forward_enabled", False))
-            and user_id != owner_id
-            and not is_super_admin(user_id)
-            and not isinstance(
-                context.user_data.get(COMMENT_TARGET_KEY),
-                dict,
-            )
-        ):
-            if not _keyword_labels(config):
-                msg = "❗ 当前未配置关键词提取标签，请联系管理员在投稿设置中配置。"
-
-                if query:
-                    return await query.edit_message_text(msg)
-                else:
-                    return await update.message.reply_text(msg)
-
-            context.user_data[KEYWORD_INPUT_KEY] = True
-            context.user_data["waiting_post"] = False
-
-            msg = (
-                "🔎 请输入需要投稿的收录老师关键词，例如："
-                "悠悠 或 @××××（名字或联系方式）\n"
-                "找到对应帖子后，再发送投稿内容。"
-            )
-
-            if query:
-                return await query.edit_message_text(msg)
-            else:
-                return await update.message.reply_text(msg)
-
-        return await publish_message(update, context)
+        return await _start_publish_flow(update, context, config)
 
     # =========================================================
     # 查找收录标签

@@ -1,196 +1,207 @@
 {
-  "channel_id": -1002667629429,
-  "review_enabled": true,
-  "daily_limit": 0,
-  "ads_enabled": false,
-  "ads": [],
-  "buttons": [],
-  "bottom_buttons_enabled": false,
-  "submission_enabled": true,
-  "random_view_enabled": false,
-  "proof_required": true,
-  "reject_reason_required": true,
-  "comment_forward_enabled": true,
-  "forward_channel_id": -1004406338659,
-  "keyword_extract_labels": [
-    "艺名",
-    "联系",
-    "区域",
-    "标签",
-    "课费"
-  ],
-  "continuous_submission_enabled": false,
-  "custom_menu_buttons": {
-    "channel_clone": false,
-    "telethon_manage": false,
-    "bot_channel_config": false,
-    "group_config": false,
-    "global_ad_config": false,
-    "keyword_post_search": true
-  },
-  "report_link_enabled": true,
-  "template_publish_enabled": false,
-  "publish_templates": [
-    {
-      "id": 1,
-      "name": "发布模版",
-      "text": "🍃艺名 #<b>{艺名}</b>         🌎区域 #<b>{区域}   </b>           \n\n📡联系 ：@<b>{联系}  </b>   <a href=\"https://t.me/boost/yishuzanlanhui\">😀助推榜单</a>                                      \n💰课费：{课费}  \n<blockquote>额外积分：约课备注*艺术展览会推荐</blockquote>\n\n✅标签 ：{标签}  \n\n📡频道 ：{频道} \n<blockquote>{优惠}</blockquote> ",
-      "format": "html",
-      "buttons": [
+    "channel_id": -1002667629429,
+    "review_enabled": true,
+    "daily_limit": 0,
+    "ads_enabled": false,
+    "ads": [],
+    "buttons": [],
+    "bottom_buttons_enabled": false,
+    "submission_enabled": true,
+    "random_view_enabled": false,
+    "proof_required": true,
+    "reject_reason_required": true,
+    "comment_forward_enabled": true,
+    "forward_channel_id": -1004406338659,
+    "keyword_extract_labels": [
+        "艺名",
+        "联系",
+        "区域",
+        "标签",
+        "课费"
+    ],
+    "continuous_submission_enabled": false,
+    "custom_menu_buttons": {
+        "channel_clone": false,
+        "telethon_manage": false,
+        "bot_channel_config": false,
+        "group_config": false,
+        "global_ad_config": false,
+        "keyword_post_search": true
+    },
+    "report_link_enabled": true,
+    "template_publish_enabled": false,
+    "publish_templates": [
         {
-          "text": "老师总榜单",
-          "url": "https://t.me/+9VoY0YHVJXFhOWZh"
+            "id": 1,
+            "name": "发布模版",
+            "text": "🍃艺名 #<b>{艺名}</b>         🌎区域 #<b>{区域}   </b>           \n\n📡联系 ：@<b>{联系}  </b>   <a href=\"https://t.me/boost/yishuzanlanhui\">😀助推榜单</a>                                      \n💰课费：{课费}  \n<blockquote>额外积分：约课备注*艺术展览会推荐</blockquote>\n\n✅标签 ：{标签}  \n\n📡频道 ：{频道} \n<blockquote>{优惠}</blockquote> ",
+            "format": "html",
+            "buttons": [
+                {
+                    "text": "老师总榜单",
+                    "url": "https://t.me/+9VoY0YHVJXFhOWZh"
+                },
+                {
+                    "text": "中转平台",
+                    "url": "https://t.me/+-sIwH2NalFw2MzEy"
+                },
+                {
+                    "text": "点击更多福利",
+                    "url": "https://t.me/+-sIwH2NalFw2MzEy"
+                },
+                {
+                    "text": "📱福利群",
+                    "url": "https://t.me/+jfSu2e8TeHYwYmJh"
+                },
+                {
+                    "text": "📖报告区",
+                    "url": "https://t.me/+NtE1N4u4M2MzMjJh"
+                },
+                {
+                    "text": "🔥 人气榜单",
+                    "url": "https://t.me/+vOj1VuT48NE3MDc1"
+                }
+            ],
+            "button_columns": 3
         },
         {
-          "text": "中转平台",
-          "url": "https://t.me/+-sIwH2NalFw2MzEy"
+            "id": 2,
+            "name": "发布模版(不带优惠信息)",
+            "text": "🍃艺名 #<b>{艺名}</b>         🌎区域 #<b>{区域}   </b>           \n\n📡联系 ：@<b>{联系}  </b>   <a href=\"https://t.me/boost/yishuzanlanhui\">😀助推榜单</a>                                      \n💰课费：{课费}  \n<blockquote>额外积分：约课备注*艺术展览会推荐</blockquote>\n\n✅标签 ：{标签}  \n\n📡频道 ：{频道} \n",
+            "format": "html",
+            "buttons": [
+                {
+                    "text": "老师总榜单",
+                    "url": "https://t.me/+9VoY0YHVJXFhOWZh"
+                },
+                {
+                    "text": "中转平台",
+                    "url": "https://t.me/+-sIwH2NalFw2MzEy"
+                },
+                {
+                    "text": "点击更多福利",
+                    "url": "https://t.me/+-sIwH2NalFw2MzEy"
+                },
+                {
+                    "text": "📱福利群",
+                    "url": "https://t.me/+jfSu2e8TeHYwYmJh"
+                },
+                {
+                    "text": "📖报告区",
+                    "url": "https://t.me/+NtE1N4u4M2MzMjJh"
+                },
+                {
+                    "text": "🔥 人气榜单",
+                    "url": "https://t.me/+vOj1VuT48NE3MDc1"
+                }
+            ],
+            "button_columns": 3
         },
         {
-          "text": "点击更多福利",
-          "url": "https://t.me/+-sIwH2NalFw2MzEy"
+            "id": 3,
+            "name": "新模版",
+            "text": "等待内容编辑中",
+            "format": "plain",
+            "buttons": [],
+            "button_columns": 1
         },
         {
-          "text": "📱福利群",
-          "url": "https://t.me/+jfSu2e8TeHYwYmJh"
-        },
-        {
-          "text": "📖报告区",
-          "url": "https://t.me/+NtE1N4u4M2MzMjJh"
-        },
-        {
-          "text": "🔥 人气榜单",
-          "url": "https://t.me/+vOj1VuT48NE3MDc1"
+            "id": 4,
+            "name": "发布模版最新",
+            "text": "联系：{联系方式}",
+            "format": "plain",
+            "buttons": [],
+            "button_columns": 1
         }
-      ],
-      "button_columns": 3
+    ],
+    "pending_history_post_migration": {
+        "old_channel_id": -1002934622997,
+        "new_channel_id": -1002667629429,
+        "changed_at": 1794280866
     },
-    {
-      "id": 2,
-      "name": "发布模版(不带优惠信息)",
-      "text": "🍃艺名 #<b>{艺名}</b>         🌎区域 #<b>{区域}   </b>           \n\n📡联系 ：@<b>{联系}  </b>   <a href=\"https://t.me/boost/yishuzanlanhui\">😀助推榜单</a>                                      \n💰课费：{课费}  \n<blockquote>额外积分：约课备注*艺术展览会推荐</blockquote>\n\n✅标签 ：{标签}  \n\n📡频道 ：{频道} \n",
-      "format": "html",
-      "buttons": [
+    "channel_change_history": [
         {
-          "text": "老师总榜单",
-          "url": "https://t.me/+9VoY0YHVJXFhOWZh"
+            "old_channel_id": -1002934622997,
+            "new_channel_id": -1002750050910,
+            "changed_at": 1790126201
         },
         {
-          "text": "中转平台",
-          "url": "https://t.me/+-sIwH2NalFw2MzEy"
+            "old_channel_id": -1002750050910,
+            "new_channel_id": -1002934622997,
+            "changed_at": 1790322336
         },
         {
-          "text": "点击更多福利",
-          "url": "https://t.me/+-sIwH2NalFw2MzEy"
-        },
-        {
-          "text": "📱福利群",
-          "url": "https://t.me/+jfSu2e8TeHYwYmJh"
-        },
-        {
-          "text": "📖报告区",
-          "url": "https://t.me/+NtE1N4u4M2MzMjJh"
-        },
-        {
-          "text": "🔥 人气榜单",
-          "url": "https://t.me/+vOj1VuT48NE3MDc1"
+            "old_channel_id": -1002934622997,
+            "new_channel_id": -1002667629429,
+            "changed_at": 1794280866
         }
-      ],
-      "button_columns": 3
-    },
-    {
-      "id": 3,
-      "name": "新模版",
-      "text": "等待内容编辑中",
-      "format": "plain",
-      "buttons": [],
-      "button_columns": 1
-    },
-    {
-      "id": 4,
-      "name": "发布模版最新",
-      "text": "联系：{联系方式}",
-      "format": "plain",
-      "buttons": [],
-      "button_columns": 1
-    }
-  ],
-  "pending_history_post_migration": {
-    "old_channel_id": -1002934622997,
-    "new_channel_id": -1002667629429,
-    "changed_at": 1794280866
-  },
-  "channel_change_history": [
-    {
-      "old_channel_id": -1002934622997,
-      "new_channel_id": -1002750050910,
-      "changed_at": 1790126201
-    },
-    {
-      "old_channel_id": -1002750050910,
-      "new_channel_id": -1002934622997,
-      "changed_at": 1790322336
-    },
-    {
-      "old_channel_id": -1002934622997,
-      "new_channel_id": -1002667629429,
-      "changed_at": 1794280866
-    }
-  ],
-  "keyword_group_reply_enabled": true,
-  "keyword_group_reply_rules": [
-    {
-      "id": 1,
-      "input_label": "艺名",
-      "reply_label": "",
-      "display_text": "点击联系美丽的“{keyword}”老师",
-      "default_text": "艺术展推荐的老师可以约课吗！",
-      "button_text": "点击约课{keyword}",
-      "enabled": true
-    }
-  ],
-  "backup_channel_id": -1004494933562,
-  "keyword_post_search_display_mode": "main",
-  "backup_channel_use_telethon": true,
-  "backup_channel_session": "+13218329173",
-  "backup_channel_listen_session": "+13218329173",
-  "backup_channel_forward_session": "+13218329173",
-  "checkin_enabled": true,
-  "checkin_duration_hours": 8,
-  "checkin_user_label": "联系",
-  "checkin_display_label": "艺名+课费",
-  "checkin_group_label": "区域",
-  "checkin_command_text": "打卡",
-  "checkin_cancel_command_text": "取消打卡",
-  "checkin_online_command_text": "开课老师",
-  "checkin_online_text": "在线宝宝",
-  "user_mark_enabled": true,
-  "user_mark_report_chat_id": -1003039256186,
-  "user_mark_labels": [
-    "广告",
-    "骗子",
-    "骚扰"
-  ],
-  "comment_buttons": [
-    {
-      "id": 1,
-      "text": "艺术展老师报告区",
-      "url": "https://t.me/+NtE1N4u4M2MzMjJh"
-    }
-  ],
-  "bottom_comment_buttons_enabled": true,
-  "submission_reward_enabled": true,
-  "submission_reward_anonymous_points": 50,
-  "submission_reward_real_points": 100,
-  "submission_reward_group_id": -1003039256186,
-  "submission_reward_group_title": "主群",
-  "checkin_subgroup_label": "",
-  "collection_display_enabled": true,
-  "collection_display_command_text": "老师",
-  "collection_display_text": "收录老师",
-  "collection_display_label": "艺名",
-  "collection_display_group_label": "区域",
-  "collection_display_subgroup_label": "课费",
-  "channel_post_write_report_enabled": false,
-  "input_search_enabled": false,
-  "input_search_restore_private_forward": false
+    ],
+    "keyword_group_reply_enabled": true,
+    "keyword_group_reply_rules": [
+        {
+            "id": 1,
+            "input_label": "艺名",
+            "reply_label": "",
+            "display_text": "点击联系美丽的“{keyword}”老师",
+            "default_text": "艺术展推荐的老师可以约课吗！",
+            "button_text": "点击约课{keyword}",
+            "enabled": true
+        }
+    ],
+    "backup_channel_id": -1004494933562,
+    "keyword_post_search_display_mode": "main",
+    "backup_channel_use_telethon": true,
+    "backup_channel_session": "+13218329173",
+    "backup_channel_listen_session": "+13218329173",
+    "backup_channel_forward_session": "+13218329173",
+    "checkin_enabled": true,
+    "checkin_duration_hours": 8,
+    "checkin_user_label": "联系",
+    "checkin_display_label": "艺名+课费",
+    "checkin_group_label": "区域",
+    "checkin_command_text": "打卡",
+    "checkin_cancel_command_text": "取消打卡",
+    "checkin_online_command_text": "开课老师",
+    "checkin_online_text": "在线宝宝",
+    "user_mark_enabled": true,
+    "user_mark_report_chat_id": -1003039256186,
+    "user_mark_labels": [
+        "广告",
+        "骗子",
+        "骚扰"
+    ],
+    "comment_buttons": [
+        {
+            "id": 1,
+            "text": "艺术展老师报告区",
+            "url": "https://t.me/+NtE1N4u4M2MzMjJh"
+        }
+    ],
+    "bottom_comment_buttons_enabled": true,
+    "submission_reward_enabled": true,
+    "submission_reward_anonymous_points": 50,
+    "submission_reward_real_points": 100,
+    "submission_reward_group_id": -1003039256186,
+    "submission_reward_group_title": "主群",
+    "checkin_subgroup_label": "",
+    "collection_display_enabled": true,
+    "collection_display_command_text": "老师",
+    "collection_display_text": "收录老师",
+    "collection_display_label": "艺名",
+    "collection_display_group_label": "区域",
+    "collection_display_subgroup_label": "课费",
+    "channel_post_write_report_enabled": false,
+    "input_search_enabled": false,
+    "input_search_restore_private_forward": false,
+    "submission_targets": [
+        {
+            "id": 1,
+            "name": "默认频道",
+            "channel_id": -1002667629429,
+            "enabled": true
+        }
+    ],
+    "submission_target_next_id": 2,
+    "bot_publish_rule_enabled": false,
+    "bot_publish_rule_fields": []
 }

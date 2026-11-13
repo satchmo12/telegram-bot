@@ -1,0 +1,98 @@
+{
+    "channel_id": -1003998380855,
+    "backup_channel_id": null,
+    "backup_channel_use_telethon": false,
+    "backup_channel_session": "",
+    "backup_channel_listen_session": "",
+    "backup_channel_forward_session": "",
+    "pending_history_post_migration": {
+        "old_channel_id": -1003818934604,
+        "new_channel_id": -1003998380855,
+        "changed_at": 1794395824
+    },
+    "channel_change_history": [
+        {
+            "old_channel_id": -1003818934604,
+            "new_channel_id": -1003998380855,
+            "changed_at": 1794395824
+        }
+    ],
+    "review_enabled": true,
+    "daily_limit": 0,
+    "ads_enabled": false,
+    "ads": [],
+    "buttons": [],
+    "bottom_buttons_enabled": false,
+    "proof_required": true,
+    "reject_reason_required": false,
+    "comment_forward_enabled": true,
+    "forward_channel_id": -1004453651367,
+    "report_link_enabled": true,
+    "template_publish_enabled": false,
+    "publish_templates": [],
+    "keyword_extract_labels": [
+        "名字",
+        "区域",
+        "电报号"
+    ],
+    "keyword_group_reply_enabled": true,
+    "keyword_group_reply_rules": [
+        {
+            "id": 1,
+            "input_label": "名字",
+            "reply_label": "",
+            "display_text": "已找到对应帖子",
+            "default_text": "",
+            "button_text": "查看对应帖子",
+            "enabled": true
+        }
+    ],
+    "keyword_post_search_display_mode": "main",
+    "checkin_enabled": false,
+    "checkin_duration_hours": 8,
+    "checkin_user_label": "联系",
+    "checkin_display_label": "艺名",
+    "checkin_group_label": "",
+    "continuous_submission_enabled": false,
+    "custom_menu_buttons": {
+        "channel_clone": true,
+        "telethon_manage": true,
+        "bot_channel_config": false,
+        "group_config": true,
+        "global_ad_config": false,
+        "keyword_post_search": true
+    },
+    "submission_enabled": true,
+    "random_view_enabled": true,
+    "submission_reward_enabled": false,
+    "submission_reward_anonymous_points": 0,
+    "submission_reward_real_points": 0,
+    "submission_reward_group_id": null,
+    "submission_reward_group_title": "",
+    "comment_buttons": [],
+    "bottom_comment_buttons_enabled": false,
+    "checkin_subgroup_label": "",
+    "checkin_command_text": "打卡",
+    "checkin_cancel_command_text": "取消打卡",
+    "checkin_online_command_text": "在线宝宝",
+    "checkin_online_text": "在线宝宝",
+    "collection_display_enabled": true,
+    "collection_display_command_text": "老师",
+    "collection_display_text": "收录老师",
+    "collection_display_label": "名字",
+    "collection_display_group_label": "区域",
+    "collection_display_subgroup_label": "",
+    "user_mark_enabled": false,
+    "user_mark_report_chat_id": null,
+    "user_mark_labels": [],
+    "channel_post_write_report_enabled": false,
+    "input_search_enabled": false,
+    "input_search_restore_private_forward": false,
+    "bot_publish_rule_enabled": true,
+    "bot_publish_rule_fields": [
+        "名字",
+        "地区",
+        "电报号",
+        "编号"
+    ]
+}

@@ -81,5 +81,16 @@
     "collection_display_subgroup_label": "",
     "channel_post_write_report_enabled": false,
     "input_search_enabled": true,
-    "input_search_restore_private_forward": true
+    "input_search_restore_private_forward": true,
+    "submission_targets": [
+        {
+            "id": 1,
+            "name": "默认频道",
+            "channel_id": -1004434897205,
+            "enabled": true
+        }
+    ],
+    "submission_target_next_id": 2,
+    "bot_publish_rule_enabled": false,
+    "bot_publish_rule_fields": []
 }

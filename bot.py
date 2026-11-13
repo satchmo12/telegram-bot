@@ -49,6 +49,7 @@ from info.economy import handle_points_log_start_parameter
 from info.storage import ensure_info_migrated
 from channel.publish_setting import (
     handle_comment_start_parameter,
+    handle_original_info_start_parameter,
     handle_report_start_parameter,
     handle_teacher_list_callback,
     load_publish_config,
@@ -839,6 +840,8 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if await handle_report_start_parameter(update, context, context.args[0]):
             return
+        if await handle_original_info_start_parameter(update, context, context.args[0]):
+            return
 
     # A normal /start is also an explicit exit from an unfinished submission.
     _clear_submission_draft(context)
@@ -1102,8 +1105,6 @@ def _build_start_panel_rows(
         # 自定义用户入口属于投稿配置权限；多管理员本身仅所有者/超级管理员可管理。
         if can_use("submission_config"):
             owner_row.append(InlineKeyboardButton("🧩自定义按钮", callback_data="publish:custom_buttons"))
-            if bool(publish_config.get("template_publish_enabled", False)):
-                owner_row.append(InlineKeyboardButton("🧩模板发布", callback_data="publish:template_publish"))
         if is_bot_admin_viewer:
             owner_row.append(InlineKeyboardButton("⌨️命令模板", callback_data="ccmd:menu"))
             owner_row.append(InlineKeyboardButton("⌨️键盘按钮", callback_data="rkb:menu"))

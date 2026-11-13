@@ -35,7 +35,8 @@
         "telethon_manage": true,
         "bot_channel_config": true,
         "group_config": true,
-        "global_ad_config": true
+        "global_ad_config": true,
+        "keyword_post_search": true
     },
     "submission_enabled": false,
     "random_view_enabled": false,
@@ -59,5 +60,12 @@
     "collection_display_subgroup_label": "",
     "user_mark_enabled": false,
     "user_mark_report_chat_id": null,
-    "user_mark_labels": []
+    "user_mark_labels": [],
+    "bot_publish_rule_enabled": false,
+    "bot_publish_rule_fields": [],
+    "channel_post_write_report_enabled": false,
+    "input_search_enabled": false,
+    "input_search_restore_private_forward": false,
+    "submission_targets": [],
+    "submission_target_next_id": 1
 }

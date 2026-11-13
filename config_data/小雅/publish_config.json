@@ -192,5 +192,22 @@
     "collection_display_subgroup_label": "区域",
     "channel_post_write_report_enabled": true,
     "input_search_enabled": false,
-    "input_search_restore_private_forward": false
+    "input_search_restore_private_forward": false,
+    "submission_targets": [
+        {
+            "id": 1,
+            "name": "默认频道",
+            "channel_id": -1003878817420,
+            "enabled": true
+        },
+        {
+            "id": 2,
+            "name": "福利频道",
+            "channel_id": -1001234567890,
+            "enabled": false
+        }
+    ],
+    "submission_target_next_id": 3,
+    "bot_publish_rule_enabled": false,
+    "bot_publish_rule_fields": []
 }
