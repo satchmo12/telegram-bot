@@ -1,0 +1,18 @@
+{
+    "next_id": 3,
+    "rules": [
+        {
+            "id": 1,
+            "enabled": true,
+            "channel_id": "-1002667629429",
+            "note": "",
+            "output_template": "{content}",
+            "output_entities": [],
+            "cut_words": [],
+            "cut_includes_word": true,
+            "personal_report_link_enabled": false,
+            "personal_report_link_field": "",
+            "replacements": []
+        }
+    ]
+}

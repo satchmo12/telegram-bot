@@ -207,5 +207,13 @@
         "last_active": 1794548961,
         "blocked": true,
         "blocked_at": 1794563154
+    },
+    "8459873909": {
+        "name": "Samuel",
+        "username": "",
+        "join_time": 1794602367,
+        "last_active": 1794632224,
+        "blocked": true,
+        "blocked_at": 1794638319
     }
 }

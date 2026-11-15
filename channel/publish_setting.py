@@ -303,6 +303,9 @@ def load_publish_config():
         "backup_channel_session": "",
         "backup_channel_listen_session": "",
         "backup_channel_forward_session": "",
+        # Source-main → backup mapping. It preserves the pairing after later
+        # channel switches, so a channel_post always uses its own backup.
+        "backup_channel_routes": {},
         # When the owner switches to a cloned replacement channel, remember
         # the old/new pair so historical report migration needs no old ID input.
         "pending_history_post_migration": None,
@@ -349,6 +352,9 @@ def load_publish_config():
         # Group lookup: input label (e.g. 艺名) -> response label (e.g. 联系方式).
         "keyword_group_reply_enabled": False,
         "keyword_group_reply_rules": [],
+        # Channel whose indexed posts are used by all keyword searches.
+        # This is independent from the optional main/backup/all display mode.
+        "keyword_search_channel": "main",
         # Private “查找收录” result source: main / backup / all.
         "keyword_post_search_display_mode": "main",
         # When enabled from 机器人设置, every ordinary private text message is
@@ -359,6 +365,8 @@ def load_publish_config():
         "input_search_restore_private_forward": False,
         # Channel-post check-in / online roster settings.
         "checkin_enabled": False,
+        # Channel whose collected posts can be used for check-in and online lists.
+        "checkin_channel": "main",
         "checkin_duration_hours": 8,
         "checkin_user_label": "联系",
         "checkin_display_label": "艺名",
@@ -374,6 +382,9 @@ def load_publish_config():
         "collection_display_command_text": "老师",
         "collection_display_text": "收录老师",
         "collection_display_label": "艺名",
+        # Roster links normally open the main channel; a bot may explicitly
+        # show the continuously mirrored backup channel instead.
+        "collection_display_channel": "main",
         "collection_display_group_label": "",
         "collection_display_subgroup_label": "",
         # Reply to a user's group message with the fixed command “标记” to
@@ -501,9 +512,71 @@ def save_publish_config(data):
     save_json(PUBLISH_CONFIG_FILE, data)
 
 
+BACKUP_CHANNEL_ROUTES_KEY = "backup_channel_routes"
+
+
+def _backup_channel_routes(config: dict) -> dict[str, int]:
+    """Read persisted main→backup pairs, discarding malformed entries."""
+    raw_routes = (config or {}).get(BACKUP_CHANNEL_ROUTES_KEY)
+    if not isinstance(raw_routes, dict):
+        return {}
+    routes: dict[str, int] = {}
+    for raw_main, raw_backup in raw_routes.items():
+        main_channel_id = _as_int(raw_main)
+        backup_channel_id = _as_int(raw_backup)
+        if (
+            main_channel_id is not None
+            and backup_channel_id is not None
+            and main_channel_id != backup_channel_id
+        ):
+            routes[str(main_channel_id)] = backup_channel_id
+    return routes
+
+
+def _set_backup_channel_route(config: dict, main_channel_id, backup_channel_id) -> None:
+    """Persist the backup paired with one source/main channel."""
+    main_channel_id = _as_int(main_channel_id)
+    backup_channel_id = _as_int(backup_channel_id)
+    if (
+        main_channel_id is None
+        or backup_channel_id is None
+        or main_channel_id == backup_channel_id
+    ):
+        return
+    routes = _backup_channel_routes(config)
+    routes[str(main_channel_id)] = backup_channel_id
+    config[BACKUP_CHANNEL_ROUTES_KEY] = routes
+
+
+def _remove_backup_channel_route(config: dict, main_channel_id) -> None:
+    main_channel_id = _as_int(main_channel_id)
+    if main_channel_id is None:
+        return
+    routes = _backup_channel_routes(config)
+    if str(main_channel_id) in routes:
+        routes.pop(str(main_channel_id), None)
+        config[BACKUP_CHANNEL_ROUTES_KEY] = routes
+
+
 def _backup_channel_id(config: dict, main_channel_id=None):
-    backup = _as_int((config or {}).get("backup_channel_id"))
-    main = _as_int(main_channel_id if main_channel_id is not None else (config or {}).get("channel_id"))
+    """Return the backup paired with the supplied source/main channel.
+
+    Historical or multi-stage channel switches can leave several main channels
+    in local indexes. Resolve an exact persisted pair first; only the active
+    main channel may fall back to ``backup_channel_id``. This prevents a post
+    from one old main channel being copied to an unrelated newer backup.
+    """
+    config = config or {}
+    active_main = _as_int(config.get("channel_id"))
+    main = _as_int(main_channel_id if main_channel_id is not None else active_main)
+    if main is None:
+        return None
+    mapped_backup = _as_int(_backup_channel_routes(config).get(str(main)))
+    if mapped_backup is not None and mapped_backup != main:
+        return mapped_backup
+    if main != active_main:
+        return None
+    backup = _as_int(config.get("backup_channel_id"))
     if backup is None or backup == main:
         return None
     return backup
@@ -784,6 +857,19 @@ async def _mirror_main_post_via_telethon(
     if not source_messages:
         raise RuntimeError("监听协议号未找到主频道原消息")
 
+    # Some valid channel posts have neither reusable text nor downloadable
+    # media through Telethon (for example a special/unsupported post or a
+    # webpage-only shell). Sending such a payload raises “message cannot be
+    # empty”, and Bot API copy can reject the same type. Forward the original
+    # message as a compatibility fallback; it preserves the post instead of
+    # silently dropping the backup, though Telegram may show a forward label.
+    if all(
+        not (getattr(message, "message", None) or "").strip()
+        and getattr(message, "media", None) is None
+        for message in source_messages
+    ):
+        return await forward_client.forward_messages(forward_target, source_messages)
+
     # A Telegram album stores its caption on one item (usually the first). Use
     # that message as the caption source and send every media item together.
     # 相册处理：保留原有逻辑
@@ -928,16 +1014,29 @@ async def _mirror_main_post_to_backup(
         if not source_message_ids:
             raise RuntimeError("主频道同步缺少消息 ID")
 
+        copied = None
         if _backup_channel_use_telethon(config):
-            copied = await _mirror_main_post_via_telethon(
-                context,
-                config,
-                main_channel_id,
-                main_message_id,
-                backup_channel_id,
-                main_message_ids=source_message_ids,
-            )
-        elif len(source_message_ids) == 1:
+            try:
+                copied = await _mirror_main_post_via_telethon(
+                    context,
+                    config,
+                    main_channel_id,
+                    main_message_id,
+                    backup_channel_id,
+                    main_message_ids=source_message_ids,
+                )
+            except Exception as exc:
+                # A protocol account can be temporarily unavailable after a
+                # restart, lose its channel access hash, or be rate-limited.
+                # The bot is already an administrator in both configured
+                # channels to receive channel_post updates, so retry via Bot
+                # API instead of silently abandoning the mirror.
+                print(
+                    "备用频道协议号同步失败，改用机器人同步 "
+                    f"main={main_channel_id}/{main_message_id} backup={backup_channel_id}: {exc}"
+                )
+
+        if copied is None and len(source_message_ids) == 1:
             copied = await _retry_flood_control(
                 lambda: context.bot.copy_message(
                     chat_id=backup_channel_id,
@@ -946,7 +1045,7 @@ async def _mirror_main_post_to_backup(
                 ),
                 action="同步主频道到备用频道",
             )
-        else:
+        elif copied is None:
             copied = await _retry_flood_control(
                 lambda: context.bot.copy_messages(
                     chat_id=backup_channel_id,
@@ -1562,6 +1661,33 @@ def _checkin_post_key(channel_id: int, message_id: int) -> str:
     return f"{channel_id}:{message_id}"
 
 
+CHECKIN_CHANNEL_OPTIONS = {
+    "main": "主频道",
+    "backup": "备用频道",
+}
+
+
+def _checkin_channel_mode(config: dict) -> str:
+    mode = str((config or {}).get("checkin_channel") or "main").lower()
+    return mode if mode in CHECKIN_CHANNEL_OPTIONS else "main"
+
+
+def _checkin_channel_id(config: dict) -> Optional[int]:
+    main_channel_id = _as_int((config or {}).get("channel_id"))
+    if _checkin_channel_mode(config) == "backup":
+        return _backup_channel_id(config or {}, main_channel_id) or main_channel_id
+    return main_channel_id
+
+
+def _checkin_channel_label(config: dict) -> str:
+    mode = _checkin_channel_mode(config)
+    channel_id = _checkin_channel_id(config)
+    label = CHECKIN_CHANNEL_OPTIONS[mode]
+    if mode == "backup" and channel_id == _as_int((config or {}).get("channel_id")):
+        return f"{label}（未设置，已回退主频道）"
+    return f"{label}：{channel_id if channel_id is not None else '未设置'}"
+
+
 def _cleanup_expired_checkin_posts(data: dict, now_ts: int = None) -> bool:
     """Expire only check-in states; published posts remain eligible forever."""
     now_ts = int(now_ts or time.time())
@@ -1632,15 +1758,15 @@ def _checkin_contact_keys(post: dict, config: dict) -> set[str]:
 def _current_main_online_checkin_posts(
     posts: list[dict], config: dict, now_ts: int,
 ) -> list[dict]:
-    """Keep only current-main online posts, one newest post per contact."""
-    main_channel_id = _as_int(config.get("channel_id"))
-    if main_channel_id is None:
+    """Keep only configured check-in-channel posts, one newest post per contact."""
+    checkin_channel_id = _checkin_channel_id(config)
+    if checkin_channel_id is None:
         return []
     candidates = [
         post for post in posts
         if (
             isinstance(post, dict)
-            and _as_int(post.get("channel_id")) == main_channel_id
+            and _as_int(post.get("channel_id")) == checkin_channel_id
             and _as_int(post.get("message_id")) is not None
             and _as_int(post.get("message_id")) > 0
             and _has_active_checkin(post, now_ts)
@@ -1680,7 +1806,7 @@ def _register_checkin_post(
         or channel_id is None
         or message_id is None
         or message_id <= 0
-        or channel_id != _as_int(config.get("channel_id"))
+        or channel_id != _checkin_channel_id(config)
     ):
         return
 
@@ -1772,13 +1898,13 @@ def _checkin_field_values(
 
 def _rebuild_checkin_posts_from_keyword_index(config: dict) -> int:
     """Recreate persistent check-in eligibility for posts indexed before this feature."""
-    main_channel_id = _as_int(config.get("channel_id"))
-    if main_channel_id is None:
+    checkin_channel_id = _checkin_channel_id(config)
+    if checkin_channel_id is None:
         return 0
     grouped: dict[int, list[dict]] = {}
     for records in _load_keyword_map().values():
         for record in records if isinstance(records, list) else []:
-            if not isinstance(record, dict) or _as_int(record.get("channel_id")) != main_channel_id:
+            if not isinstance(record, dict) or _as_int(record.get("channel_id")) != checkin_channel_id:
                 continue
             message_id = _as_int(record.get("channel_message_id"))
             if message_id is None:
@@ -1790,7 +1916,7 @@ def _rebuild_checkin_posts_from_keyword_index(config: dict) -> int:
             })
     before = len(_load_checkin_posts().get("posts", {}))
     for message_id, entries in grouped.items():
-        _register_checkin_post(config, main_channel_id, message_id, entries)
+        _register_checkin_post(config, checkin_channel_id, message_id, entries)
     after = len(_load_checkin_posts().get("posts", {}))
     return max(0, after - before)
 
@@ -1948,6 +2074,39 @@ def _group_online_checkin_posts(
     return grouped
 
 
+COLLECTION_DISPLAY_CHANNEL_OPTIONS = {
+    "main": "主频道",
+    "backup": "备用频道",
+}
+
+
+def _collection_display_channel_mode(config: dict) -> str:
+    mode = str((config or {}).get("collection_display_channel") or "main").lower()
+    return mode if mode in COLLECTION_DISPLAY_CHANNEL_OPTIONS else "main"
+
+
+def _collection_display_channel_id(config: dict) -> Optional[int]:
+    """Resolve which mirrored channel supplies public roster links.
+
+    The publication main channel remains authoritative for reports and comment
+    routing. This setting only controls the channel/message links emitted by
+    ``老师列表``.
+    """
+    main_channel_id = _as_int((config or {}).get("channel_id"))
+    if _collection_display_channel_mode(config) == "backup":
+        return _backup_channel_id(config or {}, main_channel_id) or main_channel_id
+    return main_channel_id
+
+
+def _collection_display_channel_label(config: dict) -> str:
+    mode = _collection_display_channel_mode(config)
+    channel_id = _collection_display_channel_id(config)
+    label = COLLECTION_DISPLAY_CHANNEL_OPTIONS[mode]
+    if mode == "backup" and channel_id == _as_int((config or {}).get("channel_id")):
+        return f"{label}（未设置，已回退主频道）"
+    return f"{label}：{channel_id if channel_id is not None else '未设置'}"
+
+
 def _collection_display_labels(config: dict) -> list[str]:
     """Parse fields used for each collected-post roster item.
 
@@ -2008,7 +2167,7 @@ def _collection_checkin_field_fallbacks(config: dict) -> dict[tuple[int, int], d
     useful fallback when an edit update omits one field (for example ``城市``)
     even though the original post had already been indexed correctly.
     """
-    target_channel_id = _as_int((config or {}).get("channel_id"))
+    target_channel_id = _collection_display_channel_id(config)
     fallbacks: dict[tuple[int, int], dict[str, list[str]]] = {}
     for saved_post in _load_checkin_posts().get("posts", {}).values():
         if not isinstance(saved_post, dict):
@@ -2043,7 +2202,15 @@ def _load_collection_display_posts(config: dict) -> list[dict]:
     edited post still takes effect while a transiently omitted ``城市`` field no
     longer moves the teacher into ``未分类``.
     """
-    target_channel_id = _as_int((config or {}).get("channel_id"))
+    target_channel_id = _collection_display_channel_id(config)
+    # A process interruption during an older failover could leave the local
+    # keyword/check-in indexes on the retired channel even though the backup
+    # was successfully promoted. Repair that specific, recorded mirror path
+    # before reading the current-main index below. The repair is idempotent
+    # and is cached per runtime, so opening the roster does not repeatedly
+    # rewrite storage.
+    _repair_promoted_backup_indexes(config)
+
     posts: dict[tuple[int, int], dict] = {}
     for records in _load_keyword_map().values():
         for record in records if isinstance(records, list) else []:
@@ -3273,12 +3440,12 @@ async def _handle_checkin_group_message(update: Update, context: ContextTypes.DE
         if not username:
             # await msg.reply_text("❗ 打卡需要先设置 Telegram 用户名（@username）。")
             return True
-        current_main_channel_id = _as_int(config.get("channel_id"))
+        checkin_channel_id = _checkin_channel_id(config)
         matched = [
             post for post in posts.values()
             if (
                 isinstance(post, dict)
-                and _as_int(post.get("channel_id")) == current_main_channel_id
+                and _as_int(post.get("channel_id")) == checkin_channel_id
                 and username in (post.get("eligible_usernames") or [])
             )
         ]
@@ -3340,6 +3507,7 @@ def _checkin_settings_text(config: dict) -> str:
         "🟢 在线打卡设置",
         "",
         f"状态：{'✅ 开启' if config.get('checkin_enabled', False) else '🚫 关闭'}",
+        f"打卡频道：{_checkin_channel_label(config)}",
         f"有效时间：{_checkin_duration_seconds(config) // 3600} 小时",
         f"打卡用户名字段：{config.get('checkin_user_label') or '联系'}",
         f"展示文字字段：{config.get('checkin_display_label') or '艺名'}",
@@ -3362,6 +3530,10 @@ def _checkin_settings_keyboard(config: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(
             f"{'✅' if enabled else '🚫'} 在线打卡",
             callback_data="publish:toggle_checkin",
+        )],
+        [InlineKeyboardButton(
+            f"🔗 打卡频道：{_checkin_channel_label(config)}",
+            callback_data="publish:toggle_checkin_channel",
         )],
         [InlineKeyboardButton(
             f"⏱ 有效时间：{_checkin_duration_seconds(config) // 3600} 小时",
@@ -3420,6 +3592,7 @@ def _collection_display_settings_text(config: dict) -> str:
         f"触发文案：{_collection_display_command_text(config)}",
         f"展示标题：{_checkin_command_text(config, 'collection_display_text', '收录老师')}",
         f"展示字段：{config.get('collection_display_label') or '艺名'}",
+        f"链接频道：{_collection_display_channel_label(config)}",
         f"一级分组字段：{group_label}",
         f"二级分组字段：{subgroup_label}",
         "",
@@ -3450,6 +3623,10 @@ def _collection_display_settings_keyboard(config: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(
             f"📝 展示字段：{config.get('collection_display_label') or '艺名'}",
             callback_data="publish:collection_display_label",
+        )],
+        [InlineKeyboardButton(
+            f"🔗 链接频道：{_collection_display_channel_label(config)}",
+            callback_data="publish:toggle_collection_display_channel",
         )],
         [
             InlineKeyboardButton(
@@ -3709,17 +3886,14 @@ def _promote_backup_channel_to_main(config: dict) -> dict:
     if not isinstance(user_posts, list):
         user_posts = []
 
-    relinked_reports = 0
-    for old_message_id, backup_message_id in message_pairs:
-        relinked_reports += len(_relocate_post_indexes(
-            reports_data,
-            keyword_data,
-            user_posts,
-            source_channel_id=old_channel_id,
-            source_message_id=old_message_id,
-            target_channel_id=backup_channel_id,
-            target_message_id=backup_message_id,
-        ))
+    relinked_reports, _ = _relocate_post_indexes_for_pairs(
+        reports_data,
+        keyword_data,
+        user_posts,
+        source_channel_id=old_channel_id,
+        target_channel_id=backup_channel_id,
+        message_pairs=message_pairs,
+    )
 
     # Keyword/reply records must use the promoted post's linked discussion,
     # never the source post's old discussion mapping.
@@ -3732,6 +3906,8 @@ def _promote_backup_channel_to_main(config: dict) -> dict:
             backup_message_id,
         )
 
+    # Keep the existing promotion behavior of persisting all three indexes,
+    # including when no source records happened to match a mirrored post.
     _save_comment_reports(reports_data)
     _save_keyword_map(keyword_data)
     save_json(USER_MESSAGE_FILE, user_posts)
@@ -3741,8 +3917,32 @@ def _promote_backup_channel_to_main(config: dict) -> dict:
         message_pairs,
     )
 
+    _set_backup_channel_route(config, old_channel_id, backup_channel_id)
     _record_publish_channel_change(config, old_channel_id, backup_channel_id)
     config["channel_id"] = backup_channel_id
+
+    # Keep the default publication destination aligned with the newly promoted
+    # main channel. Without this, normal bot submissions can keep publishing
+    # into the retired main while searches/comments already point at the new
+    # one, which looks like a failed promotion to administrators.
+    profile_id = config.get(PUBLISH_PROFILE_META_KEY)
+    if profile_id is not None:
+        root_config = load_publish_config()
+        targets = _submission_targets(root_config)
+        for target in targets:
+            if target["id"] == profile_id:
+                target["channel_id"] = backup_channel_id
+                break
+        root_config[SUBMISSION_TARGETS_KEY] = targets
+        save_publish_config(root_config)
+    else:
+        targets = _submission_targets(config)
+        for target in targets:
+            if target["name"] == "默认频道" and target["channel_id"] == old_channel_id:
+                target["channel_id"] = backup_channel_id
+                config[SUBMISSION_TARGETS_KEY] = targets
+                break
+
     # The promoted channel cannot also remain the backup. Keep the existing
     # transport/session choices so setting the next backup is a one-step action.
     config["backup_channel_id"] = None
@@ -4315,15 +4515,22 @@ def _load_original_publish_info() -> dict:
 
 
 def _save_original_publish_info(data: dict) -> None:
-    # Keep the store bounded while retaining recent links for operational review.
-    records = [
-        (str(token), item)
+    """Persist original records without sorting the full store on every post."""
+    valid = {
+        str(token): item
         for token, item in (data or {}).items()
         if isinstance(item, dict)
-    ]
-    records.sort(key=lambda item: int(item[1].get("created_at") or 0), reverse=True)
-    # save_json(ORIGINAL_PUBLISH_INFO_FILE, dict(records[:5000]))
-    save_json(ORIGINAL_PUBLISH_INFO_FILE, dict(records))
+    }
+    # Normal writes are append/update-only. Sorting every saved original post
+    # for every publication is expensive; only prune once the cap is exceeded.
+    if len(valid) > 5000:
+        records = sorted(
+            valid.items(),
+            key=lambda item: int(item[1].get("created_at") or 0),
+            reverse=True,
+        )
+        valid = dict(records[:5000])
+    save_json(ORIGINAL_PUBLISH_INFO_FILE, valid)
 
 
 def _store_original_publish_info(message, *, channel_id=None) -> str:
@@ -4344,12 +4551,16 @@ def _store_original_publish_info(message, *, channel_id=None) -> str:
 
 
 async def _original_info_deep_link(context: ContextTypes.DEFAULT_TYPE, token: str) -> Optional[str]:
-    username = str(getattr(context.bot, "username", "") or "").strip().lstrip("@")
+    cache_key = "publish_original_link_bot_username"
+    username = str(context.application.bot_data.get(cache_key) or "").strip().lstrip("@")
+    if not username:
+        username = str(getattr(context.bot, "username", "") or "").strip().lstrip("@")
     if not username:
         try:
             username = str((await context.bot.get_me()).username or "").strip().lstrip("@")
         except Exception:
             return None
+    context.application.bot_data[cache_key] = username
     return f"https://t.me/{username}?start=original_{token}" if username and token else None
 
 
@@ -5327,6 +5538,205 @@ def _relocate_post_indexes(
             item["migrated_at"] = int(time.time())
 
     return report_ids
+
+
+def _relocate_post_indexes_for_pairs(
+    reports_data: dict,
+    keyword_data: dict,
+    user_posts: list,
+    *,
+    source_channel_id: int,
+    target_channel_id: int,
+    message_pairs: list[tuple[int, int]],
+) -> tuple[int, bool]:
+    """Relocate all indexes for a mirrored source/target message mapping.
+
+    Promotion used to call :func:`_relocate_post_indexes` once per post. Apart
+    from doing repeated full scans, an interrupted older promotion could leave
+    its local indexes at the old main channel. This bulk form makes the normal
+    promotion and its one-time recovery use the same atomic mapping rules.
+    """
+    message_map = {
+        int(source_message_id): int(target_message_id)
+        for source_message_id, target_message_id in message_pairs
+        if _as_int(source_message_id) is not None
+        and _as_int(target_message_id) is not None
+        and _as_int(source_message_id) > 0
+        and _as_int(target_message_id) > 0
+    }
+    if not message_map:
+        return 0, False
+
+    changed = False
+    report_count = 0
+    for report_id, report in reports_data.get("reports", {}).items():
+        if not isinstance(report, dict):
+            continue
+        source_message_id = _as_int(report.get("message_id"))
+        if (
+            _as_int(report.get("channel_id")) != source_channel_id
+            or source_message_id not in message_map
+        ):
+            continue
+        report["migrated_from_channel_id"] = source_channel_id
+        report["migrated_from_message_id"] = source_message_id
+        report["channel_id"] = target_channel_id
+        report["message_id"] = message_map[source_message_id]
+        report["migrated_at"] = int(time.time())
+        report_count += 1
+        changed = True
+
+    for records in keyword_data.values():
+        for record in records if isinstance(records, list) else []:
+            if not isinstance(record, dict):
+                continue
+            source_message_id = _as_int(record.get("channel_message_id"))
+            if (
+                _as_int(record.get("channel_id")) != source_channel_id
+                or source_message_id not in message_map
+            ):
+                continue
+            record["channel_id"] = target_channel_id
+            record["channel_message_id"] = message_map[source_message_id]
+            record["migrated_at"] = int(time.time())
+            changed = True
+
+    for item in user_posts:
+        if not isinstance(item, dict):
+            continue
+        source_message_id = _as_int(item.get("channel_message_id"))
+        if (
+            _as_int(item.get("channel_id")) != source_channel_id
+            or source_message_id not in message_map
+        ):
+            continue
+        item["channel_id"] = target_channel_id
+        item["channel_message_id"] = message_map[source_message_id]
+        item["migrated_at"] = int(time.time())
+        changed = True
+
+    return report_count, changed
+
+
+# Each runtime checks a historic promotion at most once. The configuration
+# itself remains the source of truth, so a later channel switch has a new key.
+_PROMOTED_BACKUP_REPAIR_CACHE: set[tuple] = set()
+
+
+def _repair_promoted_backup_indexes(config: dict) -> None:
+    """Repair indexes left on an old main channel by a past backup promotion.
+
+    The repair intentionally requires both a recorded channel transition and
+    exact mirror message pairs. It therefore cannot migrate arbitrary old
+    channel content after a manual channel-ID edit. It is primarily invoked
+    before the collected-teacher roster is rebuilt, allowing affected bots to
+    recover on the next ``老师列表`` click without another channel operation.
+    """
+    current_channel_id = _as_int((config or {}).get("channel_id"))
+    if current_channel_id is None:
+        return
+
+    history = (config or {}).get("channel_change_history")
+    pending = (config or {}).get("pending_history_post_migration")
+    transitions = []
+    for item in ([pending] if isinstance(pending, dict) else []) + (
+        history if isinstance(history, list) else []
+    ):
+        if not isinstance(item, dict):
+            continue
+        source_channel_id = _as_int(item.get("old_channel_id"))
+        target_channel_id = _as_int(item.get("new_channel_id"))
+        if (
+            source_channel_id is not None
+            and source_channel_id != current_channel_id
+            and target_channel_id == current_channel_id
+            and source_channel_id not in transitions
+        ):
+            transitions.append(source_channel_id)
+    if not transitions:
+        return
+
+    mappings = _load_backup_post_map().get("mappings", {})
+    if not isinstance(mappings, dict):
+        return
+    transition_pairs: list[tuple[int, list[tuple[int, int]]]] = []
+    for source_channel_id in transitions:
+        pairs = []
+        for raw_key, mapping in mappings.items():
+            if not isinstance(mapping, dict):
+                continue
+            try:
+                raw_source_channel_id, raw_source_message_id = str(raw_key).rsplit(":", 1)
+            except ValueError:
+                continue
+            if _as_int(raw_source_channel_id) != source_channel_id:
+                continue
+            target_channel_id = _as_int(mapping.get("backup_channel_id"))
+            source_message_id = _as_int(raw_source_message_id)
+            target_message_id = _as_int(mapping.get("backup_message_id"))
+            if (
+                target_channel_id == current_channel_id
+                and source_message_id is not None
+                and source_message_id > 0
+                and target_message_id is not None
+                and target_message_id > 0
+            ):
+                pairs.append((source_message_id, target_message_id))
+        if pairs:
+            transition_pairs.append((source_channel_id, sorted(set(pairs))))
+    if not transition_pairs:
+        return
+
+    repair_key = (
+        str(get_runtime_bot_name() or ""),
+        current_channel_id,
+        tuple((source, len(pairs), pairs[-1]) for source, pairs in transition_pairs),
+    )
+    if repair_key in _PROMOTED_BACKUP_REPAIR_CACHE:
+        return
+
+    try:
+        reports_data = _load_comment_reports()
+        keyword_data = _load_keyword_map()
+        user_posts = load_json(USER_MESSAGE_FILE)
+        if not isinstance(user_posts, list):
+            user_posts = []
+        comment_map = _load_comment_map()
+
+        indexes_changed = discussion_changed = False
+        for source_channel_id, pairs in transition_pairs:
+            _report_count, changed = _relocate_post_indexes_for_pairs(
+                reports_data,
+                keyword_data,
+                user_posts,
+                source_channel_id=source_channel_id,
+                target_channel_id=current_channel_id,
+                message_pairs=pairs,
+            )
+            indexes_changed = indexes_changed or changed
+            for _source_message_id, target_message_id in pairs:
+                discussion_changed = (
+                    _clear_or_apply_promoted_discussion_mapping(
+                        keyword_data,
+                        comment_map,
+                        current_channel_id,
+                        target_message_id,
+                    )
+                    or discussion_changed
+                )
+            _relocate_checkin_posts(source_channel_id, current_channel_id, pairs)
+
+        if indexes_changed or discussion_changed:
+            _save_comment_reports(reports_data)
+            _save_keyword_map(keyword_data)
+            save_json(USER_MESSAGE_FILE, user_posts)
+    except Exception as exc:
+        # The roster must remain available even if a malformed legacy file
+        # cannot be repaired automatically. A later click can retry it.
+        print(f"备用频道提升索引自动修复失败: {exc}")
+        return
+
+    _PROMOTED_BACKUP_REPAIR_CACHE.add(repair_key)
 
 
 def _apply_discussion_mapping_to_keyword_data(
@@ -6744,10 +7154,11 @@ def _find_keyword_routes(
     if not key:
         return []
     data = keyword_data if isinstance(keyword_data, dict) else _load_keyword_map()
-    # Keyword/comment routing is deliberately scoped to the active primary
-    # channel.  During a failover, only mirrored records are rebased onto that
-    # new ID, so old unavailable posts cannot be returned by a search.
-    current_main_channel_id = _as_int(load_publish_config().get("channel_id"))
+    # Searches are scoped to the configured search source. It defaults to the
+    # main channel, but a continuously mirrored backup may be selected when
+    # public searches must open the backup's posts instead.
+    search_config = load_publish_config()
+    search_channel_id = _keyword_search_channel_id(search_config)
     matches = []
     for stored_key, records in data.items():
         if key not in stored_key:
@@ -6757,7 +7168,7 @@ def _find_keyword_routes(
                 continue
             channel_id = _as_int(record.get("channel_id"))
             message_id = _as_int(record.get("channel_message_id"))
-            if current_main_channel_id is not None and channel_id != current_main_channel_id:
+            if search_channel_id is not None and channel_id != search_channel_id:
                 continue
             if require_discussion and not record.get("discussion_message_id"):
                 continue
@@ -6895,6 +7306,33 @@ def _find_keyword_routes_with_artist(
 
     return result
 
+KEYWORD_SEARCH_CHANNEL_OPTIONS = {
+    "main": "主频道",
+    "backup": "备用频道",
+}
+
+
+def _keyword_search_channel_mode(config: dict) -> str:
+    mode = str((config or {}).get("keyword_search_channel") or "main").lower()
+    return mode if mode in KEYWORD_SEARCH_CHANNEL_OPTIONS else "main"
+
+
+def _keyword_search_channel_id(config: dict) -> Optional[int]:
+    main_channel_id = _as_int((config or {}).get("channel_id"))
+    if _keyword_search_channel_mode(config) == "backup":
+        return _backup_channel_id(config or {}, main_channel_id) or main_channel_id
+    return main_channel_id
+
+
+def _keyword_search_channel_label(config: dict) -> str:
+    mode = _keyword_search_channel_mode(config)
+    channel_id = _keyword_search_channel_id(config)
+    label = KEYWORD_SEARCH_CHANNEL_OPTIONS[mode]
+    if mode == "backup" and channel_id == _as_int((config or {}).get("channel_id")):
+        return f"{label}（未设置，已回退主频道）"
+    return f"{label}：{channel_id if channel_id is not None else '未设置'}"
+
+
 KEYWORD_SEARCH_DISPLAY_OPTIONS = {
     "main": "主频道帖子",
     "backup": "备用频道帖子",
@@ -6909,7 +7347,10 @@ def _keyword_post_search_display_mode(config: dict) -> str:
 
 def _keyword_post_search_display_keyboard(config: dict) -> InlineKeyboardMarkup:
     current = _keyword_post_search_display_mode(config)
-    rows = []
+    rows = [[InlineKeyboardButton(
+        f"🔎 搜索频道：{_keyword_search_channel_label(config)}",
+        callback_data="publish:keyword_search_channel_toggle",
+    )]]
     for mode, label in KEYWORD_SEARCH_DISPLAY_OPTIONS.items():
         rows.append([InlineKeyboardButton(
             f"{'✅' if mode == current else '⚪'} {label}",
@@ -6964,12 +7405,19 @@ def _keyword_post_display_routes(routes: list[dict], config: dict) -> list[dict]
     """Turn primary keyword index records into main/backup/all view routes."""
     mode = _keyword_post_search_display_mode(config)
     main_channel_id = _as_int(config.get("channel_id"))
+    search_channel_id = _keyword_search_channel_id(config)
+    search_channel_mode = _keyword_search_channel_mode(config)
     primary = [
-        {**route, "display_channel": "主频道"}
+        {
+            **route,
+            "display_channel": KEYWORD_SEARCH_CHANNEL_OPTIONS[search_channel_mode],
+        }
         for route in routes
-        if main_channel_id is None or _as_int(route.get("channel_id")) == main_channel_id
+        if search_channel_id is None or _as_int(route.get("channel_id")) == search_channel_id
     ]
-    if mode == "main":
+    # A backup source is already the destination users asked to search. Do not
+    # attempt to map it through the primary channel's mirror table again.
+    if search_channel_mode == "backup" or mode == "main":
         return primary
 
     # The backup-map and history-forward files are shared by all rows in this
@@ -7458,7 +7906,7 @@ def _find_group_keyword_reply_values(query: str, input_label: str, reply_label: 
     if not query_key:
         return []
     data = _load_keyword_map()
-    current_main_channel_id = _as_int(load_publish_config().get("channel_id"))
+    search_channel_id = _keyword_search_channel_id(load_publish_config())
     source_posts = set()
     for stored_key, records in data.items():
         if query_key != _normalize_routing_keyword(stored_key):
@@ -7473,7 +7921,7 @@ def _find_group_keyword_reply_values(query: str, input_label: str, reply_label: 
             if (
                 channel_id is not None
                 and message_id is not None
-                and (current_main_channel_id is None or channel_id == current_main_channel_id)
+                and (search_channel_id is None or channel_id == search_channel_id)
             ):
                 source_posts.add((channel_id, message_id))
 
@@ -7517,7 +7965,7 @@ def _find_group_keyword_condition_values(query: str, input_label: str) -> list[d
     if not query_key:
         return []
     data = _load_keyword_map()
-    current_main_channel_id = _as_int(load_publish_config().get("channel_id"))
+    search_channel_id = _keyword_search_channel_id(load_publish_config())
     matched_posts = set()
     for stored_key, records in data.items():
         if query_key != _normalize_routing_keyword(stored_key):
@@ -7534,7 +7982,7 @@ def _find_group_keyword_condition_values(query: str, input_label: str) -> list[d
             if (
                 channel_id is not None
                 and message_id is not None
-                and (current_main_channel_id is None or channel_id == current_main_channel_id)
+                and (search_channel_id is None or channel_id == search_channel_id)
             ):
                 matched_posts.add((channel_id, message_id))
 
@@ -10074,7 +10522,7 @@ def publish_setting_keyboard(config: dict):
             InlineKeyboardButton("💬 群关键词回复", callback_data="publish:group_keyword_reply"),
         ],
         [InlineKeyboardButton(
-            f"🔎 搜索展示：{KEYWORD_SEARCH_DISPLAY_OPTIONS[_keyword_post_search_display_mode(config)]}",
+            f"🔎 搜索频道：{_keyword_search_channel_label(config)}",
             callback_data="publish:keyword_search_display",
         )],
         [
@@ -11519,6 +11967,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action in {
         "collection_display_settings",
         "toggle_collection_display",
+        "toggle_collection_display_channel",
         "collection_display_command_text",
         "collection_display_text",
         "collection_display_label",
@@ -11538,6 +11987,17 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action == "toggle_collection_display":
             config["collection_display_enabled"] = not bool(
                 config.get("collection_display_enabled", False)
+            )
+            save_publish_config(config)
+            return await query.edit_message_text(
+                _collection_display_settings_text(config),
+                reply_markup=_collection_display_settings_keyboard(config),
+            )
+        if action == "toggle_collection_display_channel":
+            config["collection_display_channel"] = (
+                "backup"
+                if _collection_display_channel_mode(config) == "main"
+                else "main"
             )
             save_publish_config(config)
             return await query.edit_message_text(
@@ -11586,6 +12046,16 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=_checkin_settings_keyboard(config),
         )
 
+    if action == "toggle_checkin_channel":
+        config["checkin_channel"] = (
+            "backup" if _checkin_channel_mode(config) == "main" else "main"
+        )
+        save_publish_config(config)
+        return await query.edit_message_text(
+            _checkin_settings_text(config),
+            reply_markup=_checkin_settings_keyboard(config),
+        )
+
     if action in {"checkin_duration", "checkin_user_label", "checkin_display_label", "checkin_group_label", "checkin_subgroup_label", "checkin_command_text", "checkin_cancel_command_text", "checkin_online_command_text", "checkin_online_text"}:
         field_map = {
             "checkin_duration": "checkin_duration_hours",
@@ -11620,10 +12090,22 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "keyword_search_display":
         return await query.edit_message_text(
-            "🔎 设置“查找收录”显示来源：\n\n"
-            "主频道：只展示关键词索引绑定的主频道帖子。\n"
-            "备用频道：仅展示有主备映射的备用频道镜像帖。\n"
-            "全部展示：主频道和备用频道都展示。",
+            "🔎 查找收录设置：\n\n"
+            "搜索频道决定私聊搜索、群关键词回复和条件搜索从哪个频道的索引取结果。\n"
+            "搜索频道设为备用频道时，结果会直接打开备用频道帖子。\n\n"
+            "下方展示来源仅在搜索频道为主频道时生效，可选择主频道、镜像备用频道或两者都展示。",
+            reply_markup=_keyword_post_search_display_keyboard(config),
+        )
+
+    if action == "keyword_search_channel_toggle":
+        config["keyword_search_channel"] = (
+            "backup"
+            if _keyword_search_channel_mode(config) == "main"
+            else "main"
+        )
+        save_publish_config(config)
+        return await query.edit_message_text(
+            f"✅ 已设置搜索频道：{_keyword_search_channel_label(config)}",
             reply_markup=_keyword_post_search_display_keyboard(config),
         )
 
@@ -11898,6 +12380,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     if action == "clear_backup_channel":
+        _remove_backup_channel_route(config, _as_int(config.get("channel_id")))
         config["backup_channel_id"] = None
         config["backup_channel_use_telethon"] = False
         config["backup_channel_session"] = ""
@@ -14236,6 +14719,7 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if main_channel_id is not None and backup_channel_id == main_channel_id:
             return await update.message.reply_text("❗ 备用频道不能与主频道相同，请重新输入。")
         config["backup_channel_id"] = backup_channel_id
+        _set_backup_channel_route(config, main_channel_id, backup_channel_id)
         save_publish_config(config)
         return await update.message.reply_text(
             f"✅ 已保存备用频道：{backup_channel_id}\n主帖将同步镜像到该频道。",
@@ -14254,6 +14738,9 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         old_channel_id = _as_int(config.get("channel_id"))
         _record_publish_channel_change(config, old_channel_id, new_channel_id)
         config["channel_id"] = new_channel_id
+        _set_backup_channel_route(
+            config, new_channel_id, _as_int(config.get("backup_channel_id"))
+        )
         profile_id = config.get(PUBLISH_PROFILE_META_KEY)
         if profile_id is not None:
             root_config = load_publish_config()

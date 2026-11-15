@@ -53,7 +53,7 @@
     "checkin_user_label": "联系",
     "checkin_display_label": "艺名",
     "checkin_group_label": "",
-    "continuous_submission_enabled": false,
+    "continuous_submission_enabled": true,
     "custom_menu_buttons": {
         "channel_clone": true,
         "telethon_manage": true,

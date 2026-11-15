@@ -431,5 +431,306 @@ class PublishSettingReportDeletionTests(unittest.TestCase):
         )
 
 
+# Kept outside the original classes so the failover fixture stays focused.
+class PublishSettingPromotionRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        publish._PROMOTED_BACKUP_REPAIR_CACHE.clear()
+
+    def tearDown(self):
+        publish._PROMOTED_BACKUP_REPAIR_CACHE.clear()
+
+    def test_promoting_backup_updates_default_submission_target(self):
+        """Promotion must not leave normal submissions in the retired channel."""
+        config = {
+            "channel_id": -100101,
+            "backup_channel_id": -100202,
+            "submission_targets": [{
+                "id": 1,
+                "name": "默认频道",
+                "channel_id": -100101,
+                "enabled": True,
+            }],
+        }
+        checkin_data = {"posts": {}}
+
+        with (
+            patch.object(publish, "_promotable_backup_post_pairs", return_value=[]),
+            patch.object(publish, "_load_comment_reports", return_value={"reports": {}}),
+            patch.object(publish, "_load_keyword_map", return_value={}),
+            patch.object(publish, "_load_comment_map", return_value={}),
+            patch.object(publish, "_load_checkin_posts", return_value=checkin_data),
+            patch.object(publish, "load_json", return_value=[]),
+            patch.object(publish, "_save_comment_reports"),
+            patch.object(publish, "_save_keyword_map"),
+            patch.object(publish, "save_json"),
+            patch.object(publish, "save_publish_config"),
+        ):
+            result = publish._promote_backup_channel_to_main(config)
+
+        self.assertEqual(result["new_channel_id"], -100202)
+        self.assertEqual(config["channel_id"], -100202)
+        self.assertIsNone(config["backup_channel_id"])
+        self.assertEqual(config["submission_targets"][0]["channel_id"], -100202)
+        self.assertEqual(config["backup_channel_routes"]["-100101"], -100202)
+
+    def test_backup_resolver_uses_the_source_channels_saved_pair(self):
+        """Each main channel resolves its own backup without numeric branches."""
+        config = {
+            "channel_id": -100202,
+            "backup_channel_id": -100303,
+            "backup_channel_routes": {
+                "-100101": -100202,
+                "-100202": -100303,
+            },
+        }
+
+        self.assertEqual(publish._backup_channel_id(config, -100101), -100202)
+        self.assertEqual(publish._backup_channel_id(config, -100202), -100303)
+        self.assertIsNone(publish._backup_channel_id(config, -100404))
+
+    def test_empty_telethon_post_is_forwarded_instead_of_dropped(self):
+        """Unsupported empty posts use a native forward compatibility path."""
+        source = SimpleNamespace(message="", media=None)
+        listen_client = SimpleNamespace(get_messages=AsyncMock(return_value=source))
+        forward_client = SimpleNamespace(
+            forward_messages=AsyncMock(return_value=[SimpleNamespace(id=7)])
+        )
+        context = SimpleNamespace()
+
+        async def mirror():
+            with (
+                patch.object(
+                    publish,
+                    "_get_backup_telethon_client",
+                    new=AsyncMock(side_effect=[listen_client, forward_client]),
+                ),
+                patch.object(
+                    publish,
+                    "_resolve_backup_telethon_target",
+                    new=AsyncMock(return_value="backup-target"),
+                ),
+            ):
+                return await publish._mirror_main_post_via_telethon(
+                    context,
+                    {},
+                    -100101,
+                    99,
+                    -100202,
+                )
+
+        result = asyncio.run(mirror())
+
+        self.assertEqual(result[0].id, 7)
+        forward_client.forward_messages.assert_awaited_once_with(
+            "backup-target", [source]
+        )
+
+    def test_protocol_backup_failure_falls_back_to_bot_copy(self):
+        """A transient protocol-account failure must not drop the mirror."""
+        config = {
+            "channel_id": -100101,
+            "backup_channel_id": -100202,
+            "backup_channel_use_telethon": True,
+        }
+        copy_message = AsyncMock(return_value=SimpleNamespace(message_id=7))
+        context = SimpleNamespace(bot=SimpleNamespace(copy_message=copy_message))
+
+        async def mirror():
+            with (
+                patch.object(
+                    publish,
+                    "_mirror_main_post_via_telethon",
+                    new=AsyncMock(side_effect=RuntimeError("session unavailable")),
+                ),
+                patch.object(publish, "_record_backup_post_mappings") as record_mapping,
+            ):
+                result = await publish._mirror_main_post_to_backup(
+                    context, config, -100101, 99
+                )
+            return result, record_mapping
+
+        result, record_mapping = asyncio.run(mirror())
+
+        self.assertEqual(result.message_id, 7)
+        copy_message.assert_awaited_once_with(
+            chat_id=-100202, from_chat_id=-100101, message_id=99
+        )
+        record_mapping.assert_called_once_with(-100101, -100202, [(99, 7)])
+
+    def test_checkin_uses_the_configured_backup_channel(self):
+        """Check-in eligibility and online rows must use the backup source."""
+        config = {
+            "channel_id": -100101,
+            "backup_channel_id": -100202,
+            "checkin_channel": "backup",
+        }
+        now_ts = 100
+        posts = [
+            {
+                "channel_id": -100101,
+                "message_id": 1,
+                "eligible_usernames": ["old_artist"],
+                "checkins": {"1": {"expires_at": now_ts + 60}},
+            },
+            {
+                "channel_id": -100202,
+                "message_id": 7,
+                "eligible_usernames": ["backup_artist"],
+                "checkins": {"2": {"expires_at": now_ts + 60}},
+            },
+        ]
+
+        online = publish._current_main_online_checkin_posts(posts, config, now_ts)
+
+        self.assertEqual(publish._checkin_channel_id(config), -100202)
+        self.assertEqual([(post["channel_id"], post["message_id"]) for post in online], [(-100202, 7)])
+
+    def test_keyword_search_uses_the_configured_backup_source(self):
+        """Private keyword search must not fall back to stale main indexes."""
+        config = {
+            "channel_id": -100101,
+            "backup_channel_id": -100202,
+            "keyword_search_channel": "backup",
+            "keyword_post_search_display_mode": "main",
+        }
+        keyword_data = {
+            "小艺": [
+                {
+                    "label": "艺名",
+                    "raw": "小艺",
+                    "channel_id": -100101,
+                    "channel_message_id": 1,
+                    "created_at": 1,
+                },
+                {
+                    "label": "艺名",
+                    "raw": "小艺",
+                    "channel_id": -100202,
+                    "channel_message_id": 7,
+                    "created_at": 2,
+                },
+            ]
+        }
+
+        with patch.object(publish, "load_publish_config", return_value=config):
+            routes = publish._find_keyword_routes(
+                "小艺", require_discussion=False, keyword_data=keyword_data
+            )
+            display_routes = publish._keyword_post_display_routes(routes, config)
+
+        self.assertEqual([(route["channel_id"], route["channel_message_id"]) for route in routes], [(-100202, 7)])
+        self.assertEqual([(route["channel_id"], route["channel_message_id"]) for route in display_routes], [(-100202, 7)])
+        self.assertEqual(display_routes[0]["display_channel"], "备用频道")
+
+    def test_backup_roster_mode_links_to_the_configured_backup_channel(self):
+        """The roster may intentionally link to mirrors instead of main posts."""
+        config = {
+            "channel_id": -100101,
+            "backup_channel_id": -100202,
+            "collection_display_channel": "backup",
+            "collection_display_label": "艺名",
+        }
+        keyword_data = {
+            "小艺": [{
+                "label": "艺名",
+                "raw": "小艺",
+                "channel_id": -100202,
+                "channel_message_id": 7,
+                "created_at": 1,
+            }]
+        }
+
+        with (
+            patch.object(publish, "_load_keyword_map", return_value=keyword_data),
+            patch.object(publish, "_load_checkin_posts", return_value={"posts": {}}),
+        ):
+            posts = publish._load_collection_display_posts(config)
+
+        self.assertEqual(publish._collection_display_channel_id(config), -100202)
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0]["channel_id"], -100202)
+        self.assertEqual(posts[0]["message_id"], 7)
+
+    def test_promoted_backup_repairs_teacher_roster_indexes(self):
+        """A recorded backup promotion must restore ``老师列表`` immediately."""
+        old_channel_id = -100101
+        promoted_channel_id = -100202
+        config = {
+            "channel_id": promoted_channel_id,
+            "channel_change_history": [{
+                "old_channel_id": old_channel_id,
+                "new_channel_id": promoted_channel_id,
+            }],
+            "collection_display_label": "艺名",
+            "collection_display_group_label": "区域",
+            "collection_display_subgroup_label": "课费",
+        }
+        keyword_data = {
+            "小艺": [{
+                "label": "艺名",
+                "raw": "小艺",
+                "channel_id": old_channel_id,
+                "channel_message_id": 99,
+                "created_at": 1,
+            }],
+            "上海": [{
+                "label": "区域",
+                "raw": "上海",
+                "channel_id": old_channel_id,
+                "channel_message_id": 99,
+                "created_at": 1,
+            }],
+            "1000": [{
+                "label": "课费",
+                "raw": "1000",
+                "channel_id": old_channel_id,
+                "channel_message_id": 99,
+                "created_at": 1,
+            }],
+        }
+        checkin_data = {
+            "posts": {
+                f"{old_channel_id}:99": {
+                    "channel_id": old_channel_id,
+                    "message_id": 99,
+                    "fields": {"艺名": ["小艺"]},
+                    "checkins": {},
+                }
+            }
+        }
+        reports_data = {"reports": {}}
+        user_posts = []
+        backup_map = {
+            "mappings": {
+                f"{old_channel_id}:99": {
+                    "backup_channel_id": promoted_channel_id,
+                    "backup_message_id": 7,
+                }
+            }
+        }
+
+        with (
+            patch.object(publish, "_load_backup_post_map", return_value=backup_map),
+            patch.object(publish, "_load_comment_reports", return_value=reports_data),
+            patch.object(publish, "_save_comment_reports"),
+            patch.object(publish, "_load_keyword_map", return_value=keyword_data),
+            patch.object(publish, "_save_keyword_map"),
+            patch.object(publish, "_load_checkin_posts", return_value=checkin_data),
+            patch.object(publish, "_save_checkin_posts"),
+            patch.object(publish, "_load_comment_map", return_value={}),
+            patch.object(publish, "load_json", return_value=user_posts),
+            patch.object(publish, "save_json"),
+        ):
+            catalog = publish._teacher_list_catalog(config)
+
+        self.assertEqual(keyword_data["小艺"][0]["channel_id"], promoted_channel_id)
+        self.assertEqual(keyword_data["小艺"][0]["channel_message_id"], 7)
+        self.assertNotIn(f"{old_channel_id}:99", checkin_data["posts"])
+        self.assertIn(f"{promoted_channel_id}:7", checkin_data["posts"])
+        self.assertEqual(catalog[0]["name"], "上海")
+        self.assertEqual(catalog[0]["secondary"][0]["name"], "1000")
+        self.assertEqual(catalog[0]["secondary"][0]["posts"][0]["message_id"], 7)
+
+
 if __name__ == "__main__":
     unittest.main()

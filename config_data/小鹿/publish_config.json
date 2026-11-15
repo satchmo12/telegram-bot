@@ -63,5 +63,12 @@
     "user_mark_labels": [],
     "channel_post_write_report_enabled": false,
     "input_search_enabled": false,
-    "input_search_restore_private_forward": false
+    "input_search_restore_private_forward": false,
+    "bot_publish_rule_enabled": false,
+    "bot_publish_rule_fields": [],
+    "submission_targets": [],
+    "submission_target_next_id": 1,
+    "keyword_search_channel": "main",
+    "checkin_channel": "main",
+    "collection_display_channel": "main"
 }

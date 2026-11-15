@@ -1,5 +1,5 @@
 {
-    "channel_id": -1002667629429,
+    "channel_id": -1001496240512,
     "review_enabled": true,
     "daily_limit": 0,
     "ads_enabled": false,
@@ -115,9 +115,9 @@
         }
     ],
     "pending_history_post_migration": {
-        "old_channel_id": -1002934622997,
-        "new_channel_id": -1002667629429,
-        "changed_at": 1794280866
+        "old_channel_id": -1002667629429,
+        "new_channel_id": -1001496240512,
+        "changed_at": 1794722145
     },
     "channel_change_history": [
         {
@@ -134,6 +134,11 @@
             "old_channel_id": -1002934622997,
             "new_channel_id": -1002667629429,
             "changed_at": 1794280866
+        },
+        {
+            "old_channel_id": -1002667629429,
+            "new_channel_id": -1001496240512,
+            "changed_at": 1794722145
         }
     ],
     "keyword_group_reply_enabled": true,
@@ -197,11 +202,15 @@
         {
             "id": 1,
             "name": "默认频道",
-            "channel_id": -1002667629429,
+            "channel_id": -1002812766397,
             "enabled": true
         }
     ],
     "submission_target_next_id": 2,
     "bot_publish_rule_enabled": false,
-    "bot_publish_rule_fields": []
+    "bot_publish_rule_fields": [],
+    "collection_display_channel": "main",
+    "keyword_search_channel": "main",
+    "checkin_channel": "main",
+    "backup_channel_routes": {}
 }
