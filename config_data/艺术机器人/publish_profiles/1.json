@@ -126,5 +126,9 @@
     "input_search_enabled": false,
     "input_search_restore_private_forward": false,
     "bot_publish_rule_enabled": false,
-    "bot_publish_rule_fields": []
+    "bot_publish_rule_fields": [
+        "艺名",
+        "联系",
+        "区域"
+    ]
 }

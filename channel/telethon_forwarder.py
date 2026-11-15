@@ -5,6 +5,7 @@ import os
 from types import SimpleNamespace
 from typing import Dict, List, Any, TYPE_CHECKING
 import re
+import time
 import warnings
 import difflib
 
@@ -108,6 +109,7 @@ def get_active_session_client(bot_name: str, session_name: str):
 HISTORY_REQUESTS_FILE = "data/history_forward_requests.json"
 HISTORY_STATE_FILE = "data/history_forward_state.json"
 PUBLISH_CONFIG_FILE = "config_data/publish_config.json"
+FORWARD_USER_CONFIG_FILE = "config_data/forward_config_users_telethon.json"
 
 LINK_RE = re.compile(r"(?i)(https?://[^\s)\]}>]+|t\.me/[^\s)\]}>]+|www\.[^\s)\]}>]+)")
 
@@ -892,6 +894,57 @@ def _set_history_max_id(state: dict, key: str, msg_id: int):
     if int(msg_id) > current:
         record["history_max_id"] = int(msg_id)
     keys[key] = record
+
+
+def _history_daily_limit(rule: dict) -> int:
+    try:
+        return max(0, int((rule or {}).get("history_daily_limit", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _history_daily_sent_count(state: dict, key: str) -> int:
+    today = time.strftime("%Y-%m-%d", time.localtime())
+    counters = state.setdefault("history_daily_counts", {})
+    record = counters.get(key)
+    if not isinstance(record, dict) or record.get("date") != today:
+        record = {"date": today, "count": 0}
+        counters[key] = record
+    try:
+        return max(0, int(record.get("count", 0) or 0))
+    except (TypeError, ValueError):
+        record["count"] = 0
+        return 0
+
+
+def _increment_history_daily_sent_count(state: dict, key: str) -> int:
+    count = _history_daily_sent_count(state, key) + 1
+    state["history_daily_counts"][key]["count"] = count
+    return count
+
+
+def _switch_completed_history_rule_to_listen(req: dict) -> None:
+    """Turn a completed historical rule into live listening when requested."""
+    if not bool((req or {}).get("auto_listen_on_complete", True)):
+        return
+    user_id = str((req or {}).get("user_id", "") or "")
+    try:
+        rule_index = int((req or {}).get("rule_index", -1))
+    except (TypeError, ValueError):
+        return
+    if not user_id or rule_index < 0:
+        return
+    data = load_json(FORWARD_USER_CONFIG_FILE)
+    users = data.get("users", {}) if isinstance(data, dict) else {}
+    user_config = users.get(user_id) if isinstance(users, dict) else None
+    rules = user_config.get("forward_rules") if isinstance(user_config, dict) else None
+    if not isinstance(rules, list) or rule_index >= len(rules):
+        return
+    rule = rules[rule_index]
+    if not isinstance(rule, dict) or str(rule.get("mode", "listen") or "listen").lower() == "listen":
+        return
+    rule["mode"] = "listen"
+    save_json(FORWARD_USER_CONFIG_FILE, data)
 
 
 def _rule_message_map_key(session_name: str, source_id, target_id, rule: dict) -> str:
@@ -1915,22 +1968,61 @@ async def _process_history_requests():
             min_id = int(start_id) - 1 if start_id else None
             max_id = int(end_id) + 1 if end_id else None
             speed = _parse_speed(rule.get("speed", ""))
+            daily_limit = _history_daily_limit(rule)
+            # Older queued tasks did not carry this marker. Treat them as a
+            # newly requested explicit range once, rather than letting a
+            # stale global listener cursor discard them.
+            reset_history_cursor = bool(req.get("reset_history_cursor", True))
+            raw_cursors = req.get("history_cursors")
+            history_cursors = raw_cursors if isinstance(raw_cursors, dict) else {}
+            quota_reached = False
 
             # print(f"🚀 开始历史转发: session={session_name} source={source_id} targets={targets}")
             for target_id in targets:
+                if quota_reached:
+                    break
                 key = f"{session_name}:{source_id}:{target_id}"
                 mapping_key = _rule_message_map_key(session_name, source_id, target_id, rule)
                 history_max_id = _get_history_max_id(state, key)
-                effective_min_id = min_id
-                if history_max_id:
-                    effective_min_id = max(effective_min_id or 0, history_max_id)
+                try:
+                    target_cursor = max(
+                        0,
+                        int(
+                            history_cursors.get(
+                                str(target_id),
+                                # Compatibility with a task retained by the
+                                # first daily-limit implementation.
+                                req.get("history_cursor", 0),
+                            )
+                            or 0
+                        ),
+                    )
+                except (TypeError, ValueError):
+                    target_cursor = 0
+                # The first execution of a manually selected range ignores an
+                # older cursor. Subsequent daily batches resume from the
+                # cursor saved for this target while the request was running.
+                effective_min_id = (
+                    max(min_id or 0, target_cursor)
+                    if target_cursor
+                    else (
+                        min_id
+                        if reset_history_cursor and start_id
+                        else max(min_id or 0, history_max_id or 0)
+                    )
+                )
+                daily_sent = _history_daily_sent_count(state, key)
+                if daily_limit and daily_sent >= daily_limit:
+                    quota_reached = True
+                    break
 
                 recent_ids = set(_recent_ids_for_key(state, key))
                 current_gid = None
                 current_group = []
 
                 async def _flush_group(group_msgs):
-                    if not group_msgs:
+                    nonlocal daily_sent, quota_reached
+                    if not group_msgs or quota_reached:
                         return
                     # 若整组都已发送，直接跳过
                     if all(int(m.id) in recent_ids for m in group_msgs):
@@ -1993,6 +2085,13 @@ async def _process_history_requests():
                             _append_recent_id(state, key, mid)
                             recent_ids.add(mid)
                         _set_history_max_id(state, key, max_id)
+                        history_cursors[str(target_id)] = max(
+                            target_cursor, max_id
+                        )
+                        req["history_cursors"] = history_cursors
+                        daily_sent = _increment_history_daily_sent_count(state, key)
+                        if daily_limit and daily_sent >= daily_limit:
+                            quota_reached = True
                         await asyncio.sleep(speed)
                     except Exception as e:
                         print(f"⚠️ 历史转发失败: {e} (来源: {source_id} → 目标: {target_id})")
@@ -2000,7 +2099,7 @@ async def _process_history_requests():
                 async for message in client.iter_messages(
                     source_id, min_id=effective_min_id, max_id=max_id, reverse=True
                 ):
-                    if not _history_request_is_active(request_id):
+                    if quota_reached or not _history_request_is_active(request_id):
                         break
                     gid = getattr(message, "grouped_id", None)
                     if gid:
@@ -2076,12 +2175,27 @@ async def _process_history_requests():
                         _append_recent_id(state, key, int(message.id))
                         recent_ids.add(int(message.id))
                         _set_history_max_id(state, key, int(message.id))
+                        history_cursors[str(target_id)] = max(
+                            target_cursor, int(message.id)
+                        )
+                        target_cursor = history_cursors[str(target_id)]
+                        req["history_cursors"] = history_cursors
+                        daily_sent = _increment_history_daily_sent_count(state, key)
+                        if daily_limit and daily_sent >= daily_limit:
+                            quota_reached = True
                         await asyncio.sleep(speed)
                     except Exception as e:
                         print(f"⚠️ 历史转发失败: {e} (来源: {source_id} → 目标: {target_id})")
 
-                if current_group:
+                if current_group and not quota_reached:
                     await _flush_group(current_group)
+            # The request starts from its explicit range only once. Retained
+            # requests (daily quota reached) resume from the recorded cursor.
+            req["reset_history_cursor"] = False
+            if quota_reached:
+                remaining.append(req)
+            else:
+                _switch_completed_history_rule_to_listen(req)
             # print(f"✅ 历史转发完成: session={session_name} source={source_id}")
         except Exception as e:
             print(f"⚠️ 历史转发异常: {e}")

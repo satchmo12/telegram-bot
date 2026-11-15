@@ -627,6 +627,12 @@ def _new_rule_default(user_id: str, *, source_id=None, source_name: str = "", se
         "listen_outgoing": True,
         "start_id": "",
         "end_id": "",
+        # 0 means unlimited. A positive value limits history forwarding to
+        # that many source posts per calendar day.
+        "history_daily_limit": 0,
+        # Once the selected history range reaches the then-current newest
+        # post, continue with normal live-message listening.
+        "history_auto_listen": True,
         "include_words": [],
         "replace_words": [],
         "block_words": [],
@@ -894,6 +900,18 @@ def _build_edit_menu_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+def _history_daily_limit_value(rule: dict) -> int:
+    try:
+        return max(0, int((rule or {}).get("history_daily_limit", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _history_daily_limit_label(rule: dict) -> str:
+    limit = _history_daily_limit_value(rule)
+    return "不限" if limit <= 0 else f"{limit} 条"
+
+
 def _build_rule_panel_keyboard(
     context: ContextTypes.DEFAULT_TYPE, index: int, rule: dict
 ) -> InlineKeyboardMarkup:
@@ -944,6 +962,16 @@ def _build_rule_panel_keyboard(
             ),
         ],
         [InlineKeyboardButton("设置开始和结束消息ID", callback_data=f"{CALLBACK_PREFIX}:panel:range:{index}")],
+        [InlineKeyboardButton(
+            f"📅 每日历史上限：{_history_daily_limit_label(rule)}",
+            callback_data=f"{CALLBACK_PREFIX}:panel:history_daily_limit:{index}",
+        )],
+        [
+            InlineKeyboardButton(
+                f"完成后转监听：{'✅ 开启' if bool(rule.get('history_auto_listen', True)) else '关闭'}",
+                callback_data=f"{CALLBACK_PREFIX}:panel:history_auto_listen_toggle:{index}",
+            ),
+        ],
         [
             InlineKeyboardButton(
                 f"投稿机器人: {'✅ 开启' if submit_to_bot else '开启'}",
@@ -1025,6 +1053,8 @@ def _format_rule_panel_text(
         lines.append(f"协议号：{session_name}")
     lines += [
         f"开始/结束消息ID：{start_id} / {end_id}",
+        f"每日历史上限：{_history_daily_limit_label(rule)}",
+        f"完成后自动转监听：{'开启' if bool(rule.get('history_auto_listen', True)) else '关闭'}",
         f"包含词：{include_words}",
         f"屏蔽词：{block_words}",
         f"替换词：{replace_words}",
@@ -1117,6 +1147,13 @@ def _update_rule_field(context: ContextTypes.DEFAULT_TYPE, user_id: str, index: 
         rule["start_id"] = value
     elif field == "end_id":
         rule["end_id"] = value
+    elif field == "history_daily_limit":
+        try:
+            rule["history_daily_limit"] = max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return False
+    elif field == "history_auto_listen":
+        rule["history_auto_listen"] = bool(value)
     elif field == "include_words":
         rule["include_words"] = value
     elif field == "replace_words":
@@ -1400,6 +1437,14 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _update_rule_field(context, user_id, idx, "submit_to_bot", True)
         elif sub == "submit_bot_off":
             _update_rule_field(context, user_id, idx, "submit_to_bot", False)
+        elif sub == "history_auto_listen_toggle":
+            _update_rule_field(
+                context,
+                user_id,
+                idx,
+                "history_auto_listen",
+                not bool(rule.get("history_auto_listen", True)),
+            )
         elif sub == "history_start":
             sources = rule.get("sources", []) or []
             targets = rule.get("targets", []) or []
@@ -1428,6 +1473,12 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "rule_index": idx,
                     "rule": history_rule,
                     "request_id": request_id,
+                    # Explicitly restart from the selected start range once;
+                    # later daily batches continue from the saved cursor.
+                    "reset_history_cursor": True,
+                    "auto_listen_on_complete": bool(
+                        history_rule.get("history_auto_listen", True)
+                    ),
                     "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
             )
@@ -1443,6 +1494,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # trigger Telegram's “Message is not modified” error. Send an
             # independent acknowledgement instead and retain the panel.
             range_text = f"{start_id or '最早'} ～ {end_id or '最新'}"
+            await query.answer("已加入历史转发队列。")
             return await query.message.reply_text(
                 f"✅ 历史转发任务已加入队列（任务 {request_id[:8]}）。\n"
                 f"消息范围：{range_text}\n"
@@ -1483,7 +1535,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "请选择要配置的小号：",
                 reply_markup=_build_session_select_keyboard(sessions),
             )
-        elif sub in {"remark", "range", "source", "target", "include", "replace", "block", "cut", "suffix", "media", "speed"}:
+        elif sub in {"remark", "range", "history_daily_limit", "source", "target", "include", "replace", "block", "cut", "suffix", "media", "speed"}:
             context.user_data["channel_config_panel"] = {
                 "index": idx,
                 "field": sub,
@@ -1491,6 +1543,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             prompt_map = {
                 "remark": "请输入备注（频道名称）：",
                 "range": "请输入开始与结束消息ID（例如：100 200，或仅填一个数字）：",
+                "history_daily_limit": "请输入每天最多转发多少条历史消息。发送 0 表示不限：",
                 "source": "请输入监听频道ID（数字ID）：",
                 "target": "请输入目标频道ID（数字ID）：",
                 "include": "请输入包含词（多个用逗号分隔）：",
@@ -1974,6 +2027,11 @@ async def _handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 return True
             _update_rule_field(context, user_id, idx, "start_id", start_id)
             _update_rule_field(context, user_id, idx, "end_id", end_id)
+        elif field == "history_daily_limit":
+            if not text.isdigit() or int(text) < 0:
+                await update.message.reply_text("❗ 请输入 0 或正整数，例如：100。")
+                return True
+            _update_rule_field(context, user_id, idx, "history_daily_limit", int(text))
         elif field == "source":
             try:
                 source_id = int(text)

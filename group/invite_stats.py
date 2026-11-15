@@ -380,7 +380,7 @@ async def _credit_invite_join(
     link_map_data = load_invite_link_map()
     owner_info = (link_map_data.get(str(chat_id), {}) or {}).get(used_invite_link)
     if not isinstance(owner_info, dict):
-        print(f"[邀请积分] 未找到邀请链接映射 chat={chat_id} link={used_invite_link[:48]}")
+        # print(f"[邀请积分] 未找到邀请链接映射 chat={chat_id} link={used_invite_link[:48]}")
         return []
     inviter_id = int(owner_info.get("inviter_id", 0) or 0)
     inviter_name = str(owner_info.get("inviter_name") or "未知用户")

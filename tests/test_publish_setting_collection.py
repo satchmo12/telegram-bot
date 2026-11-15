@@ -439,6 +439,88 @@ class PublishSettingPromotionRecoveryTests(unittest.TestCase):
     def tearDown(self):
         publish._PROMOTED_BACKUP_REPAIR_CACHE.clear()
 
+    def test_submission_search_allows_missing_discussion_mapping(self):
+        """A promoted post remains submittable through forwarding fallback."""
+        msg = SimpleNamespace(text="小艺", reply_text=AsyncMock())
+        update = SimpleNamespace(message=msg)
+        context = SimpleNamespace(user_data={publish.KEYWORD_INPUT_KEY: True})
+        route = {
+            "label": "艺名",
+            "raw": "小艺",
+            "channel_id": -100202,
+            "channel_message_id": 7,
+        }
+
+        async def search():
+            with (
+                patch.object(
+                    publish,
+                    "_restore_missing_discussion_mappings_for_keyword",
+                    new=AsyncMock(return_value=(0, 1)),
+                ),
+                patch.object(publish, "_find_keyword_routes", return_value=[route]) as find_routes,
+                patch.object(
+                    publish, "_route_message_link", new=AsyncMock(return_value="https://t.me/c/202/7")
+                ),
+            ):
+                consumed = await publish._handle_keyword_search_input(update, context)
+                return consumed, find_routes
+
+        consumed, find_routes = asyncio.run(search())
+        self.assertTrue(consumed)
+        find_routes.assert_called_once_with("小艺", require_discussion=False)
+        self.assertEqual(
+            context.user_data[publish.COMMENT_TARGET_KEY],
+            {"channel_id": -100202, "message_id": 7},
+        )
+        msg.reply_text.assert_awaited_once()
+
+    def test_missing_discussion_mapping_still_forwards_submission(self):
+        """No native comment is required when the promoted post has no mapping."""
+        submission = {
+            "user_chat_id": 12345,
+            "user_message_id": 99,
+            "comment_target": {"channel_id": -100202, "message_id": 7},
+        }
+        config = {"forward_channel_id": -100303}
+        forwarded = SimpleNamespace(message_id=88, scheduled=False)
+
+        async def publish_comment():
+            with (
+                patch.object(publish, "_load_comment_map", return_value={}),
+                patch.object(
+                    publish,
+                    "_refresh_discussion_mapping_for_post",
+                    new=AsyncMock(
+                        side_effect=RuntimeError(
+                            "未能重新获取该主帖的讨论组消息。"
+                        )
+                    ),
+                ) as refresh_mapping,
+                patch.object(
+                    publish,
+                    "_copy_submission_to_channel",
+                    new=AsyncMock(return_value=forwarded),
+                ) as copy_to_channel,
+                patch.object(publish, "_append_report_comment") as append_report,
+            ):
+                result = await publish._publish_comment_and_forward(
+                    SimpleNamespace(), submission, config
+                )
+                return result, refresh_mapping, copy_to_channel, append_report
+
+        result, refresh_mapping, copy_to_channel, append_report = asyncio.run(
+            publish_comment()
+        )
+
+        self.assertIs(result, forwarded)
+        refresh_mapping.assert_awaited_once()
+        copy_to_channel.assert_awaited_once()
+        self.assertEqual(copy_to_channel.await_args.args[2], -100303)
+        append_report.assert_called_once_with(submission, forwarded)
+        self.assertTrue(submission["comment_report_only"])
+        self.assertIn("讨论组消息", submission["comment_report_only_reason"])
+
     def test_promoting_backup_updates_default_submission_target(self):
         """Promotion must not leave normal submissions in the retired channel."""
         config = {

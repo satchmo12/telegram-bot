@@ -7195,13 +7195,13 @@ async def _restore_missing_discussion_mappings_for_keyword(
     context: ContextTypes.DEFAULT_TYPE,
     query: str,
 ) -> tuple[int, int]:
-    """Recover native discussion parents for matching but unlinked main posts.
+    """Best-effort recovery of native discussion parents for matched posts.
 
     A channel post can be indexed before its automatic forward reaches the
     linked discussion group, or that update can be missed during a restart.
-    Ordinary “查找收录标签” can still open such a post, but “我要投稿” needs the
-    discussion parent in order to publish a native comment.  Resolve only those
-    missing parents on demand through the configured protocol account.
+    A recovered parent lets the submission appear as a native comment.  Its
+    absence must not block a submission, though: approval will skip the native
+    comment and still publish the copy to the forwarding channel.
     """
     candidates = _find_keyword_routes(
         query,
@@ -11153,7 +11153,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data[KEYWORD_RESULTS_PAGE_KEY] = page
         await query.answer()
         return await query.edit_message_text(
-            f"找到 {len(routes)} 个可评论帖子，请选择（第 {page}/{pages} 页）：",
+            f"找到 {len(routes)} 个收录帖子，请选择（第 {page}/{pages} 页）：",
             reply_markup=_keyword_submission_results_keyboard(routes, page),
         )
 
@@ -13963,9 +13963,9 @@ async def _handle_keyword_search_input(update: Update, context: ContextTypes.DEF
         context.user_data.pop(KEYWORD_RESULTS_PAGE_KEY, None)
         await msg.reply_text("✅ 已取消关键词搜索。")
         return True
-    # “我要投稿” must have a linked discussion parent.  If an otherwise
-    # indexed post missed that automatic-forward update, recover the mapping
-    # once here instead of hiding the post while ordinary tag search can find it.
+    # Prefer a linked-discussion parent so approved content can become a
+    # native comment.  Recovery is best-effort: a missing mapping must not hide
+    # an otherwise indexed post, because approval can still forward the content.
     recovered, recovery_failed = await _restore_missing_discussion_mappings_for_keyword(
         context, query
     )
@@ -13975,15 +13975,20 @@ async def _handle_keyword_search_input(update: Update, context: ContextTypes.DEF
     # A new keyword invalidates buttons generated for the previous one.
     context.user_data.pop(KEYWORD_RESULTS_KEY, None)
     context.user_data.pop(KEYWORD_RESULTS_PAGE_KEY, None)
-    routes = _find_keyword_routes(query)
+    # A discussion mapping is preferred, but it is not required to accept a
+    # submission. After a main/backup promotion a historical post can retain
+    # its keyword index before its linked-discussion parent is recoverable.
+    # The approval flow already falls back to the forwarding channel and the
+    # report when that parent is missing, so keep this collected post usable.
+    routes = _find_keyword_routes(query, require_discussion=False)
     if not routes:
         if recovery_failed:
             await msg.reply_text(
-                "❗ 找到了收录帖子，但它的评论区映射尚未恢复。"
-                "机器人正在初始化协议号，请稍后重新点击“我要投稿”并搜索。"
+                "❗ 找到了收录帖子，但暂时无法恢复它的评论区映射；"
+                "请稍后重试，或联系管理员检查频道讨论组。"
             )
         else:
-            await msg.reply_text("❗ 未找到可评论的对应帖子。请检查关键词，或等待管理员发布带关键词的新帖子后重试。")
+            await msg.reply_text("❗ 未找到对应收录帖子。请检查关键词，或等待管理员发布带关键词的新帖子后重试。")
         return True
     if len(routes) == 1:
         route = routes[0]
@@ -14007,7 +14012,7 @@ async def _handle_keyword_search_input(update: Update, context: ContextTypes.DEF
     context.user_data[KEYWORD_RESULTS_PAGE_KEY] = 1
     _visible_routes, page, pages, _start = _keyword_result_page(routes, 1)
     await msg.reply_text(
-        f"找到 {len(routes)} 个可评论帖子，请选择（第 {page}/{pages} 页）：",
+        f"找到 {len(routes)} 个收录帖子，请选择（第 {page}/{pages} 页）：",
         reply_markup=_keyword_submission_results_keyboard(routes, page),
     )
     return True

@@ -232,3 +232,174 @@ class ProtocolSubmissionHistoryTests(IsolatedAsyncioTestCase):
             )
 
         self.assertEqual([call.args[2].id for call in forward.await_args_list], [2, 3, 4])
+
+class ProtocolHistoryTargetRangeTests(IsolatedAsyncioTestCase):
+    async def test_explicit_target_history_range_ignores_later_cursor(self):
+        """A requested lower range must not be hidden by listener progress."""
+        import channel.telethon_forwarder as forwarder
+
+        seen = {}
+
+        class Client:
+            async def iter_messages(self, source_id, **kwargs):
+                seen["source_id"] = source_id
+                seen.update(kwargs)
+                if False:
+                    yield None
+
+        request = {
+            "user_id": "1",
+            "request_id": "request-1",
+            "rule": {
+                "session_name": "worker",
+                "sources": [-1001],
+                "targets": [-1002],
+                "start_id": "2200",
+                "end_id": "3000",
+                "filter": "all",
+            },
+        }
+        state = {
+            "keys": {
+                "worker:-1001:-1002": {"history_max_id": 551819}
+            },
+            "message_maps": {},
+        }
+
+        with (
+            patch.object(forwarder, "load_json", return_value=[request]),
+            patch.object(forwarder, "save_json"),
+            patch.object(forwarder, "_load_history_state", return_value=state),
+            patch.object(forwarder, "_save_history_state"),
+            patch.object(forwarder, "_get_api_creds", return_value=(1, "hash")),
+            patch.object(forwarder, "_ensure_client", new=AsyncMock(return_value=Client())),
+            patch.object(forwarder, "_history_request_is_active", return_value=True),
+            patch.object(forwarder, "get_runtime_bot_name", return_value="test-bot"),
+        ):
+            await forwarder._process_history_requests()
+
+        self.assertEqual(seen["source_id"], -1001)
+        self.assertEqual(seen["min_id"], 2199)
+        self.assertEqual(seen["max_id"], 3001)
+        self.assertTrue(seen["reverse"])
+
+class ProtocolHistoryDailyLimitTests(IsolatedAsyncioTestCase):
+    async def test_daily_limit_retains_request_and_resumes_from_new_cursor(self):
+        """A daily cap pauses one task instead of forwarding the whole range."""
+        import channel.telethon_forwarder as forwarder
+
+        seen = {}
+        sent = []
+
+        class Client:
+            async def iter_messages(self, source_id, **kwargs):
+                seen["source_id"] = source_id
+                seen.update(kwargs)
+                for message_id in (1, 2, 3):
+                    if message_id <= (kwargs.get("min_id") or 0):
+                        continue
+                    yield SimpleNamespace(
+                        id=message_id,
+                        message=f"post {message_id}",
+                        entities=[],
+                        media=None,
+                        grouped_id=None,
+                    )
+
+            async def send_message(self, _target_id, text, **_kwargs):
+                sent.append(text)
+                return SimpleNamespace(id=100 + len(sent))
+
+        request = {
+            "user_id": "1",
+            "rule_index": 0,
+            "request_id": "request-1",
+            "reset_history_cursor": True,
+            "auto_listen_on_complete": True,
+            "rule": {
+                "session_name": "worker",
+                "sources": [-1001],
+                "targets": [-1002],
+                "start_id": "1",
+                "history_daily_limit": 2,
+                "filter": "all",
+            },
+        }
+        state = {
+            "keys": {"worker:-1001:-1002": {"history_max_id": 9999}},
+            "message_maps": {},
+        }
+        saved_requests = []
+
+        def save_json(_path, value):
+            saved_requests.append(value)
+
+        with (
+            patch.object(forwarder, "load_json", return_value=[request]),
+            patch.object(forwarder, "save_json", side_effect=save_json),
+            patch.object(forwarder, "_load_history_state", return_value=state),
+            patch.object(forwarder, "_save_history_state"),
+            patch.object(forwarder, "_get_api_creds", return_value=(1, "hash")),
+            patch.object(forwarder, "_ensure_client", new=AsyncMock(return_value=Client())),
+            patch.object(forwarder, "_history_request_is_active", return_value=True),
+            patch.object(forwarder, "get_runtime_bot_name", return_value="test-bot"),
+            patch("channel.telethon_forwarder.asyncio.sleep", new=AsyncMock()),
+        ):
+            await forwarder._process_history_requests()
+
+        self.assertEqual(seen["min_id"], 0)
+        self.assertEqual(sent, ["post 1", "post 2"])
+        self.assertEqual(request["history_cursors"]["-1002"], 2)
+        self.assertEqual(state["history_daily_counts"]["worker:-1001:-1002"]["count"], 2)
+        self.assertFalse(request["reset_history_cursor"])
+        self.assertEqual(saved_requests[-1], [request])
+
+    async def test_completed_history_switches_rule_to_live_listen(self):
+        """After catching up, the configured rule becomes a live listener."""
+        import channel.telethon_forwarder as forwarder
+
+        class Client:
+            async def iter_messages(self, _source_id, **_kwargs):
+                if False:
+                    yield None
+
+        request = {
+            "user_id": "1",
+            "rule_index": 0,
+            "request_id": "request-1",
+            "reset_history_cursor": True,
+            "auto_listen_on_complete": True,
+            "rule": {
+                "session_name": "worker",
+                "sources": [-1001],
+                "targets": [-1002],
+                "start_id": "1",
+                "filter": "all",
+            },
+        }
+        stored_rules = {
+            "users": {"1": {"forward_rules": [{"mode": "history"}]}}
+        }
+        state = {"keys": {}, "message_maps": {}}
+        writes = []
+
+        def load_json(path):
+            return [request] if path == forwarder.HISTORY_REQUESTS_FILE else stored_rules
+
+        def save_json(path, value):
+            writes.append((path, value))
+
+        with (
+            patch.object(forwarder, "load_json", side_effect=load_json),
+            patch.object(forwarder, "save_json", side_effect=save_json),
+            patch.object(forwarder, "_load_history_state", return_value=state),
+            patch.object(forwarder, "_save_history_state"),
+            patch.object(forwarder, "_get_api_creds", return_value=(1, "hash")),
+            patch.object(forwarder, "_ensure_client", new=AsyncMock(return_value=Client())),
+            patch.object(forwarder, "_history_request_is_active", return_value=True),
+            patch.object(forwarder, "get_runtime_bot_name", return_value="test-bot"),
+        ):
+            await forwarder._process_history_requests()
+
+        self.assertEqual(stored_rules["users"]["1"]["forward_rules"][0]["mode"], "listen")
+        self.assertTrue(any(path == forwarder.FORWARD_USER_CONFIG_FILE for path, _ in writes))
