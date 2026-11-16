@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 from telegram import Update
 
 import channel.publish_setting as publish
+import channel.publish_roster as roster
 
 
 class PublishSettingCollectionTests(unittest.TestCase):
@@ -151,6 +152,61 @@ class PublishSettingCollectionTests(unittest.TestCase):
         self.assertLess(text.index("1. 甲"), text.index("2. 丙"))
         self.assertLess(text.index("2. 丙"), text.index("〔徐汇〕"))
 
+    def test_teacher_categories_are_stably_sorted_by_pinyin(self):
+        """Deleting a newer post must not change category-button indexes."""
+        config = {
+            "collection_display_group_label": "城市",
+            "collection_display_subgroup_label": "区域",
+        }
+        posts = [
+            {"channel_id": -1001, "message_id": 30, "created_at": 30, "fields": {"城市": ["上海"], "区域": ["徐汇"]}},
+            {"channel_id": -1001, "message_id": 20, "created_at": 20, "fields": {"城市": ["北京"], "区域": ["朝阳"]}},
+            {"channel_id": -1001, "message_id": 10, "created_at": 10, "fields": {"城市": ["上海"], "区域": ["浦东"]}},
+        ]
+
+        with patch.object(roster, "_load_collection_display_posts", return_value=posts):
+            catalog = publish._teacher_list_catalog(config)
+
+        self.assertEqual([item["name"] for item in catalog], ["北京", "上海"])
+        self.assertEqual(
+            [item["name"] for item in catalog[1]["secondary"]],
+            ["浦东", "徐汇"],
+        )
+
+        filtered = publish._filter_collection_display_posts(posts, config, "")
+        self.assertEqual(
+            [(item["primary"], item["secondary"]) for item in filtered],
+            [("北京", "朝阳"), ("上海", "浦东"), ("上海", "徐汇")],
+        )
+
+    def test_delete_menu_offers_delete_all_for_the_current_category(self):
+        config = {
+            "collection_display_text": "收录老师",
+            "collection_display_group_label": "城市",
+            "collection_display_subgroup_label": "区域",
+            "collection_display_label": "艺名",
+        }
+        catalog = [{
+            "name": "上海",
+            "secondary": [{
+                "name": "徐汇",
+                "posts": [
+                    {"channel_id": -1001, "message_id": 1, "fields": {"艺名": ["甲"]}},
+                    {"channel_id": -1001, "message_id": 2, "fields": {"艺名": ["乙"]}},
+                ],
+            }],
+        }]
+        _text, keyboard = publish._teacher_list_delete_menu_payload(
+            config, catalog, 0, 0, 0
+        )
+        callbacks = [
+            button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+            if button.callback_data
+        ]
+        self.assertIn("teacher_list:delete_all_confirm:0:0:0", callbacks)
+
     def test_teacher_category_filter_requires_at_least_two_characters(self):
         config = {
             "collection_display_group_label": "城市",
@@ -198,7 +254,7 @@ class PublishSettingCollectionTests(unittest.TestCase):
                 "fields": {"城市": ["上海"], "区域": ["浦东"], "艺名": ["新艺名"]},
             }
         ]
-        with patch.object(publish, "_load_collection_display_posts", return_value=updated_items):
+        with patch.object(roster, "_load_collection_display_posts", return_value=updated_items):
             refreshed = publish._refresh_teacher_filter_result(config, state)
 
         self.assertEqual(len(refreshed["items"]), 1)
@@ -723,8 +779,8 @@ class PublishSettingPromotionRecoveryTests(unittest.TestCase):
         }
 
         with (
-            patch.object(publish, "_load_keyword_map", return_value=keyword_data),
-            patch.object(publish, "_load_checkin_posts", return_value={"posts": {}}),
+            patch.object(roster, "_load_keyword_map", return_value=keyword_data),
+            patch.object(roster, "_load_checkin_posts", return_value={"posts": {}}),
         ):
             posts = publish._load_collection_display_posts(config)
 

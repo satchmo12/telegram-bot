@@ -203,11 +203,11 @@
         {
             "id": 2,
             "name": "福利频道",
-            "channel_id": -1001234567890,
-            "enabled": false
+            "channel_id": -1004479704526,
+            "enabled": true
         }
     ],
-    "submission_target_next_id": 3,
+    "submission_target_next_id": 4,
     "bot_publish_rule_enabled": false,
     "bot_publish_rule_fields": [],
     "backup_channel_routes": {},

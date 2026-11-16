@@ -70,5 +70,6 @@
     "submission_target_next_id": 1,
     "keyword_search_channel": "main",
     "checkin_channel": "main",
-    "collection_display_channel": "main"
+    "collection_display_channel": "main",
+    "backup_channel_routes": {}
 }

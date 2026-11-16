@@ -10,7 +10,7 @@
                     "targets": [],
                     "source_title": "成都【女儿国】老师榜单",
                     "target_title": "",
-                    "enabled": false,
+                    "enabled": true,
                     "mode": "listen",
                     "filter": "all",
                     "exclude_channels": [],
@@ -35,12 +35,12 @@
                 {
                     "name": "上海艺术展览会总榜单",
                     "sources": [
-                        -1001951594315
+                        -1002667629429
                     ],
                     "targets": [],
                     "source_title": "上海艺术展览会总榜单",
                     "target_title": "",
-                    "enabled": false,
+                    "enabled": true,
                     "mode": "listen",
                     "filter": "all",
                     "exclude_channels": [],

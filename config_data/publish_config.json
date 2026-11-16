@@ -67,5 +67,9 @@
     "input_search_enabled": false,
     "input_search_restore_private_forward": false,
     "submission_targets": [],
-    "submission_target_next_id": 1
+    "submission_target_next_id": 1,
+    "backup_channel_routes": {},
+    "keyword_search_channel": "main",
+    "checkin_channel": "main",
+    "collection_display_channel": "main"
 }

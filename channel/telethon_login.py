@@ -1051,6 +1051,11 @@ async def handle_telethon_login_text(update: Update, context: ContextTypes.DEFAU
     state = _LOGIN_STATE.get(uid)
     join_state = _JOIN_STATE.get(uid)
     broadcast_state = _BROADCAST_STATE.get(uid)
+    # A pending “加群” prompt must not hijack replies to forwarded/private
+    # conversations. Those replies belong to the normal private-message flow,
+    # not to a channel ID / username input field.
+    if join_state and getattr(update.message, "reply_to_message", None) is not None:
+        return False
     if not state:
         if not join_state and not broadcast_state:
             return False

@@ -74,6 +74,8 @@ def _new_auction(chat_id: int, owner_id: int) -> dict:
         "entry_cost": 0,
         "stop_bidding_before_min": 0,
         "cover": None,
+        # When enabled, pin both the published auction card and its result.
+        "pin_messages": False,
         "bids": {},  # user_id -> bidder info and their currently frozen high bid
         "post_messages": [],
         "winner": None,
@@ -266,6 +268,7 @@ def _editor_text(record: dict, context: ContextTypes.DEFAULT_TYPE) -> str:
         f"提前停止出价：{int(record.get('stop_bidding_before_min', 0) or 0)} 分钟",
         _anti_sniping_text(record).removeprefix("⏳ "),
         f"封面：{'已设置' if isinstance(record.get('cover'), dict) else '未设置'}",
+        f"消息置顶：{'已开启' if record.get('pin_messages') else '未开启'}",
     ])
 
 
@@ -289,10 +292,14 @@ def _editor_keyboard(record: dict) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🔒 停止出价时间", callback_data=f"{CALLBACK_PREFIX}:field:{aid}:stop_before"),
         ],
         [
-            InlineKeyboardButton("⏱ 延时触发窗口", callback_data=f"{CALLBACK_PREFIX}:field:{aid}:extend_before"),
+            InlineKeyboardButton("⏱ 延时开奖", callback_data=f"{CALLBACK_PREFIX}:field:{aid}:extend_before"),
             InlineKeyboardButton("⏳ 每次延长时间", callback_data=f"{CALLBACK_PREFIX}:field:{aid}:extend_by"),
         ],
         [InlineKeyboardButton("🖼 拍卖封面", callback_data=f"{CALLBACK_PREFIX}:field:{aid}:cover")],
+        [InlineKeyboardButton(
+            f"📌 消息置顶：{'✅' if record.get('pin_messages') else '❌'}",
+            callback_data=f"{CALLBACK_PREFIX}:toggle_pin:{aid}",
+        )],
         [
             InlineKeyboardButton("👁 预览", callback_data=f"{CALLBACK_PREFIX}:preview:{aid}"),
             InlineKeyboardButton("✅ 完成发布", callback_data=f"{CALLBACK_PREFIX}:publish:{aid}"),
@@ -353,6 +360,58 @@ async def _auction_join_markup(context: ContextTypes.DEFAULT_TYPE, record: dict)
     return InlineKeyboardMarkup([[InlineKeyboardButton("💰 点击出价", callback_data=f"{CALLBACK_PREFIX}:open:{record['id']}")]])
 
 
+async def _pin_message_if_enabled(context: ContextTypes.DEFAULT_TYPE, record: dict, message) -> None:
+    """Pin a sent auction message when the auction has pinning enabled.
+
+    Pinning requires the bot to have the group permission. A missing permission
+    must not make publishing or settlement fail, so this is deliberately best
+    effort.
+    """
+    if not record.get("pin_messages") or not message:
+        return
+    try:
+        await context.bot.pin_chat_message(
+            chat_id=record["chat_id"],
+            message_id=message.message_id,
+            disable_notification=True,
+        )
+    except Exception as exc:
+        print(f"置顶拍卖消息失败 auction={record.get('id')}: {exc}")
+
+
+def _auction_message_link(record: dict, post: dict) -> str:
+    """Return Telegram's direct link for an auction post, when possible."""
+    try:
+        message_id = int(post.get("message_id", 0) or 0)
+        chat_id = int(post.get("chat_id", record.get("chat_id", 0)) or 0)
+    except (TypeError, ValueError):
+        return ""
+    if not message_id:
+        return ""
+
+    username = str(post.get("chat_username") or record.get("chat_username") or "").strip().lstrip("@")
+    if username:
+        return f"https://t.me/{username}/{message_id}"
+
+    # Private supergroups use this documented Telegram message-link form.
+    chat_id_text = str(chat_id)
+    if chat_id_text.startswith("-100") and len(chat_id_text) > 4:
+        return f"https://t.me/c/{chat_id_text[4:]}/{message_id}"
+    return ""
+
+
+def _active_auction_records(data: dict, chat_id: int) -> list[dict]:
+    """Open, not-yet-expired auctions in display order for a group."""
+    now = int(time.time())
+    return sorted(
+        (
+            record for record in _records_for_chat(data, chat_id)
+            if record.get("status") == "open" and int(record.get("end_at", 0) or 0) > now
+        ),
+        key=lambda record: int(record.get("end_at", 0) or 0),
+    )
+
+
 async def _refresh_posts(context: ContextTypes.DEFAULT_TYPE, record: dict) -> None:
     markup = await _auction_join_markup(context, record) if record.get("status") == "open" else None
     text = _auction_text(record, context)
@@ -383,12 +442,18 @@ async def _publish(record: dict, context: ContextTypes.DEFAULT_TYPE) -> bool:
     except Exception as exc:
         print(f"发布积分拍卖失败 auction={record.get('id')}: {exc}")
         return False
+    await _pin_message_if_enabled(context, record, message)
     record["status"] = "open"
     record["published_at"] = int(time.time())
+    message_chat = getattr(message, "chat", None)
+    chat_username = str(getattr(message_chat, "username", "") or "").strip().lstrip("@")
+    if chat_username:
+        record["chat_username"] = chat_username
     record["post_messages"] = [{
         "chat_id": int(record["chat_id"]),
         "message_id": int(message.message_id),
         "cover_type": str((record.get("cover") or {}).get("type") or ""),
+        "chat_username": chat_username,
     }]
     return True
 
@@ -425,8 +490,8 @@ async def _send_settlement_announcement(
     result: str,
     *,
     detail_text: str = "",
-) -> None:
-    """Publish the settlement using the configured cover when available.
+):
+    """Publish the settlement and return its primary result message.
 
     Captions are limited to 1024 characters. For a long auction description,
     the cover carries a compact result card and the complete description is
@@ -436,23 +501,25 @@ async def _send_settlement_announcement(
     try:
         sent_cover = False
         if isinstance(cover, dict) and cover.get("type") == "photo" and cover.get("file_id"):
-            await context.bot.send_photo(
+            message = await context.bot.send_photo(
                 chat_id=record["chat_id"], photo=cover["file_id"], caption=result,
                 parse_mode="HTML",
             )
             sent_cover = True
         elif isinstance(cover, dict) and cover.get("type") == "video" and cover.get("file_id"):
-            await context.bot.send_video(
+            message = await context.bot.send_video(
                 chat_id=record["chat_id"], video=cover["file_id"], caption=result,
                 parse_mode="HTML",
             )
             sent_cover = True
         else:
-            await context.bot.send_message(record["chat_id"], result, parse_mode="HTML")
+            message = await context.bot.send_message(record["chat_id"], result, parse_mode="HTML")
         if sent_cover and detail_text and detail_text != result:
             await context.bot.send_message(record["chat_id"], detail_text, parse_mode="HTML")
+        return message
     except Exception as exc:
         print(f"发送拍卖结算公告失败 auction={record.get('id')}: {exc}")
+        return None
 
 
 async def _settle(record: dict, context: ContextTypes.DEFAULT_TYPE, *, cancelled: bool = False) -> None:
@@ -478,9 +545,10 @@ async def _settle(record: dict, context: ContextTypes.DEFAULT_TYPE, *, cancelled
         record, winner, refunded, cancelled=cancelled, caption=has_cover
     )
     detail_text = _settlement_text(record, winner, refunded, cancelled=cancelled)
-    await _send_settlement_announcement(
+    result_message = await _send_settlement_announcement(
         context, record, result, detail_text=detail_text if has_cover else ""
     )
+    await _pin_message_if_enabled(context, record, result_message)
 
 
 async def auction_tick(context: ContextTypes.DEFAULT_TYPE):
@@ -659,7 +727,8 @@ async def _submit_bid(
     required = extra_freeze + entry_cost
     if balance < required:
         return False, (
-            f"❗ 积分不足：本次还需冻结 {extra_freeze} 积分"
+            f"❗ 积分不足： "
+            # 本次还需冻结 {extra_freeze} 积分"
             + (f"，另需参与消耗 {entry_cost} 积分" if entry_cost else "")
             + f"；当前仅有 {balance} 积分。"
         )
@@ -693,7 +762,8 @@ async def _submit_bid(
     await _refresh_posts(context, record)
     _save(context, data)
 
-    message = f"✅ 出价成功：{amount} 积分。已冻结本次新增 {extra_freeze} 积分。"
+    message = f"✅ 出价成功：{amount} 积分。"
+    # 已冻结本次新增 {extra_freeze} 积分。"
     if extended_by:
         message += (
             f"\n⏳ 已触发延时，拍卖结束时间延长 {extended_by} 分钟，"
@@ -772,6 +842,42 @@ async def auction_group_reply_bid(update: Update, context: ContextTypes.DEFAULT_
     raise ApplicationHandlerStop
 
 
+async def auction_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List buttons that jump to every currently running group auction."""
+    if not update.message or not update.effective_chat:
+        return
+    if update.effective_chat.type not in {"group", "supergroup"}:
+        return
+
+    records = _active_auction_records(_load(context), int(update.effective_chat.id))
+    if not records:
+        await update.message.reply_text("当前没有正在进行的拍卖。")
+        raise ApplicationHandlerStop
+
+    rows = []
+    unavailable = 0
+    for record in records:
+        post = next(
+            (item for item in record.get("post_messages", []) or [] if isinstance(item, dict)),
+            None,
+        )
+        link = _auction_message_link(record, post or {})
+        if not link:
+            unavailable += 1
+            continue
+        name = str(record.get("name") or "未命名拍卖").strip()
+        rows.append([InlineKeyboardButton(f"💎 {name[:60]}", url=link)])
+
+    if rows:
+        message = "当前进行中的拍卖："
+        if unavailable:
+            message += "\n部分拍卖无法生成定位链接。"
+        await update.message.reply_text(message, reply_markup=InlineKeyboardMarkup(rows))
+    else:
+        await update.message.reply_text("当前有进行中的拍卖，但暂时无法生成其消息定位链接。")
+    raise ApplicationHandlerStop
+
+
 async def auction_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await _handle_editor_input(update, context):
         return
@@ -829,10 +935,18 @@ async def auction_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         return await query.edit_message_text(_auction_text(record, context), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
 
-    if action in {"edit", "discard", "cancel", "field", "publish", "preview"}:
+    if action in {"edit", "discard", "cancel", "field", "publish", "preview", "toggle_pin"}:
         if not await _can_manage(context, query.from_user.id, int(record["chat_id"])):
             return await query.answer("无管理权限。", show_alert=True)
 
+    if action == "toggle_pin":
+        if record.get("status") not in {"draft", "scheduled"}:
+            return await query.answer("拍卖已发布，不能再修改置顶设置。", show_alert=True)
+        record["pin_messages"] = not bool(record.get("pin_messages"))
+        record["updated_at"] = int(time.time())
+        _save(context, data)
+        await query.answer("已开启消息置顶。" if record["pin_messages"] else "已关闭消息置顶。")
+        return await query.edit_message_text(_editor_text(record, context), reply_markup=_editor_keyboard(record))
     if action == "edit":
         await query.answer()
         return await query.edit_message_text(_editor_text(record, context), reply_markup=_editor_keyboard(record))
@@ -915,6 +1029,16 @@ def register_points_auction_handlers(app):
             auction_group_reply_bid,
         ),
         group=-20,
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS & filters.TEXT & (~filters.COMMAND) & filters.Regex(r"^\s*拍卖\s*$"),
+            auction_group_command,
+        ),
+        # ``member_tag`` owns a catch-all group-text handler at -19. PTB only
+        # invokes one matching handler per group, so use a dedicated earlier
+        # group for this command instead.
+        group=-28,
     )
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (~filters.COMMAND), auction_text), group=17)
     app.job_queue.run_repeating(auction_tick, interval=60, first=60, name="points_auction_tick")

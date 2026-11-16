@@ -94,13 +94,23 @@
             "name": "默认频道",
             "channel_id": -1003998380855,
             "enabled": true
+        },
+        {
+            "id": 2,
+            "name": "测试2",
+            "channel_id": -1004426609542,
+            "enabled": true
         }
     ],
-    "submission_target_next_id": 2,
+    "submission_target_next_id": 4,
     "bot_publish_rule_enabled": true,
     "bot_publish_rule_fields": [
         "名字",
         "区域",
         "电报号"
-    ]
+    ],
+    "backup_channel_routes": {},
+    "keyword_search_channel": "main",
+    "checkin_channel": "main",
+    "collection_display_channel": "main"
 }

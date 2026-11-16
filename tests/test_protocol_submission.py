@@ -403,3 +403,28 @@ class ProtocolHistoryDailyLimitTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(stored_rules["users"]["1"]["forward_rules"][0]["mode"], "listen")
         self.assertTrue(any(path == forwarder.FORWARD_USER_CONFIG_FILE for path, _ in writes))
+
+
+class TelethonLoginReplyRoutingTests(IsolatedAsyncioTestCase):
+    async def test_reply_does_not_get_consumed_by_pending_join_input(self):
+        from channel import telethon_login
+
+        uid = "42"
+        telethon_login._JOIN_STATE[uid] = {"session": "demo"}
+        try:
+            update = SimpleNamespace(
+                message=SimpleNamespace(
+                    text="回复别人",
+                    reply_to_message=SimpleNamespace(),
+                ),
+                effective_chat=SimpleNamespace(type="private"),
+                effective_user=SimpleNamespace(id=42),
+            )
+            context = SimpleNamespace()
+
+            handled = await telethon_login.handle_telethon_login_text(update, context)
+
+            self.assertFalse(handled)
+            self.assertIn(uid, telethon_login._JOIN_STATE)
+        finally:
+            telethon_login._JOIN_STATE.pop(uid, None)

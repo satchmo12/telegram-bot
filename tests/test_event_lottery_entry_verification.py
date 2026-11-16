@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from channel import publish_setting
 from group import event_lottery
@@ -191,6 +192,63 @@ class EventLotteryEntryVerificationTests(unittest.TestCase):
         self.assertEqual(entry["entry_verification"]["method"], "numeric")
         self.assertTrue(entry["eligible"])
         self.assertIsNotNone(query.edited)
+
+
+    def test_wrong_numeric_answer_replaces_the_challenge(self):
+        record = event_lottery._new_lottery(-100123, 88)
+        record.update(
+            {
+                "status": "open",
+                "name": "验证抽奖",
+                "draw_at": 2_000_000_000,
+                "entry_verification": {"enabled": True, "method": "numeric"},
+            }
+        )
+        data = {"lotteries": {record["id"]: record}}
+        _question, keyboard = event_lottery._create_numeric_entry_verification_challenge(
+            record, 999
+        )
+        previous = dict(event_lottery._entry_verification_challenges[(record["id"], 999)])
+        wrong_callback = next(
+            button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+            if int(button.text) != previous["answer"]
+        )
+
+        class FakeQuery:
+            data = wrong_callback
+            from_user = SimpleNamespace(id=999, full_name="Test User", username="tester")
+            message = SimpleNamespace(chat=SimpleNamespace(type="private"))
+
+            def __init__(self):
+                self.answers = []
+                self.edited = None
+
+            async def answer(self, *args, **kwargs):
+                self.answers.append((args, kwargs))
+
+            async def edit_message_text(self, *args, **kwargs):
+                self.edited = (args, kwargs)
+
+        query = FakeQuery()
+        old_load, old_save = event_lottery._load, event_lottery._save
+        event_lottery._load = lambda _context: data
+        event_lottery._save = lambda _context, _data: None
+        try:
+            asyncio.run(
+                event_lottery.event_lottery_callback(
+                    SimpleNamespace(callback_query=query), SimpleNamespace(user_data={})
+                )
+            )
+        finally:
+            event_lottery._load, event_lottery._save = old_load, old_save
+
+        replacement = event_lottery._entry_verification_challenges[(record["id"], 999)]
+        self.assertNotEqual(replacement["token"], previous["token"])
+        self.assertNotIn("999", record["participants"])
+        self.assertIsNotNone(query.edited)
+        self.assertTrue(query.answers[-1][1]["show_alert"])
 
 
     def test_manual_participant_is_exempt_from_entry_verification(self):
@@ -574,6 +632,108 @@ class EventLotteryHandlerRegistrationTests(unittest.TestCase):
 
         self.assertEqual(counter_group, -29)
 
+    def test_group_lottery_command_has_a_dedicated_handler_group(self):
+        class FakeJobQueue:
+            def run_repeating(self, *_args, **_kwargs):
+                return None
+
+        class FakeApp:
+            def __init__(self):
+                self.handlers = []
+                self.job_queue = FakeJobQueue()
+
+            def add_handler(self, handler, group=0):
+                self.handlers.append((handler, group))
+
+        app = FakeApp()
+        event_lottery.register_event_lottery_handlers(app)
+        command_group = next(
+            group
+            for handler, group in app.handlers
+            if handler.callback is event_lottery.event_lottery_group_command
+        )
+
+        self.assertEqual(command_group, -27)
+
+
+class EventLotteryGroupCommandTests(unittest.TestCase):
+    def test_publish_stores_the_lottery_post_for_direct_navigation(self):
+        record = event_lottery._new_lottery(-1001234567890, 88)
+
+        async def join_markup(_context, _record):
+            return None
+
+        async def send_content(_context, chat_id, _record, **_kwargs):
+            return SimpleNamespace(
+                message_id=456,
+                chat=SimpleNamespace(id=int(chat_id), username="lottery_group"),
+            )
+
+        with (
+            patch.object(event_lottery, "_lottery_join_markup", side_effect=join_markup),
+            patch.object(event_lottery, "_send_lottery_content", side_effect=send_content),
+        ):
+            sent = asyncio.run(event_lottery._send_lottery_post(SimpleNamespace(), record))
+
+        self.assertEqual(sent, 1)
+        self.assertEqual(
+            event_lottery._lottery_message_link(record, record["post_messages"][0]),
+            "https://t.me/lottery_group/456",
+        )
+
+    def test_group_command_includes_open_full_draws_without_a_draw_time(self):
+        full_draw = event_lottery._new_lottery(-100123, 88)
+        full_draw.update({
+            "status": "open",
+            "draw_mode": event_lottery.DRAW_MODE_FULL,
+            "draw_at": 0,
+            "name": "满人抽奖",
+            "post_messages": [{"chat_id": -100123, "message_id": 33}],
+        })
+        data = {"lotteries": {full_draw["id"]: full_draw}}
+
+        active = event_lottery._active_lottery_records(data, -100123)
+
+        self.assertEqual(active, [full_draw])
+
+    def test_group_command_returns_one_button_per_open_lottery(self):
+        now = 1_000
+        first = event_lottery._new_lottery(-100123, 88)
+        first.update({
+            "status": "open", "name": "第一个抽奖", "draw_at": now + 120,
+            "post_messages": [{"chat_id": -100123, "message_id": 11}],
+        })
+        second = event_lottery._new_lottery(-100123, 88)
+        second.update({
+            "status": "open", "name": "第二个抽奖", "draw_at": now + 60,
+            "post_messages": [{"chat_id": -100123, "message_id": 22}],
+        })
+        replies = []
+
+        class Message:
+            async def reply_text(self, text, reply_markup=None):
+                replies.append((text, reply_markup))
+
+        update = SimpleNamespace(
+            message=Message(),
+            effective_chat=SimpleNamespace(id=-100123, type="supergroup"),
+        )
+        data = {"lotteries": {first["id"]: first, second["id"]: second}}
+
+        with (
+            patch.object(event_lottery, "_load", return_value=data),
+            patch.object(event_lottery.time, "time", return_value=now),
+        ):
+            with self.assertRaises(event_lottery.ApplicationHandlerStop):
+                asyncio.run(event_lottery.event_lottery_group_command(update, SimpleNamespace()))
+
+        self.assertEqual(replies[0][0], "当前进行中的抽奖：")
+        buttons = [row[0] for row in replies[0][1].inline_keyboard]
+        self.assertEqual([button.text for button in buttons], ["🎉 第二个抽奖", "🎉 第一个抽奖"])
+        self.assertEqual([button.url for button in buttons], [
+            "https://t.me/c/123/22", "https://t.me/c/123/11",
+        ])
+
 
 class EventLotteryCompletionNoticeTests(unittest.TestCase):
     def test_message_threshold_completion_sends_one_private_notice(self):
@@ -660,6 +820,207 @@ class PrivateInputRoutingRegistrationTests(unittest.TestCase):
         )
 
         self.assertEqual(submission_input_group, -17)
+
+
+class EventLotteryDrawModeTests(unittest.TestCase):
+    def test_new_lottery_defaults_to_timed_draw_with_one_person_threshold_and_pinning_off(self):
+        record = event_lottery._new_lottery(-100123, 88)
+
+        self.assertEqual(record["draw_mode"], event_lottery.DRAW_MODE_SCHEDULED)
+        self.assertEqual(record["minimum_participants"], 1)
+        self.assertFalse(record["pin_messages"])
+        callbacks = [
+            button.callback_data
+            for row in event_lottery._editor_keyboard(record).inline_keyboard
+            for button in row
+        ]
+        self.assertIn(f"eventlot:draw_mode:{record['id']}", callbacks)
+        self.assertIn(f"eventlot:field:{record['id']}:minimum_participants", callbacks)
+        self.assertIn(f"eventlot:toggle_pin:{record['id']}", callbacks)
+
+    def test_full_draw_ignores_draw_time_until_qualified_threshold_is_reached(self):
+        class FakeBot:
+            async def send_message(self, **_kwargs):
+                return SimpleNamespace(message_id=1)
+
+        record = event_lottery._new_lottery(-100123, 88)
+        record.update({
+            "status": "open",
+            "draw_mode": event_lottery.DRAW_MODE_FULL,
+            "draw_at": 2_000_000_000,  # A future time must not delay a full draw.
+            "minimum_participants": 2,
+            "prizes": [{"name": "奖品", "count": 1}],
+            "participants": {
+                "1": {"user_id": 1, "name": "甲", "eligible": True},
+            },
+        })
+        context = SimpleNamespace(bot=FakeBot())
+
+        self.assertFalse(asyncio.run(event_lottery._draw_if_due(context, record)))
+        self.assertEqual(record["status"], "open")
+
+        record["participants"]["2"] = {"user_id": 2, "name": "乙", "eligible": True}
+        self.assertTrue(asyncio.run(event_lottery._draw_if_due(context, record)))
+        self.assertEqual(record["status"], "drawn")
+        self.assertEqual(len(record["winners"]), 1)
+
+    def test_timed_draw_marks_everyone_unsuccessful_when_threshold_is_not_met(self):
+        class FakeBot:
+            def __init__(self):
+                self.messages = []
+
+            async def send_message(self, **kwargs):
+                self.messages.append(kwargs)
+                return SimpleNamespace(message_id=len(self.messages))
+
+        record = event_lottery._new_lottery(-100123, 88)
+        record.update({
+            "status": "open",
+            "draw_mode": event_lottery.DRAW_MODE_SCHEDULED,
+            "draw_at": 1,
+            "minimum_participants": 3,
+            "prizes": [{"name": "奖品", "count": 1}],
+            "participants": {
+                "1": {"user_id": 1, "name": "甲", "eligible": True},
+                "2": {"user_id": 2, "name": "乙", "eligible": True},
+            },
+        })
+        context = SimpleNamespace(bot=FakeBot())
+
+        self.assertTrue(asyncio.run(event_lottery._draw_if_due(context, record)))
+        self.assertEqual(record["status"], "drawn")
+        self.assertEqual(record["winners"], [])
+        self.assertIn("本次全部不中奖", context.bot.messages[0]["text"])
+
+    def test_pinning_applies_to_original_lottery_post_and_draw_result(self):
+        pins = []
+
+        class FakeBot:
+            def __init__(self):
+                self.next_message_id = 100
+
+            async def send_message(self, **_kwargs):
+                self.next_message_id += 1
+                return SimpleNamespace(message_id=self.next_message_id)
+
+            async def pin_chat_message(self, **kwargs):
+                pins.append(kwargs)
+
+        record = event_lottery._new_lottery(-100123, 88)
+        record.update({
+            "pin_messages": True,
+            "status": "open",
+            "draw_at": 1,
+            "prizes": [{"name": "奖品", "count": 1}],
+            "participants": {"1": {"user_id": 1, "name": "甲", "eligible": True}},
+        })
+        context = SimpleNamespace(bot=FakeBot())
+
+        with patch.object(event_lottery, "_lottery_join_markup", return_value=None):
+            self.assertEqual(asyncio.run(event_lottery._send_lottery_post(context, record)), 1)
+        self.assertTrue(asyncio.run(event_lottery._draw_if_due(context, record)))
+
+        self.assertEqual(
+            pins,
+            [
+                {"chat_id": -100123, "message_id": 101, "disable_notification": True},
+                {"chat_id": -100123, "message_id": 102, "disable_notification": True},
+            ],
+        )
+
+
+class EventLotteryEmojiVerificationTests(unittest.TestCase):
+    def test_emoji_order_challenge_has_three_random_steps_and_six_buttons(self):
+        record = event_lottery._new_lottery(-100123, 88)
+        record["entry_verification"] = {"enabled": True, "method": "emoji_order"}
+
+        question, keyboard = event_lottery._create_emoji_order_entry_verification_challenge(
+            record, 999
+        )
+        challenge = event_lottery._entry_verification_challenges[(record["id"], 999)]
+        buttons = [button for row in keyboard.inline_keyboard for button in row]
+
+        self.assertEqual(challenge["method"], "emoji_order")
+        self.assertEqual(len(challenge["answer"]), 3)
+        self.assertEqual(len(set(challenge["answer"])), 3)
+        self.assertEqual(len(buttons), 6)
+        self.assertEqual({button.text for button in buttons}, set(event_lottery.EMOJI_ORDER_OPTIONS))
+        self.assertIn("按以下顺序点击表情", question)
+        self.assertTrue(
+            all(
+                button.callback_data.startswith(
+                    f"eventlot:entry_verify:{record['id']}:999:{challenge['token']}:"
+                )
+                and len(button.callback_data) <= 64
+                for button in buttons
+            )
+        )
+
+    def test_emoji_order_verification_requires_each_correct_click_before_passing(self):
+        record = event_lottery._new_lottery(-100123, 88)
+        record.update({
+            "status": "open",
+            "name": "表情验证抽奖",
+            "draw_at": 2_000_000_000,
+            "entry_verification": {"enabled": True, "method": "emoji_order"},
+        })
+        data = {"lotteries": {record["id"]: record}}
+        _question, _keyboard = event_lottery._create_emoji_order_entry_verification_challenge(
+            record, 999
+        )
+        challenge = event_lottery._entry_verification_challenges[(record["id"], 999)]
+
+        class FakeQuery:
+            def __init__(self):
+                self.from_user = SimpleNamespace(
+                    id=999, full_name="Test User", username="tester"
+                )
+                self.message = SimpleNamespace(chat=SimpleNamespace(type="private"))
+                self.answers = []
+                self.edits = []
+                self.data = ""
+
+            async def answer(self, *args, **kwargs):
+                self.answers.append((args, kwargs))
+
+            async def edit_message_text(self, *args, **kwargs):
+                self.edits.append((args, kwargs))
+
+        def callback_data_for(step):
+            emoji = challenge["answer"][step]
+            option_index = challenge["options"].index(emoji)
+            return (
+                f"eventlot:entry_verify:{record['id']}:999:"
+                f"{challenge['token']}:{option_index}"
+            )
+
+        query = FakeQuery()
+        old_load, old_save = event_lottery._load, event_lottery._save
+        event_lottery._load = lambda _context: data
+        event_lottery._save = lambda _context, _data: None
+        try:
+            context = SimpleNamespace(user_data={})
+            query.data = callback_data_for(0)
+            asyncio.run(event_lottery.event_lottery_callback(SimpleNamespace(callback_query=query), context))
+            self.assertEqual(challenge["selected"], [challenge["answer"][0]])
+            self.assertNotIn("999", record["participants"])
+            self.assertIn("1/3", query.edits[-1][0][0])
+
+            query.data = callback_data_for(1)
+            asyncio.run(event_lottery.event_lottery_callback(SimpleNamespace(callback_query=query), context))
+            self.assertEqual(challenge["selected"], challenge["answer"][:2])
+            self.assertNotIn("999", record["participants"])
+            self.assertIn("2/3", query.edits[-1][0][0])
+
+            query.data = callback_data_for(2)
+            asyncio.run(event_lottery.event_lottery_callback(SimpleNamespace(callback_query=query), context))
+        finally:
+            event_lottery._load, event_lottery._save = old_load, old_save
+
+        entry = record["participants"]["999"]
+        self.assertEqual(entry["entry_verification"]["method"], "emoji_order")
+        self.assertTrue(entry["eligible"])
+        self.assertNotIn((record["id"], 999), event_lottery._entry_verification_challenges)
 
 
 if __name__ == "__main__":

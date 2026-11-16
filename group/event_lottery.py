@@ -43,14 +43,22 @@ MAX_PRIZES = 20
 MAX_TARGETS = 10
 MAX_PARTICIPANT_MANAGERS = 20
 MAX_COMMENT_RULES = 10
+MAX_DRAW_PARTICIPANTS = 1_000_000
 PRIVATE_CHAT_ID_RE = re.compile(r"^-\d{5,20}$")
+DRAW_MODE_FULL = "full"
+DRAW_MODE_SCHEDULED = "scheduled"
 
 # Entry-verification challenges are intentionally separate from the group join
 # verification module: a challenge belongs to one lottery and never changes a
 # member's permissions. New methods can be added without changing the lottery
 # record schema by extending ENTRY_VERIFICATION_METHODS.
-ENTRY_VERIFICATION_METHODS = {"numeric": "🧮 数字验证"}
+ENTRY_VERIFICATION_METHODS = {
+    "numeric": "🧮 数字验证",
+    "emoji_order": "😀 表情顺序验证",
+}
 ENTRY_VERIFICATION_CHALLENGE_TTL = 5 * 60
+EMOJI_ORDER_OPTIONS = ("😀", "😎", "🤖", "🍀", "🎯", "🚀")
+EMOJI_ORDER_LENGTH = 3
 _entry_verification_challenges: dict[tuple[str, int], dict] = {}
 
 
@@ -88,7 +96,11 @@ def _new_lottery(chat_id: int, owner_id: int) -> dict:
         "name": "",
         "description": "",
         "publish_at": 0,  # 0 means publish immediately
+        # "full": draw as soon as enough qualified people enter; "scheduled":
+        # draw at draw_at, provided the qualified-person threshold is met.
+        "draw_mode": DRAW_MODE_SCHEDULED,
         "draw_at": 0,
+        "minimum_participants": 1,
         "prizes": [],
         "requirements": {
             "username": False,
@@ -106,6 +118,11 @@ def _new_lottery(chat_id: int, owner_id: int) -> dict:
         # extra locations to receive the published lottery post.
         "sync_targets": [],
         "cover": None,
+        # When enabled, pin the original lottery post and its draw result.
+        "pin_messages": False,
+        # Published message IDs are retained so the group “抽奖” command can
+        # offer direct buttons back to the active lottery posts.
+        "post_messages": [],
         "participants": {},
         # Users specifically allowed to directly add participants for this lottery.
         "participant_managers": {},
@@ -210,6 +227,67 @@ def _entry_verification_challenge_key(lottery_id: str, user_id: int) -> tuple[st
     return str(lottery_id), int(user_id)
 
 
+def _entry_verification_challenge_text(record: dict, question: str) -> str:
+    """Build the private prompt shared by every button-based verification method."""
+    method = _entry_verification_settings(record)["method"]
+    instruction = "请依次点击下方表情按钮。" if method == "emoji_order" else "请选择正确答案："
+    return (
+        "🛡️ 请先完成抽奖参与前验证。\n\n"
+        f"验证方式：{_entry_verification_method_label(method)}\n"
+        f"题目：{question}\n{instruction}"
+    )
+
+
+def _emoji_order_question(sequence: list[str], selected: list[str]) -> str:
+    progress = " ".join(selected) if selected else "尚未开始"
+    return (
+        f"请按以下顺序点击表情（共 {len(sequence)} 步）：\n"
+        f"{' → '.join(sequence)}\n\n"
+        f"当前进度：{progress}（{len(selected)}/{len(sequence)}）"
+    )
+
+
+def _emoji_order_keyboard(lottery_id: str, user_id: int, token: str, options: list[str]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                emoji,
+                callback_data=f"{CALLBACK_PREFIX}:entry_verify:{lottery_id}:{user_id}:{token}:{index}",
+            )
+            for index, emoji in enumerate(options[row_start:row_start + 3], start=row_start)
+        ]
+        for row_start in range(0, len(options), 3)
+    ])
+
+
+def _create_emoji_order_entry_verification_challenge(record: dict, user_id: int):
+    """Create a three-step sequence challenge with six clickable emoji buttons."""
+    options = list(EMOJI_ORDER_OPTIONS)
+    sequence = random.sample(options, EMOJI_ORDER_LENGTH)
+    random.shuffle(options)
+    token = secrets.token_hex(4)
+    lottery_id = str(record["id"])
+    _entry_verification_challenges[_entry_verification_challenge_key(lottery_id, user_id)] = {
+        "method": "emoji_order",
+        "answer": sequence,
+        "options": options,
+        "selected": [],
+        "token": token,
+        "expires_at": int(time.time()) + ENTRY_VERIFICATION_CHALLENGE_TTL,
+    }
+    return _emoji_order_question(sequence, []), _emoji_order_keyboard(lottery_id, user_id, token, options)
+
+
+def _create_entry_verification_challenge(record: dict, user_id: int):
+    """Create the challenge selected by this lottery's manager."""
+    method = _entry_verification_settings(record)["method"]
+    if method == "numeric":
+        return _create_numeric_entry_verification_challenge(record, user_id)
+    if method == "emoji_order":
+        return _create_emoji_order_entry_verification_challenge(record, user_id)
+    return None
+
+
 def _create_numeric_entry_verification_challenge(record: dict, user_id: int):
     """Create a small, button-based numeric challenge for this lottery entry."""
     if random.choice((True, False)):
@@ -229,6 +307,7 @@ def _create_numeric_entry_verification_challenge(record: dict, user_id: int):
     token = secrets.token_hex(4)
     lottery_id = str(record["id"])
     _entry_verification_challenges[_entry_verification_challenge_key(lottery_id, user_id)] = {
+        "method": "numeric",
         "answer": answer,
         "options": set(options),
         "token": token,
@@ -467,6 +546,84 @@ def _timestamp_text(ts: int, context: ContextTypes.DEFAULT_TYPE) -> str:
     return bot_datetime_from_timestamp(ts, context).strftime("%Y-%m-%d %H:%M")
 
 
+def _draw_mode(record: dict) -> str:
+    """Return a supported draw mode, keeping records created before this setting timed."""
+    return DRAW_MODE_FULL if record.get("draw_mode") == DRAW_MODE_FULL else DRAW_MODE_SCHEDULED
+
+
+def _minimum_participants(record: dict) -> int:
+    """Return the configured qualified-participant threshold without trusting stored JSON."""
+    try:
+        return min(MAX_DRAW_PARTICIPANTS, max(0, int(record.get("minimum_participants", 0) or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _required_participants(record: dict) -> int:
+    """Full-person draws always need a positive threshold; timed legacy draws may have none."""
+    minimum = _minimum_participants(record)
+    return max(1, minimum) if _draw_mode(record) == DRAW_MODE_FULL else minimum
+
+
+def _draw_mode_label(record: dict) -> str:
+    return "满人开奖" if _draw_mode(record) == DRAW_MODE_FULL else "定时开奖"
+
+
+def _qualified_participants(record: dict) -> list[dict]:
+    """Return participants currently allowed into the random-draw pool."""
+    verification = _entry_verification_settings(record)
+    return [
+        item
+        for item in (record.get("participants") or {}).values()
+        if (
+            isinstance(item, dict)
+            and bool(item.get("eligible", True))
+            and _comment_rules_completed(record, int(item.get("user_id", 0) or 0))
+            and (
+                not verification["enabled"]
+                or _entry_verification_passed(record, int(item.get("user_id", 0) or 0))
+            )
+        )
+    ]
+
+
+def _draw_settings_lines(record: dict, context: ContextTypes.DEFAULT_TYPE) -> list[str]:
+    """Render the draw method and its effective condition for public cards."""
+    minimum = _required_participants(record)
+    if _draw_mode(record) == DRAW_MODE_FULL:
+        return [
+            "📆 <b>开奖时间</b>",
+            f"• 满人开奖：达标参与者满 {minimum} 人立即开奖",
+            "• 已设置的开奖时间不生效",
+        ]
+    lines = [
+        "📆 <b>开奖时间</b>",
+        f"• 定时开奖：{get_bot_timezone(context)} {_timestamp_text(int(record.get('draw_at', 0) or 0), context)}",
+    ]
+    if minimum:
+        lines.append(f"• 开奖条件：达标参与者至少 {minimum} 人；未满员则全部不中奖")
+    else:
+        lines.append("• 开奖条件：不设最低参与人数")
+    return lines
+
+
+def _draw_status_lines(record: dict, context: ContextTypes.DEFAULT_TYPE) -> list[str]:
+    """Short, private participation-card wording for the configured draw method."""
+    minimum = _required_participants(record)
+    if _draw_mode(record) == DRAW_MODE_FULL:
+        return [
+            "📅 开奖方式：满人开奖",
+            f"达标参与者满 {minimum} 人立即开奖（开奖时间不生效）",
+        ]
+    lines = [
+        f"📅 开奖时间：（{get_bot_timezone(context)}）",
+        _timestamp_text(int(record.get("draw_at", 0) or 0), context),
+    ]
+    if minimum:
+        lines.append(f"开奖条件：达标参与者至少 {minimum} 人；未满员则全部不中奖")
+    return lines
+
+
 def _participation_condition_lines(record: dict) -> list[str]:
     """Render the configured entry requirements for lottery/result cards."""
     req = record.get("requirements") if isinstance(record.get("requirements"), dict) else {}
@@ -514,11 +671,7 @@ def _lottery_description_and_time_lines(
         "📜 <b>抽奖说明</b>",
         html.escape(str(record.get("description") or "未填写")),
         "",
-        "📆 <b>开奖时间</b>",
-        (
-            f"• {get_bot_timezone(context)} "
-            f"{_timestamp_text(int(record.get('draw_at', 0) or 0), context)}"
-        ),
+        *_draw_settings_lines(record, context),
     ]
 
 
@@ -544,7 +697,12 @@ def _format_lottery(record: dict, context: ContextTypes.DEFAULT_TYPE) -> str:
 
 
 def _format_draw_result(
-    record: dict, context: ContextTypes.DEFAULT_TYPE, winners: list[dict]
+    record: dict,
+    context: ContextTypes.DEFAULT_TYPE,
+    winners: list[dict],
+    *,
+    threshold_unmet: bool = False,
+    qualified_count: int = 0,
 ) -> str:
     """Build the full winner card sent to the original group and winners."""
     name = html.escape(str(record.get("name") or "抽奖"))
@@ -556,6 +714,10 @@ def _format_draw_result(
             prize = html.escape(str(item.get("prize") or "未命名奖品"))
             winner_name = html.escape(str(item.get("name") or "用户"))
             lines.append(f"{index}. 🎁 {prize}：{winner_name}")
+    elif threshold_unmet:
+        lines.append(
+            f"达标参与者未达到开奖条件（{qualified_count}/{_required_participants(record)}），本次全部不中奖。"
+        )
     else:
         lines.append("暂无符合条件的参与者。")
     lines.extend(["", *_lottery_description_and_time_lines(record, context)])
@@ -570,13 +732,20 @@ def _editor_text(record: dict, context: ContextTypes.DEFAULT_TYPE) -> str:
         f"名称：{record.get('name') or '未设置'}",
         f"说明：{'已设置' if record.get('description') else '未设置'}",
         f"发布时间：{'立即发布' if not record.get('publish_at') else _timestamp_text(int(record['publish_at']), context)}",
-        f"开奖时间：{_timestamp_text(int(record.get('draw_at', 0) or 0), context)}",
+        f"开奖方式：{_draw_mode_label(record)}",
+        f"开奖人数：达标参与者至少 {_required_participants(record)} 人",
+        (
+            "开奖时间：不适用（满人开奖时忽略该设置）"
+            if _draw_mode(record) == DRAW_MODE_FULL
+            else f"开奖时间：{_timestamp_text(int(record.get('draw_at', 0) or 0), context)}"
+        ),
         f"奖品：{len(record.get('prizes', []))} 项",
         f"用户名：{'需要' if req.get('username') else '不要求'} | 发言：{int(req.get('min_messages', 0) or 0)} 条 | 口令：{'已设置' if req.get('password') else '未设置'}",
         f"参与评论：{len(_comment_rules(req))} 条规则",
         f"参与前验证：{_entry_verification_method_label(_entry_verification_settings(record)['method']) if _entry_verification_settings(record)['enabled'] else '未开启'}",
         f"关注目标：{len(record.get('follow_targets', []))} 个 | 同步位置：{len(record.get('sync_targets', []))} 个",
         f"封面：{'已设置' if isinstance(record.get('cover'), dict) else '未设置'}",
+        f"消息置顶：{'已开启' if record.get('pin_messages') else '未开启'}",
     ])
 
 
@@ -588,8 +757,15 @@ def _editor_keyboard(record: dict) -> InlineKeyboardMarkup:
             InlineKeyboardButton("📜 抽奖说明", callback_data=f"{CALLBACK_PREFIX}:field:{lid}:description"),
         ],
         [
+            InlineKeyboardButton("🎲 开奖方式", callback_data=f"{CALLBACK_PREFIX}:draw_mode:{lid}"),
+            InlineKeyboardButton("👥 开奖人数", callback_data=f"{CALLBACK_PREFIX}:field:{lid}:minimum_participants"),
+        ],
+        [
             InlineKeyboardButton("📅 发布时间", callback_data=f"{CALLBACK_PREFIX}:field:{lid}:publish_at"),
-            InlineKeyboardButton("⏰ 开奖时间", callback_data=f"{CALLBACK_PREFIX}:field:{lid}:draw_at"),
+            InlineKeyboardButton(
+                "⏰ 开奖时间" if _draw_mode(record) == DRAW_MODE_SCHEDULED else "⏰ 开奖时间（无效）",
+                callback_data=f"{CALLBACK_PREFIX}:field:{lid}:draw_at",
+            ),
         ],
         [
             InlineKeyboardButton("🎁 奖品设置", callback_data=f"{CALLBACK_PREFIX}:prizes:{lid}"),
@@ -604,11 +780,45 @@ def _editor_keyboard(record: dict) -> InlineKeyboardMarkup:
             InlineKeyboardButton("📍 同步位置", callback_data=f"{CALLBACK_PREFIX}:targets:{lid}:sync"),
             InlineKeyboardButton("👁 抽奖预览", callback_data=f"{CALLBACK_PREFIX}:preview:{lid}"),
         ],
+        [InlineKeyboardButton(
+            f"📌 消息置顶：{'✅' if record.get('pin_messages') else '❌'}",
+            callback_data=f"{CALLBACK_PREFIX}:toggle_pin:{lid}",
+        )],
         [
             InlineKeyboardButton("✅ 完成发布", callback_data=f"{CALLBACK_PREFIX}:publish:{lid}"),
             InlineKeyboardButton("❌ 放弃草稿", callback_data=f"{CALLBACK_PREFIX}:discard:{lid}"),
         ],
         [InlineKeyboardButton("⬅️ 返回抽奖列表", callback_data=f"{CALLBACK_PREFIX}:dashboard:{record['chat_id']}")],
+    ])
+
+
+def _draw_mode_text(record: dict) -> str:
+    minimum = _required_participants(record)
+    return "\n".join([
+        "🎲 开奖方式",
+        f"当前方式：{_draw_mode_label(record)}",
+        f"开奖人数：达标参与者至少 {minimum} 人",
+        "",
+        "满人开奖：达标参与者满设定人数后立即开奖，开奖时间不生效。",
+        "定时开奖：到达设定开奖时间后开奖；若达标参与者未满设定人数，则全部不中奖。",
+    ])
+
+
+def _draw_mode_keyboard(record: dict) -> InlineKeyboardMarkup:
+    lid = record["id"]
+    mode = _draw_mode(record)
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                f"{'✅ ' if mode == DRAW_MODE_FULL else ''}满人开奖",
+                callback_data=f"{CALLBACK_PREFIX}:draw_mode_set:{lid}:{DRAW_MODE_FULL}",
+            ),
+            InlineKeyboardButton(
+                f"{'✅ ' if mode == DRAW_MODE_SCHEDULED else ''}定时开奖",
+                callback_data=f"{CALLBACK_PREFIX}:draw_mode_set:{lid}:{DRAW_MODE_SCHEDULED}",
+            ),
+        ],
+        [InlineKeyboardButton("⬅️ 返回编辑", callback_data=f"{CALLBACK_PREFIX}:edit:{lid}")],
     ])
 
 
@@ -660,7 +870,7 @@ def _entry_verification_methods_text(record: dict) -> str:
     return "\n".join([
         "🛡️ 选择验证方式",
         f"当前方式：{_entry_verification_method_label(settings['method'])}",
-        "目前可用数字验证；新增验证方式会显示在此处。",
+        "数字验证为四选一；表情顺序验证需按显示顺序依次点击 3 个表情。",
     ])
 
 
@@ -993,6 +1203,44 @@ def _records_for_chat(data: dict, chat_id: int) -> list[dict]:
     return sorted(records, key=lambda item: int(item.get("created_at", 0) or 0), reverse=True)
 
 
+def _active_lottery_records(data: dict, chat_id: int) -> list[dict]:
+    """Return every lottery still marked open in the order users should see.
+
+    Full-person draws intentionally have no effective draw time (``draw_at`` is
+    normally 0), so filtering by a future timestamp hid them from the group
+    “抽奖” command even while they were accepting participants.
+    """
+    return sorted(
+        (
+            record for record in _records_for_chat(data, chat_id)
+            if record.get("status") == "open"
+        ),
+        key=lambda record: int(record.get("draw_at", 0) or 0),
+    )
+
+
+def _lottery_message_link(record: dict, post: dict) -> str:
+    """Build Telegram's direct-message URL for a published lottery post."""
+    try:
+        message_id = int(post.get("message_id", 0) or 0)
+        chat_id = int(post.get("chat_id", record.get("chat_id", 0)) or 0)
+    except (TypeError, ValueError):
+        return ""
+    if not message_id:
+        return ""
+
+    username = str(post.get("chat_username") or record.get("chat_username") or "").strip().lstrip("@")
+    if username:
+        return f"https://t.me/{username}/{message_id}"
+
+    # Private supergroups use Telegram's t.me/c/<internal-id>/<message-id>
+    # message-link format.
+    chat_id_text = str(chat_id)
+    if chat_id_text.startswith("-100") and len(chat_id_text) > 4:
+        return f"https://t.me/c/{chat_id_text[4:]}/{message_id}"
+    return ""
+
+
 def _status_label(record: dict) -> str:
     return {
         "draft": "📝 草稿",
@@ -1193,21 +1441,61 @@ async def _lottery_join_markup(context: ContextTypes.DEFAULT_TYPE, record: dict)
     ]])
 
 
+async def _pin_message_if_enabled(context: ContextTypes.DEFAULT_TYPE, record: dict, message) -> None:
+    """Best-effort pinning for the original lottery post and draw result."""
+    if not record.get("pin_messages") or not message:
+        return
+    message_id = getattr(message, "message_id", None)
+    if not message_id:
+        return
+    try:
+        await context.bot.pin_chat_message(
+            chat_id=record["chat_id"],
+            message_id=message_id,
+            disable_notification=True,
+        )
+    except Exception as exc:
+        # The bot may lack pin permissions. Publishing and drawing must still
+        # succeed in that case.
+        print(f"置顶抽奖消息失败 lottery={record.get('id')}: {exc}")
+
+
 async def _send_lottery_post(context: ContextTypes.DEFAULT_TYPE, record: dict) -> int:
     markup = await _lottery_join_markup(context, record)
     targets = [str(record["chat_id"])] + [str(item) for item in record.get("sync_targets", [])]
     sent = 0
+    posts = []
     for target in dict.fromkeys(targets):
         try:
-            await _send_lottery_content(
+            message = await _send_lottery_content(
                 context,
                 target,
                 record,
                 reply_markup=markup,
             )
             sent += 1
+            if str(target) == str(record["chat_id"]):
+                await _pin_message_if_enabled(context, record, message)
+            message_chat = getattr(message, "chat", None)
+            try:
+                post_chat_id = int(getattr(message_chat, "id", target))
+            except (TypeError, ValueError):
+                # The original lottery group is always numeric, even if a
+                # mocked/custom message does not expose its chat object.
+                post_chat_id = int(record["chat_id"]) if target == str(record["chat_id"]) else 0
+            message_id = getattr(message, "message_id", None)
+            if post_chat_id and message_id:
+                chat_username = str(getattr(message_chat, "username", "") or "").strip().lstrip("@")
+                if post_chat_id == int(record["chat_id"]) and chat_username:
+                    record["chat_username"] = chat_username
+                posts.append({
+                    "chat_id": post_chat_id,
+                    "message_id": int(message_id),
+                    "chat_username": chat_username,
+                })
         except Exception as exc:
             print(f"抽奖发布失败 lottery={record['id']} target={target}: {exc}")
+    record["post_messages"] = posts
     return sent
 
 
@@ -1227,22 +1515,22 @@ async def _publish_if_due(context: ContextTypes.DEFAULT_TYPE, record: dict) -> b
 
 
 async def _draw_if_due(context: ContextTypes.DEFAULT_TYPE, record: dict) -> bool:
-    if record.get("status") != "open" or not record.get("draw_at") or int(record["draw_at"]) > int(time.time()):
+    if record.get("status") != "open":
         return False
-    participants = [
-        item
-        for item in (record.get("participants") or {}).values()
-        if (
-            isinstance(item, dict)
-            and bool(item.get("eligible", True))
-            and _comment_rules_completed(record, int(item.get("user_id", 0) or 0))
-            and (
-                not _entry_verification_settings(record)["enabled"]
-                or _entry_verification_passed(record, int(item.get("user_id", 0) or 0))
-            )
-        )
-    ]
-    pool = list(participants)
+
+    now = int(time.time())
+    mode = _draw_mode(record)
+    if mode == DRAW_MODE_SCHEDULED:
+        if not record.get("draw_at") or int(record["draw_at"]) > now:
+            return False
+
+    participants = _qualified_participants(record)
+    required = _required_participants(record)
+    threshold_unmet = mode == DRAW_MODE_SCHEDULED and required > 0 and len(participants) < required
+    if mode == DRAW_MODE_FULL and len(participants) < required:
+        return False
+
+    pool = [] if threshold_unmet else list(participants)
     random.shuffle(pool)
     winners = []
     for prize in record.get("prizes", []):
@@ -1253,20 +1541,28 @@ async def _draw_if_due(context: ContextTypes.DEFAULT_TYPE, record: dict) -> bool
                 break
             winner = pool.pop()
             winners.append({"prize": prize.get("name", "奖品"), "user_id": winner.get("user_id"), "name": winner.get("name", "用户")})
-    result_text = _format_draw_result(record, context, winners)
+    result_text = _format_draw_result(
+        record,
+        context,
+        winners,
+        threshold_unmet=threshold_unmet,
+        qualified_count=len(participants),
+    )
 
     # Always publish the full result card to the group where the lottery was
     # created. Keep configured sync locations receiving the same announcement.
     targets = [str(record["chat_id"])] + [str(item) for item in record.get("sync_targets", [])]
     for target in dict.fromkeys(targets):
         try:
-            await _send_lottery_content(
+            result_message = await _send_lottery_content(
                 context,
                 target,
                 record,
                 text=result_text,
                 allow_long_cover_text=True,
             )
+            if str(target) == str(record["chat_id"]):
+                await _pin_message_if_enabled(context, record, result_message)
         except Exception as exc:
             print(f"抽奖开奖通知失败 lottery={record['id']} target={target}: {exc}")
 
@@ -1287,7 +1583,7 @@ async def _draw_if_due(context: ContextTypes.DEFAULT_TYPE, record: dict) -> bool
         except Exception as exc:
             print(f"抽奖中奖私信失败 lottery={record['id']} user={user_id}: {exc}")
     record["status"] = "drawn"
-    record["drawn_at"] = int(time.time())
+    record["drawn_at"] = now
     record["winners"] = winners
     return True
 
@@ -1417,12 +1713,54 @@ async def event_lottery_message_counter(update: Update, context: ContextTypes.DE
         )
         if should_refresh and isinstance(registration, dict):
             eligible, _status_text = await _build_participation_status(context, user, record)
-            if eligible and not registration.get("completion_notified_at"):
+            if _draw_mode(record) == DRAW_MODE_FULL:
+                changed = await _draw_if_due(context, record) or changed
+            if eligible and record.get("status") == "open" and not registration.get("completion_notified_at"):
                 if await _send_participation_completed_notice(context, user, record):
                     registration["completion_notified_at"] = int(time.time())
                     changed = True
     if changed:
         _save(context, data)
+
+
+async def event_lottery_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show direct links to all lotteries currently running in this group."""
+    if not update.message or not update.effective_chat:
+        return
+    if update.effective_chat.type not in {"group", "supergroup"}:
+        return
+
+    chat_id = int(update.effective_chat.id)
+    records = _active_lottery_records(_load(context), chat_id)
+    if not records:
+        await update.message.reply_text("当前没有正在进行的抽奖。")
+        raise ApplicationHandlerStop
+
+    rows = []
+    unavailable = 0
+    for record in records:
+        post = next(
+            (
+                item for item in record.get("post_messages", []) or []
+                if isinstance(item, dict) and int(item.get("chat_id", 0) or 0) == chat_id
+            ),
+            None,
+        )
+        link = _lottery_message_link(record, post or {})
+        if not link:
+            unavailable += 1
+            continue
+        name = str(record.get("name") or "未命名抽奖").strip()
+        rows.append([InlineKeyboardButton(f"🎉 {name[:60]}", url=link)])
+
+    if rows:
+        text = "当前进行中的抽奖："
+        if unavailable:
+            text += "\n部分抽奖无法生成定位链接。"
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
+    else:
+        await update.message.reply_text("当前有进行中的抽奖，但暂时无法生成其消息定位链接。")
+    raise ApplicationHandlerStop
 
 
 def _registration(record: dict, user) -> dict:
@@ -1622,7 +1960,6 @@ async def _build_participation_status(
     )
     status_title = "达标" if eligible else "未达标"
     status_note = "✅ 您已完成全部激活任务，可以参与抽奖！" if eligible else "❌ 您还需要完成激活任务才能抽奖！"
-    draw_time = _timestamp_text(int(record.get("draw_at", 0) or 0), context)
     lines = [
         f"<b>您已成功报名抽奖（{status_title}）</b>",
         "",
@@ -1652,8 +1989,7 @@ async def _build_participation_status(
         "",
         f"💁 参与情况：{eligible_count}达标 / {registered_count}报名",
         "",
-        f"📅 开奖时间：（{get_bot_timezone(context)}）",
-        draw_time,
+        *_draw_status_lines(record, context),
     ])
     return bool(eligible), "\n".join(lines)
 
@@ -1808,32 +2144,80 @@ async def event_lottery_callback(update: Update, context: ContextTypes.DEFAULT_T
         try:
             target_user_id = int(parts[3])
             token = parts[4]
-            selected_answer = int(parts[5])
+            selected_option = int(parts[5])
         except (IndexError, TypeError, ValueError):
             return await query.answer("验证题无效，请重新点击参与抽奖。", show_alert=True)
         if query.from_user.id != target_user_id:
             return await query.answer("这不是你的验证题。", show_alert=True)
         key = _entry_verification_challenge_key(lottery_id, target_user_id)
         challenge = _entry_verification_challenges.get(key)
+        configured_method = _entry_verification_settings(record)["method"]
         if (
             not isinstance(challenge, dict)
             or int(challenge.get("expires_at", 0) or 0) < int(time.time())
             or challenge.get("token") != token
-            or selected_answer not in challenge.get("options", set())
+            or str(challenge.get("method") or "numeric") != configured_method
         ):
             _entry_verification_challenges.pop(key, None)
             return await query.answer("验证已过期，请重新点击参与抽奖。", show_alert=True)
-        if selected_answer != challenge.get("answer"):
-            return await query.answer("答案不正确，请重新选择。", show_alert=True)
+
+        method = str(challenge.get("method") or "numeric")
+        if method == "numeric":
+            if selected_option not in challenge.get("options", set()):
+                _entry_verification_challenges.pop(key, None)
+                return await query.answer("验证已过期，请重新点击参与抽奖。", show_alert=True)
+            if selected_option != challenge.get("answer"):
+                question, keyboard = _create_numeric_entry_verification_challenge(record, target_user_id)
+                await query.answer("答案不正确，已生成新题目，请重新验证。", show_alert=True)
+                return await query.edit_message_text(
+                    _entry_verification_challenge_text(record, question),
+                    reply_markup=keyboard,
+                )
+        elif method == "emoji_order":
+            options = challenge.get("options")
+            sequence = challenge.get("answer")
+            selected = challenge.get("selected")
+            if (
+                not isinstance(options, list)
+                or not isinstance(sequence, list)
+                or not isinstance(selected, list)
+                or not 0 <= selected_option < len(options)
+                or len(sequence) != EMOJI_ORDER_LENGTH
+                or len(selected) >= len(sequence)
+            ):
+                _entry_verification_challenges.pop(key, None)
+                return await query.answer("验证已过期，请重新点击参与抽奖。", show_alert=True)
+            emoji = options[selected_option]
+            if emoji != sequence[len(selected)]:
+                question, keyboard = _create_emoji_order_entry_verification_challenge(record, target_user_id)
+                await query.answer("表情顺序不正确，已生成新题目，请重新验证。", show_alert=True)
+                return await query.edit_message_text(
+                    _entry_verification_challenge_text(record, question),
+                    reply_markup=keyboard,
+                )
+            selected.append(emoji)
+            if len(selected) < len(sequence):
+                question = _emoji_order_question(sequence, selected)
+                keyboard = _emoji_order_keyboard(lottery_id, target_user_id, token, options)
+                await query.answer(f"正确，已完成 {len(selected)}/{len(sequence)}")
+                return await query.edit_message_text(
+                    _entry_verification_challenge_text(record, question),
+                    reply_markup=keyboard,
+                )
+        else:
+            _entry_verification_challenges.pop(key, None)
+            return await query.answer("验证方式无效，请重新点击参与抽奖。", show_alert=True)
 
         registration = _registration(record, query.from_user)
         registration["entry_verification"] = {
-            "method": _entry_verification_settings(record)["method"],
+            "method": configured_method,
             "passed_at": int(time.time()),
         }
         _entry_verification_challenges.pop(key, None)
         context.user_data[JOIN_KEY] = {"id": lottery_id, "source_chat_id": int(record["chat_id"])}
         _eligible, status_text = await _build_participation_status(context, query.from_user, record)
+        if _draw_mode(record) == DRAW_MODE_FULL:
+            await _draw_if_due(context, record)
         _save(context, data)
         await query.answer("验证成功！")
         return await query.edit_message_text(
@@ -1841,6 +2225,7 @@ async def event_lottery_callback(update: Update, context: ContextTypes.DEFAULT_T
             parse_mode="HTML",
             reply_markup=_participation_status_keyboard(record),
         )
+
 
     if action == "time_immediate":
         if not await _can_manage(context, query.from_user.id, int(record["chat_id"])):
@@ -1863,7 +2248,10 @@ async def event_lottery_callback(update: Update, context: ContextTypes.DEFAULT_T
         clone = _new_lottery(int(record["chat_id"]), query.from_user.id)
         clone["name"] = (str(record.get("name") or "未命名抽奖") + "（副本）")[:80]
         clone["description"] = str(record.get("description") or "")
+        clone["draw_mode"] = _draw_mode(record)
+        clone["minimum_participants"] = _required_participants(record)
         clone["draw_at"] = 0
+        clone["pin_messages"] = bool(record.get("pin_messages"))
         clone["prizes"] = [dict(item) for item in record.get("prizes", []) if isinstance(item, dict)]
         clone["requirements"] = {
             **dict(record.get("requirements") or {}),
@@ -2001,6 +2389,42 @@ async def event_lottery_callback(update: Update, context: ContextTypes.DEFAULT_T
             return await query.answer("无管理权限。", show_alert=True)
         await query.answer()
         return await query.edit_message_text(_editor_text(record, context), reply_markup=_editor_keyboard(record))
+    if action == "draw_mode":
+        if not await _can_manage(context, query.from_user.id, int(record["chat_id"])):
+            return await query.answer("无管理权限。", show_alert=True)
+        if record.get("status") not in {"draft", "scheduled"}:
+            return await query.answer("抽奖已发布，不能再修改开奖方式。", show_alert=True)
+        await query.answer()
+        return await query.edit_message_text(
+            _draw_mode_text(record), reply_markup=_draw_mode_keyboard(record)
+        )
+    if action == "draw_mode_set" and len(parts) >= 4:
+        if not await _can_manage(context, query.from_user.id, int(record["chat_id"])):
+            return await query.answer("无管理权限。", show_alert=True)
+        if record.get("status") not in {"draft", "scheduled"}:
+            return await query.answer("抽奖已发布，不能再修改开奖方式。", show_alert=True)
+        mode = parts[3]
+        if mode not in {DRAW_MODE_FULL, DRAW_MODE_SCHEDULED}:
+            return await query.answer("开奖方式无效。", show_alert=True)
+        record["draw_mode"] = mode
+        record["updated_at"] = int(time.time())
+        _save(context, data)
+        await query.answer(f"已设置为{_draw_mode_label(record)}")
+        return await query.edit_message_text(
+            _draw_mode_text(record), reply_markup=_draw_mode_keyboard(record)
+        )
+    if action == "toggle_pin":
+        if not await _can_manage(context, query.from_user.id, int(record["chat_id"])):
+            return await query.answer("无管理权限。", show_alert=True)
+        if record.get("status") not in {"draft", "scheduled"}:
+            return await query.answer("抽奖已发布，不能再修改置顶设置。", show_alert=True)
+        record["pin_messages"] = not bool(record.get("pin_messages"))
+        record["updated_at"] = int(time.time())
+        _save(context, data)
+        await query.answer("已开启消息置顶。" if record["pin_messages"] else "已关闭消息置顶。")
+        return await query.edit_message_text(
+            _editor_text(record, context), reply_markup=_editor_keyboard(record)
+        )
     if action == "entry_verification":
         if not await _can_manage(context, query.from_user.id, int(record["chat_id"])):
             return await query.answer("无管理权限。", show_alert=True)
@@ -2051,6 +2475,8 @@ async def event_lottery_callback(update: Update, context: ContextTypes.DEFAULT_T
     if action == "field":
         if not await _can_manage(context, query.from_user.id, int(record["chat_id"])):
             return await query.answer("无管理权限。", show_alert=True)
+        if record.get("status") not in {"draft", "scheduled"}:
+            return await query.answer("抽奖已发布，不能再修改设置。", show_alert=True)
         field = parts[3] if len(parts) > 3 else ""
         _start_editor_input_stage(query, context, lottery_id, field)
         # These fields are opened from the primary participation-conditions
@@ -2061,7 +2487,13 @@ async def event_lottery_callback(update: Update, context: ContextTypes.DEFAULT_T
             "name": "请输入抽奖名称。",
             "description": "请输入抽奖说明。",
             "publish_at": _time_input_prompt("publish_at", context),
-            "draw_at": _time_input_prompt("draw_at", context),
+            "draw_at": (
+                "当前为满人开奖，填写的开奖时间不会影响开奖；改为定时开奖后才会使用。\n\n"
+                + _time_input_prompt("draw_at", context)
+                if _draw_mode(record) == DRAW_MODE_FULL
+                else _time_input_prompt("draw_at", context)
+            ),
+            "minimum_participants": f"请输入开奖所需的达标参与者人数（1–{MAX_DRAW_PARTICIPANTS}）。",
             "min_messages": "请输入最低发言条数；输入 0 表示不限制。",
             "password": "请输入参与口令；发送“清空”清除口令。",
             "cover": "请发送抽奖封面（图片或视频），或发送“清空”不设置封面。",
@@ -2300,8 +2732,12 @@ async def event_lottery_callback(update: Update, context: ContextTypes.DEFAULT_T
         if not await _can_manage(context, query.from_user.id, int(record["chat_id"])):
             return await query.answer("无管理权限。", show_alert=True)
         is_preview_publish = action == "preview_publish"
-        if not record.get("name") or not record.get("prizes") or not record.get("draw_at"):
-            return await query.answer("请至少设置名称、奖品和开奖时间。", show_alert=True)
+        if not record.get("name") or not record.get("prizes"):
+            return await query.answer("请至少设置名称和奖品。", show_alert=True)
+        if _draw_mode(record) == DRAW_MODE_SCHEDULED and not record.get("draw_at"):
+            return await query.answer("定时开奖需要设置开奖时间。", show_alert=True)
+        if _draw_mode(record) == DRAW_MODE_FULL and _required_participants(record) < 1:
+            return await query.answer("满人开奖需要设置至少 1 名开奖人数。", show_alert=True)
         if record.get("status") in {"open", "drawn"}:
             return await query.answer("该抽奖已经发布，不能重复发布。", show_alert=True)
         record["updated_at"] = int(time.time())
@@ -2339,6 +2775,8 @@ async def event_lottery_callback(update: Update, context: ContextTypes.DEFAULT_T
             return await query.answer("抽奖尚未开放或已结束。", show_alert=True)
         await query.answer("已刷新")
         _eligible, status_text = await _build_participation_status(context, query.from_user, record)
+        if _draw_mode(record) == DRAW_MODE_FULL:
+            await _draw_if_due(context, record)
         _save(context, data)
         return await query.edit_message_text(
             status_text,
@@ -2415,6 +2853,10 @@ async def _handle_editor_input(update: Update, context: ContextTypes.DEFAULT_TYP
             if not parsed:
                 raise ValueError("请输入未来开奖时间 YYYY-MM-DD HH:MM。")
             record["draw_at"] = parsed
+        elif field == "minimum_participants":
+            if not text.isdigit() or not 1 <= int(text) <= MAX_DRAW_PARTICIPANTS:
+                raise ValueError(f"开奖人数必须是 1–{MAX_DRAW_PARTICIPANTS} 的整数。")
+            record["minimum_participants"] = int(text)
         elif field == "min_messages":
             if not text.isdigit():
                 raise ValueError("发言条数必须是非负整数。")
@@ -2539,6 +2981,8 @@ async def _handle_editor_input(update: Update, context: ContextTypes.DEFAULT_TYP
         return True
 
     record["updated_at"] = int(time.time())
+    if field == "manual_participant" and _draw_mode(record) == DRAW_MODE_FULL:
+        await _draw_if_due(context, record)
     _save(context, data)
     context.user_data.pop(DRAFT_KEY, None)
     await _delete_editor_input_prompt(context, stage)
@@ -2613,15 +3057,12 @@ async def event_lottery_start(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data[JOIN_KEY] = {"id": lottery_id, "source_chat_id": int(record["chat_id"])}
     verification = _entry_verification_settings(record)
     if verification["enabled"] and not _entry_verification_passed(record, update.effective_user.id):
-        if verification["method"] == "numeric":
-            question, keyboard = _create_numeric_entry_verification_challenge(
-                record, update.effective_user.id
-            )
+        challenge = _create_entry_verification_challenge(record, update.effective_user.id)
+        if challenge:
+            question, keyboard = challenge
             _save(context, data)
             await update.message.reply_text(
-                "🛡️ 请先完成抽奖参与前验证。\n\n"
-                f"验证方式：{_entry_verification_method_label(verification['method'])}\n"
-                f"题目：{question}\n请选择正确答案：",
+                _entry_verification_challenge_text(record, question),
                 reply_markup=keyboard,
             )
             raise ApplicationHandlerStop
@@ -2629,6 +3070,8 @@ async def event_lottery_start(update: Update, context: ContextTypes.DEFAULT_TYPE
         raise ApplicationHandlerStop
 
     _eligible, status_text = await _build_participation_status(context, update.effective_user, record)
+    if _draw_mode(record) == DRAW_MODE_FULL:
+        await _draw_if_due(context, record)
     _save(context, data)
     await update.message.reply_text(
         status_text,
@@ -2677,22 +3120,20 @@ async def event_lottery_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # Do not allow a password sent in either the group or private chat to
     # bypass the optional entry-verification gate. In private chat, show a
-    # fresh numeric question so the user can continue without reopening the
-    # deep link; group messages remain silent as before.
+    # fresh challenge so the user can continue without reopening the deep link;
+    # group messages remain silent as before.
     verification = _entry_verification_settings(record)
     if verification["enabled"] and not _entry_verification_passed(record, update.effective_user.id):
-        if chat.type == "private" and verification["method"] == "numeric":
-            question, keyboard = _create_numeric_entry_verification_challenge(
-                record, update.effective_user.id
-            )
-            _save(context, data)
-            await update.message.reply_text(
-                "🛡️ 请先完成抽奖参与前验证。\n\n"
-                f"验证方式：{_entry_verification_method_label(verification['method'])}\n"
-                f"题目：{question}\n请选择正确答案：",
-                reply_markup=keyboard,
-            )
-            raise ApplicationHandlerStop
+        if chat.type == "private":
+            challenge = _create_entry_verification_challenge(record, update.effective_user.id)
+            if challenge:
+                question, keyboard = challenge
+                _save(context, data)
+                await update.message.reply_text(
+                    _entry_verification_challenge_text(record, question),
+                    reply_markup=keyboard,
+                )
+                raise ApplicationHandlerStop
         return
 
     is_private = chat.type == "private"
@@ -2708,6 +3149,8 @@ async def event_lottery_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
         record,
         submitted_password=code,
     )
+    if _draw_mode(record) == DRAW_MODE_FULL:
+        await _draw_if_due(context, record)
     _save(context, data)
 
     if is_private:
@@ -2752,6 +3195,16 @@ def register_event_lottery_handlers(app):
     app.add_handler(
         MessageHandler(filters.ChatType.GROUPS & filters.TEXT & (~filters.COMMAND), event_lottery_message_counter),
         group=-29,
+    )
+    # Use a dedicated group: member-tag and the generic lottery text flow both
+    # have broad text handlers in other groups, and PTB selects only one
+    # matching handler within a group.
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS & filters.TEXT & (~filters.COMMAND) & filters.Regex(r"^\s*抽奖\s*$"),
+            event_lottery_group_command,
+        ),
+        group=-27,
     )
     app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT & (~filters.COMMAND), event_lottery_text), group=-18)
     app.job_queue.run_repeating(event_lottery_tick, interval=60, first=60, name="event_lottery_tick")

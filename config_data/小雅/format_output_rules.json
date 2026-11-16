@@ -4,7 +4,7 @@
         {
             "id": 1,
             "enabled": true,
-            "channel_id": "-1001951594315",
+            "channel_id": "-1002667629429",
             "note": "上海艺术展览会榜单",
             "output_template": "✨城市 #上海\n\n {content}",
             "output_entities": [],

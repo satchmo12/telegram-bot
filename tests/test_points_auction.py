@@ -10,6 +10,9 @@ from group import points_auction as auction
 
 
 class PointsAuctionRulesTests(TestCase):
+    def test_new_auction_disables_pinning_by_default(self):
+        self.assertFalse(auction._new_auction(-100123, 1)["pin_messages"])
+
     def test_increment_defaults_to_one_and_configured_increment_sets_minimum(self):
         record = auction._new_auction(-100123, 1)
         self.assertEqual(record["bid_increment"], 1)
@@ -122,6 +125,100 @@ class PointsAuctionRulesTests(TestCase):
                 asyncio.run(auction.auction_group_reply_bid(update, SimpleNamespace()))
 
         self.assertEqual(replies, ["✅ 出价成功"])
+
+    def test_publish_pins_auction_and_retains_a_direct_message_link(self):
+        record = auction._new_auction(-1001234567890, 1)
+        record["pin_messages"] = True
+        pins = []
+
+        class Bot:
+            async def pin_chat_message(self, **kwargs):
+                pins.append(kwargs)
+
+        async def send_post(_context, _record):
+            return SimpleNamespace(
+                message_id=456,
+                chat=SimpleNamespace(username="auction_group"),
+            )
+
+        with patch.object(auction, "_send_post", side_effect=send_post):
+            result = asyncio.run(auction._publish(record, SimpleNamespace(bot=Bot())))
+
+        self.assertTrue(result)
+        self.assertEqual(pins, [{
+            "chat_id": -1001234567890,
+            "message_id": 456,
+            "disable_notification": True,
+        }])
+        self.assertEqual(
+            auction._auction_message_link(record, record["post_messages"][0]),
+            "https://t.me/auction_group/456",
+        )
+
+    def test_settlement_pins_the_result_when_pinning_is_enabled(self):
+        record = auction._new_auction(-100123, 1)
+        record.update({"status": "open", "name": "测试拍卖", "pin_messages": True})
+        pins = []
+
+        class Bot:
+            async def pin_chat_message(self, **kwargs):
+                pins.append(kwargs)
+
+        async def refresh(_context, _record):
+            return None
+
+        async def send_result(_context, _record, _result, *, detail_text=""):
+            return SimpleNamespace(message_id=789)
+
+        with (
+            patch.object(auction, "_refresh_posts", side_effect=refresh),
+            patch.object(auction, "_send_settlement_announcement", side_effect=send_result),
+        ):
+            asyncio.run(auction._settle(record, SimpleNamespace(bot=Bot())))
+
+        self.assertEqual(pins, [{
+            "chat_id": -100123,
+            "message_id": 789,
+            "disable_notification": True,
+        }])
+
+    def test_group_auction_command_returns_one_button_per_open_auction(self):
+        now = 1_000
+        first = auction._new_auction(-100123, 1)
+        first.update({
+            "status": "open", "name": "第一个拍卖", "end_at": now + 120,
+            "post_messages": [{"chat_id": -100123, "message_id": 11}],
+        })
+        second = auction._new_auction(-100123, 1)
+        second.update({
+            "status": "open", "name": "第二个拍卖", "end_at": now + 60,
+            "post_messages": [{"chat_id": -100123, "message_id": 22}],
+        })
+        replies = []
+
+        class Message:
+            async def reply_text(self, text, reply_markup=None):
+                replies.append((text, reply_markup))
+
+        update = SimpleNamespace(
+            message=Message(),
+            effective_chat=SimpleNamespace(id=-100123, type="supergroup"),
+        )
+        data = {"auctions": {first["id"]: first, second["id"]: second}}
+
+        with (
+            patch.object(auction, "_load", return_value=data),
+            patch.object(auction.time, "time", return_value=now),
+        ):
+            with self.assertRaises(ApplicationHandlerStop):
+                asyncio.run(auction.auction_group_command(update, SimpleNamespace()))
+
+        self.assertEqual(replies[0][0], "当前进行中的拍卖：")
+        buttons = [row[0] for row in replies[0][1].inline_keyboard]
+        self.assertEqual([button.text for button in buttons], ["💎 第二个拍卖", "💎 第一个拍卖"])
+        self.assertEqual([button.url for button in buttons], [
+            "https://t.me/c/123/22", "https://t.me/c/123/11",
+        ])
 
 
 if __name__ == "__main__":
