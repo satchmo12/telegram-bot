@@ -2,9 +2,7 @@ import asyncio
 import random
 import re
 import time
-import difflib
 import hashlib
-import telegram
 from datetime import date
 from typing import Optional
 from telegram import InlineQueryResultArticle, InputTextMessageContent, Update
@@ -26,7 +24,6 @@ from forward.message_forward import send_message_payload
 from inline_button_settings import MAX_INLINE_BUTTONS, build_reply_markup
 from utils import (
     bot_now,
-    AD_KEYWORDS_FILE,
     BOT_OWNER_ID,
     GROUP_LIST_FILE,
     INVITE_BOT_USERS_FILE,
@@ -38,7 +35,6 @@ from utils import (
     get_first_pinyin,
     get_last_pinyin,
     group_allowed,
-    is_admin,
     is_super_admin,
     load_json,
     refresh_json_cache_if_changed,
@@ -73,31 +69,11 @@ async def check_ton_username(username: str) -> str:
 
 
 # ---------------- 配置 ----------------
-DATA_FILE = "data/learned_pairs.json"  # 存储学习问答对
 GROUP_RECOMMEND_CONFIG_FILE = "config_data/group_recommend_config.json"
 DEFAULT_GROUP_RECOMMEND_TEXT = "不想被推荐点击机器人关闭群推荐即可，曝光度越高排名越靠前"
 NAV_CALLBACK_PREFIX = "nav"
 CHINESE_PACK_URL = "https://t.me/setlanguage/mr566"
 
-MAX_PAIR_WINDOW_SECONDS = 600  # 前后消息时间差，超过则不学习
-MIN_TEXT_LEN, MAX_TEXT_LEN = 2, 60  # 可学习文本长度
-MAX_BOT_QUESTION_LEN = 300  # 回复机器人时，被回复内容允许更长
-MIN_SUPPORT = 1  # 最小学习次数，达到才会回复
-SIMILARITY_THRESHOLD = 0.88  # 查找相似问题的匹配阈值
-REPLY_PROB = 0.8  # 触发回复概率（1.0 = 总是回复）
-CHAT_COOLDOWN_SECONDS = 10  # 两次回复间隔（秒）
-MEMORY_SAVE_INTERVAL_SECONDS = 60
-MEMORY_SAVE_DIRTY_LIMIT = 20
-BLOCK_PATTERNS = [r"https?://", r"t\.me/", r"@\w+"]  # 不学习/回复的内容正则
-START_KEYWORDS = ["学说话"]  # 开启学习模式关键词
-STOP_KEYWORDS = ["停止学习", "别学了"]  # 关闭学习模式关键词
-
-REPLY_START_KEYWORDS = ["开启回复", "自动回复"]  # 开启关键词
-REPLY_STOP_KEYWORDS = ["停止回复", "关闭回复"]  # 关闭关键词
-GROUP_KEY_LEARNING = "learning_enabled"
-GROUP_KEY_REPLY = "reply_enabled"
-GROUP_KEY_ACTIVE_SPEAK = "active_speak_enabled"
-GROUP_KEY_ACTIVE_INTERVAL = "active_speak_interval_min"
 GROUP_KEY_AD_PUSH_ENABLED = "ad_push_enabled"
 GROUP_KEY_AD_PUSH_MODE = "ad_push_mode"
 GROUP_KEY_AD_PUSH_INTERVAL = "ad_push_interval_min"
@@ -106,9 +82,6 @@ GROUP_KEY_AD_PUSH_MESSAGE = "ad_push_message"
 GROUP_KEY_AD_PUSH_TIMES = "ad_push_times"
 GLOBAL_AD_PUSH_FILE = "data/global_ad_push.json"
 GLOBAL_AD_PUSH_MESSAGE_KEY = "global_ad_push_message"
-ACTIVE_SPEAK_DEFAULT_INTERVAL_MIN = 2
-ACTIVE_SPEAK_MIN_INTERVAL_MIN = 1
-ACTIVE_SPEAK_MAX_INTERVAL_MIN = 1440
 AD_PUSH_MODE_INTERVAL = "interval"
 AD_PUSH_MODE_FIXED = "fixed"
 AD_PUSH_DEFAULT_INTERVAL_MIN = 120
@@ -117,20 +90,13 @@ AD_PUSH_MAX_INTERVAL_MIN = 1440
 AD_DELIVERY_HISTORY_LIMIT = 20
 
 JOKE_CACHE = {}
-last_active_speak_ts = {}
 last_ad_push_ts = {}
 last_ad_push_slot = {}
 last_global_ad_push_ts = {}
 last_global_ad_push_slot = {}
-active_speak_pool_cache = {}
-active_speak_memory_version = {}
 
 # ---------------- 数据存储 ----------------
 
-last_msg = {}  # 记录各群最后一条消息，用于学习前后消息关系
-last_reply_ts = {}  # 记录各群上次回复时间，用于控制冷却
-memory_dirty_count = {}
-memory_last_save_ts = {}
 GROUP_RECOMMEND_PAGE_SIZE = 20
 
 def _build_group_recommendations(groups: dict) -> list[tuple[int, str, dict]]:
@@ -321,151 +287,9 @@ def _build_group_recommend_page(
     return "\n".join(lines), markup, total_pages
 
 
-def get_memory() -> dict:
-    data = load_json(DATA_FILE)
-    return data if isinstance(data, dict) else {}
-
-
-def get_group_toggle(
-    context: ContextTypes.DEFAULT_TYPE,
-    chat_id: str,
-    key: str,
-    *,
-    default: bool,
-) -> bool:
-    """
-    从 groups.json 读取开关；若未配置则按默认值写回。
-    """
-    groups = get_group_whitelist(context)
-    cfg = groups.get(chat_id, {})
-    value = cfg.get(key, None)
-    if isinstance(value, bool):
-        return value
-
-    cfg[key] = default
-    groups[chat_id] = cfg
-    save_json(GROUP_LIST_FILE, groups)
-    return default
-
-
-def set_group_toggle(
-    context: ContextTypes.DEFAULT_TYPE, chat_id: str, key: str, value: bool
-):
-    groups = get_group_whitelist(context)
-    cfg = groups.get(chat_id, {})
-    cfg[key] = bool(value)
-    groups[chat_id] = cfg
-    save_json(GROUP_LIST_FILE, groups)
-
-
-def get_group_int_config(
-    context: ContextTypes.DEFAULT_TYPE,
-    chat_id: str,
-    key: str,
-    *,
-    default: int,
-    min_value: int,
-    max_value: int,
-) -> int:
-    groups = get_group_whitelist(context)
-    cfg = groups.get(chat_id, {})
-    value = cfg.get(key, None)
-    if isinstance(value, int):
-        value = max(min_value, min(max_value, value))
-    else:
-        value = default
-    cfg[key] = value
-    groups[chat_id] = cfg
-    save_json(GROUP_LIST_FILE, groups)
-    return value
-
-
 def get_runtime_chat_key(context: ContextTypes.DEFAULT_TYPE, chat_id: str) -> str:
     bot_name = context.application.bot_data.get("name", "default")
     return f"{bot_name}:{chat_id}"
-
-
-# ---------------- 工具函数 ----------------
-def normalize(text: str) -> str:
-    """规范化文本：小写、去掉网址、重复字符、尾部标点"""
-    t = text.strip().lower()
-    t = re.sub(r"https?://\S+|t\.me/\S+|@\S+", "", t)
-    t = re.sub(r"\s+", " ", t)
-    t = re.sub(r"(.)\1{2,}", r"\1\1", t)
-    t = re.sub(r"ha{2,}", "ha", t)
-    t = re.sub(r"[。！!？?]+$", "", t)
-    return t
-
-
-def looks_ok(text: str) -> bool:
-    """判断文本是否适合学习或回复"""
-    return looks_ok_with_limit(text, max_len=MAX_TEXT_LEN)
-
-
-def looks_ok_with_limit(text: str, *, max_len: int) -> bool:
-    """判断文本是否适合学习或回复（可指定最大长度）"""
-    if not text:
-        return False
-    if len(text) < MIN_TEXT_LEN or len(text) > max_len:
-        return False
-    if any(re.search(p, text, flags=re.I) for p in BLOCK_PATTERNS):
-        return False
-    if re.fullmatch(r"[\W_]+", text):
-        return False
-    return True
-
-
-def find_similar_key(nq: str, memory: Optional[dict] = None) -> Optional[str]:
-    """
-    在 memory 中查找与 nq 最相似的已学习问题
-    返回相似问题的 key 或 None
-    """
-    memory = memory if isinstance(memory, dict) else get_memory()
-    if nq in memory:
-        return nq
-    best, best_ratio = None, 0.0
-    for k in memory.keys():
-        if abs(len(k) - len(nq)) > 10:
-            continue
-        r = difflib.SequenceMatcher(a=k, b=nq).ratio()
-        if r > best_ratio:
-            best_ratio, best = r, k
-    return best if best_ratio >= SIMILARITY_THRESHOLD else None
-
-
-def maybe_save_memory(memory: dict):
-    bot_name = get_runtime_bot_name() or "default"
-    now_ts = time.time()
-    dirty_count = memory_dirty_count.get(bot_name, 0) + 1
-    last_save_ts = memory_last_save_ts.get(bot_name, 0.0)
-    memory_dirty_count[bot_name] = dirty_count
-    if dirty_count < MEMORY_SAVE_DIRTY_LIMIT and now_ts - last_save_ts < MEMORY_SAVE_INTERVAL_SECONDS:
-        return
-    save_json(DATA_FILE, memory)
-    memory_dirty_count[bot_name] = 0
-    memory_last_save_ts[bot_name] = now_ts
-
-
-def add_pair(q_text: str, a_text: str):
-    """将一对问答加入 memory，并保存到磁盘"""
-    memory = get_memory()
-    nq = normalize(q_text)
-    if nq not in memory:
-        memory[nq] = {"answers": {}, "total": 0}
-    answers = memory[nq]["answers"]
-    answers[a_text] = answers.get(a_text, 0) + 1
-    memory[nq]["total"] += 1
-    bot_name = get_runtime_bot_name() or "default"
-    active_speak_memory_version[bot_name] = (
-        active_speak_memory_version.get(bot_name, 0) + 1
-    )
-    maybe_save_memory(memory)
-
-
-def weighted_choice(answers_dict: dict) -> str:
-    """根据权重随机选择答案"""
-    texts, weights = zip(*answers_dict.items())
-    return random.choices(texts, weights=weights, k=1)[0]
 
 
 def _normalize_keywords(raw_keywords) -> list[str]:
@@ -633,269 +457,78 @@ async def add_praise_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _add_word(update, context, word_type="praise")
 
 
-# ---------------- 自动学习 & 小雅开关 ----------------
+# ---------------- 群曝光与推荐快捷处理 ----------------
+# The learned-pairs collector and its automatic replies were removed. Keep the
+# unrelated group-recommendation shortcuts that previously shared this handler.
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not update.effective_user:
+    user = update.effective_user
+    message = update.effective_message
+    chat = update.effective_chat
+    if not user or user.is_bot or not message or not message.text or not chat:
         return
 
-    #   忽略机器人消息（包括自己和其他机器人）
-    if update.effective_user.is_bot:
-        return
-
-        # 忽略机器人消息（包括自己和其他机器人）
-    if update.effective_user.is_bot:
-        return
-
-    chat_id = str(update.effective_chat.id)
-    runtime_chat_key = get_runtime_chat_key(context, chat_id)
-    user_id = update.effective_user.id
-    msg = update.effective_message
-
-    # ---------------- 安全检查群组 ----------------
+    chat_id = str(chat.id)
     groups = get_group_whitelist(context)
     if chat_id not in groups:
-        # 群组未注册，跳过学习/回复
         return
+    text = message.text.strip()
 
-    # ---------------- 安全读取开关 ----------------
-    def get_group_toggle_safe(chat_id: str, key: str, default: bool) -> bool:
-        cfg = groups.get(chat_id)
-        if cfg is None:
-            return default
-        value = cfg.get(key)
-        return value if isinstance(value, bool) else default
-
-    learning_enabled = get_group_toggle_safe(chat_id, GROUP_KEY_LEARNING, True)
-    reply_enabled = get_group_toggle_safe(chat_id, GROUP_KEY_REPLY, False)
-
-    # 忽略非文本消息
-    if not msg.text:
-        return
-
-    # 将问答里的广告删掉
-    # await cleaned_word()
-
-    text = msg.text.strip()
-    ts = time.time()
-
-    # ---------------- @用户名 直接查询 TON ----------------
-    # 暂时关闭 @ 触发（仅保留 /check）
-    # if text.startswith("@") or text.lower().endswith(".ton"):
-    #     m = re.match(r"^@?([A-Za-z0-9_]{3,})(?:\\.ton)?$", text)
-    #     if m:
-    #         username = m.group(1)
-    #         result = await check_ton_username(username)
-    #         await update.message.reply_text(f"查询 @{username}:\n{result}")
-    #         return
-
-    # ---------------- 管理员增加曝光 ----------------
-    m = re.match(r"^增加曝光\s*\+?\s*(\d+)$", text)
-    if m:
+    # Administrators/users can spend their exposure balance to promote the
+    # current registered group.
+    matched = re.match(r"^增加曝光\s*\+?\s*(\d+)$", text)
+    if matched:
         try:
-            inc = int(m.group(1))
-        except Exception:
-            inc = 0
-        if inc > 0:
-            chat_id_str = str(update.effective_chat.id)
-            user_id = update.effective_user.id
-            if not is_super_admin(user_id):
-                # 普通用户从自己的曝光余额中扣除
-                data = load_json(INVITE_BOT_USERS_FILE)
-                if not isinstance(data, dict):
-                    data = {}
-                users = data.get("users", {})
-                if not isinstance(users, dict):
-                    users = {}
-                user = users.get(str(user_id), {})
-                balance = int(user.get("exposure", 0))
-                if balance < inc:
-                    await safe_reply(update, context, "拉我进群增加曝光度50")
-                    return
-                user["exposure"] = balance - inc
-                user["username"] = update.effective_user.full_name or user.get(
-                    "username", "未知用户"
-                )
-                users[str(user_id)] = user
-                data["users"] = users
-                save_json(INVITE_BOT_USERS_FILE, data)
-
-            # 增加本群曝光度
-            groups = load_json(GROUP_LIST_FILE)
-            if not isinstance(groups, dict):
-                groups = {}
-            cfg = groups.get(chat_id_str, {})
-            if not isinstance(cfg, dict):
-                cfg = {}
-            cfg["exposure"] = int(cfg.get("exposure", 0)) + inc
-            groups[chat_id_str] = cfg
-            save_json(GROUP_LIST_FILE, groups)
-            await safe_reply(update, context, f"已增加本群曝光度 +{inc}")
-        return
-
-    # ---------------- 无聊/冒泡提示群名 ----------------
-    chat = update.effective_chat
-    if chat and text:
-        triggers = ["好无聊", "无聊", "冒泡", "冒个泡", "冒泡一下", "签到"]
-        if any(k in text for k in triggers):
-            groups = get_group_whitelist(context)
-            chat_id_str = str(chat.id)
-            now_ts = int(time.time())
-            cfg_self = groups.get(chat_id_str, {})
-            last_ts = int(cfg_self.get("recommend_last_ts", 0) or 0)
-            if not bool(cfg_self.get("recommend", True)):
-                return
-            # 多长时间触发一次
-            if now_ts - last_ts < 600:
-                return
-            cfg_self["recommend_last_ts"] = now_ts
-            groups[chat_id_str] = cfg_self
-            recommended = _build_group_recommendations(groups)
-
-            # 仅增加当前触发群的曝光度
-            if chat_id_str in groups and isinstance(groups[chat_id_str], dict):
-                if bool(groups[chat_id_str].get("recommend", False)):
-                    groups[chat_id_str]["exposure"] = (
-                        int(groups[chat_id_str].get("exposure", 0)) + 1
-                    )
-
-            save_json(GROUP_LIST_FILE, groups)
-            text, markup, _ = _build_group_recommend_page(recommended, 1)
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-                reply_markup=markup,
-            )
+            increment = int(matched.group(1))
+        except (TypeError, ValueError):
+            increment = 0
+        if increment <= 0:
             return
+        if not is_super_admin(user.id):
+            data = load_json(INVITE_BOT_USERS_FILE)
+            data = data if isinstance(data, dict) else {}
+            users = data.get("users") if isinstance(data.get("users"), dict) else {}
+            info = users.get(str(user.id), {})
+            balance = int(info.get("exposure", 0) or 0)
+            if balance < increment:
+                await safe_reply(update, context, "拉我进群增加曝光度50")
+                return
+            info["exposure"] = balance - increment
+            info["username"] = user.full_name or info.get("username", "未知用户")
+            users[str(user.id)] = info
+            data["users"] = users
+            save_json(INVITE_BOT_USERS_FILE, data)
 
-    # ---------------- 回复开关指令 ----------------
-    # 开启自动回复
-    if any(k in text for k in REPLY_START_KEYWORDS):
-        if not reply_enabled:  # 默认关闭
-            set_group_toggle(context, chat_id, GROUP_KEY_REPLY, True)
-            reply_enabled = True
-            await safe_reply(update, context, "✅ 自动回复已开启")
+        latest_groups = load_json(GROUP_LIST_FILE)
+        latest_groups = latest_groups if isinstance(latest_groups, dict) else {}
+        cfg = latest_groups.get(chat_id) if isinstance(latest_groups.get(chat_id), dict) else {}
+        cfg["exposure"] = int(cfg.get("exposure", 0) or 0) + increment
+        latest_groups[chat_id] = cfg
+        save_json(GROUP_LIST_FILE, latest_groups)
+        await safe_reply(update, context, f"已增加本群曝光度 +{increment}")
         return
 
-    # 关闭自动回复
-    if any(k in text for k in REPLY_STOP_KEYWORDS):
-        if reply_enabled:  # 默认关闭
-            set_group_toggle(context, chat_id, GROUP_KEY_REPLY, False)
-            reply_enabled = False
-            await safe_reply(update, context, "❌ 自动回复已关闭")
+    triggers = ["好无聊", "无聊", "冒泡", "冒个泡", "冒泡一下", "签到"]
+    if not any(item in text for item in triggers):
         return
-
-    # ---------------- 开关指令 ----------------
-    if any(k in text for k in START_KEYWORDS):
-        if not learning_enabled:
-            set_group_toggle(context, chat_id, GROUP_KEY_LEARNING, True)
-            learning_enabled = True
-            await safe_reply(update, context, "✅ 学习模式已开启")
+    now_ts = int(time.time())
+    cfg_self = groups.get(chat_id) if isinstance(groups.get(chat_id), dict) else {}
+    last_ts = int(cfg_self.get("recommend_last_ts", 0) or 0)
+    if not bool(cfg_self.get("recommend", True)) or now_ts - last_ts < 600:
         return
-
-    if any(k in text for k in STOP_KEYWORDS):
-        if learning_enabled:
-            set_group_toggle(context, chat_id, GROUP_KEY_LEARNING, False)
-            learning_enabled = False
-            await safe_reply(update, context, "❌ 学习模式已关闭")
-        return
-
-    ad_keywords = _normalize_keywords(load_json(AD_KEYWORDS_FILE))
-    # ---------------- 学习模式 ----------------
-    if learning_enabled:
-        # 规则1：用户直接回复机器人消息时，学习为「机器人消息 -> 用户回复」
-        replied_msg = update.message.reply_to_message if update.message else None
-        if (
-            replied_msg
-            and replied_msg.from_user
-            and int(replied_msg.from_user.id) == int(context.bot.id)
-            and replied_msg.text
-        ):
-            q_text = replied_msg.text.strip()
-            a_text = text
-            if (
-                looks_ok_with_limit(q_text, max_len=MAX_BOT_QUESTION_LEN)
-                and looks_ok(a_text)
-                and not _contains_ad(q_text, ad_keywords)
-                and not _contains_ad(a_text, ad_keywords)
-            ):
-                add_pair(q_text, a_text)
-
-        # 规则2：默认前后句学习（原逻辑）
-        prev = last_msg.get(runtime_chat_key)
-        # 只处理前一条消息存在且为文本、不同用户、在时间窗口内
-        if (
-            prev
-            and "text" in prev
-            and prev["text"]
-            and user_id != prev["user_id"]
-            and ts - prev["ts"] <= MAX_PAIR_WINDOW_SECONDS
-        ):
-            if (
-                looks_ok(prev["text"])
-                and looks_ok(text)
-                and not _contains_ad(prev["text"], ad_keywords)
-                and not _contains_ad(text, ad_keywords)
-            ):
-                add_pair(prev["text"], text)
-
-        # 更新当前消息为上一条消息
-        last_msg[runtime_chat_key] = {"text": text, "user_id": user_id, "ts": ts}
-
-    # ---------------- 回复逻辑 ----------------
-    # if looks_ok(text):
-    #     key = find_similar_key(normalize(text))
-    #     if key and memory[key]["total"] >= MIN_SUPPORT:
-    #         if ts - last_reply_ts.get(chat_id, 0) >= CHAT_COOLDOWN_SECONDS:
-    #             if random.random() <= REPLY_PROB:
-    #                 await safe_reply(
-    #                     update, context, weighted_choice(memory[key]["answers"])
-    #                 )
-    #                 # safe_reply(update, context,weighted_choice(memory[key]["answers"]))
-    #                 last_reply_ts[chat_id] = ts
-
-    if reply_enabled and looks_ok(text):  # 默认关闭
-        memory = get_memory()
-        key = find_similar_key(normalize(text), memory)
-        if key and memory[key]["total"] >= MIN_SUPPORT:
-            if ts - last_reply_ts.get(runtime_chat_key, 0) >= CHAT_COOLDOWN_SECONDS:
-                if random.random() <= REPLY_PROB:
-                    reply_text = weighted_choice(memory[key]["answers"])
-                    if _contains_ad(reply_text, ad_keywords):
-                        return
-                    await context.bot.send_message(
-                        chat_id=update.effective_chat.id, text=reply_text
-                    )
-                    last_reply_ts[runtime_chat_key] = ts
-
-
-async def cleaned_word():
-    memory = get_memory()
-    ad_keywords = _normalize_keywords(load_json(AD_KEYWORDS_FILE))
-
-    cleaned_data = {}
-
-    for question, info in memory.items():
-        if _contains_ad(question, ad_keywords):
-            continue
-
-        answers = info.get("answers", {})
-        # 过滤广告回答
-        new_answers = {
-            ans: cnt
-            for ans, cnt in answers.items()
-            if not _contains_ad(ans, ad_keywords)
-        }
-        if new_answers:
-            cleaned_data[question] = {
-                "answers": new_answers,
-                "total": sum(new_answers.values()),
-            }
-
-    print(f"清理完成，{len(memory)}： 剩余问题数：{len(cleaned_data)}")
-    save_json(DATA_FILE, cleaned_data)
+    cfg_self["recommend_last_ts"] = now_ts
+    groups[chat_id] = cfg_self
+    recommended = _build_group_recommendations(groups)
+    if bool(cfg_self.get("recommend", False)):
+        cfg_self["exposure"] = int(cfg_self.get("exposure", 0) or 0) + 1
+    save_json(GROUP_LIST_FILE, groups)
+    text, markup, _ = _build_group_recommend_page(recommended, 1)
+    await context.bot.send_message(
+        chat_id=chat.id,
+        text=text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+        reply_markup=markup,
+    )
 
 
 @group_allowed
@@ -972,95 +605,6 @@ async def add_joke(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_message(
         chat_id=update.effective_chat.id, text="✅ 段子已添加！"
-    )
-
-
-@register_command("群主动说话", "主动说话")
-async def active_speak_control(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-
-    if update.effective_chat.type not in ["group", "supergroup"]:
-        return await safe_reply(
-            update, context, "请在要配置的群里发送“群主动说话”或“主动说话”。"
-        )
-
-    if not await is_admin(update, context):
-        return await safe_reply(update, context, "❌ 仅群管理员或超级管理员可配置主动说话。")
-
-    chat_id = str(update.effective_chat.id)
-    group_whitelist = get_group_whitelist(context)
-    group_config = group_whitelist.get(chat_id, {})
-
-    if not group_config.get("enabled", False):
-        return await safe_reply(
-            update, context, "⚠️ 本群尚未启用主功能，请先使用 /addgroup 启用。"
-        )
-
-    current_enabled = get_group_toggle(
-        context, chat_id, GROUP_KEY_ACTIVE_SPEAK, default=False
-    )
-    current_interval = get_group_int_config(
-        context,
-        chat_id,
-        GROUP_KEY_ACTIVE_INTERVAL,
-        default=ACTIVE_SPEAK_DEFAULT_INTERVAL_MIN,
-        min_value=ACTIVE_SPEAK_MIN_INTERVAL_MIN,
-        max_value=ACTIVE_SPEAK_MAX_INTERVAL_MIN,
-    )
-
-    if not context.args:
-        return await safe_reply(
-            update,
-            context,
-            (
-                f"🗣 主动说话：{'✅ 开启' if current_enabled else '🚫 关闭'}\n"
-                f"⏱ 发送频率：每 {current_interval} 分钟\n"
-                "用法：\n"
-                "1) 群主动说话 开启/关闭\n"
-                "2) 群主动说话 频率 30"
-            ),
-        )
-
-    action = context.args[0].strip().lower()
-    if action in {"开", "开启", "on", "true", "1"}:
-        set_group_toggle(context, chat_id, GROUP_KEY_ACTIVE_SPEAK, True)
-        return await safe_reply(update, context, "✅ 主动说话已开启")
-
-    if action in {"关", "关闭", "off", "false", "0"}:
-        set_group_toggle(context, chat_id, GROUP_KEY_ACTIVE_SPEAK, False)
-        return await safe_reply(update, context, "❌ 主动说话已关闭")
-
-    new_interval = None
-    if action in {"频率", "间隔", "rate"} and len(context.args) > 1:
-        try:
-            new_interval = int(context.args[1])
-        except Exception:
-            pass
-    elif action.isdigit():
-        new_interval = int(action)
-
-    if new_interval is not None:
-        if (
-            new_interval < ACTIVE_SPEAK_MIN_INTERVAL_MIN
-            or new_interval > ACTIVE_SPEAK_MAX_INTERVAL_MIN
-        ):
-            return await safe_reply(
-                update,
-                context,
-                f"❗频率范围：{ACTIVE_SPEAK_MIN_INTERVAL_MIN}~{ACTIVE_SPEAK_MAX_INTERVAL_MIN} 分钟",
-            )
-        group_config[GROUP_KEY_ACTIVE_INTERVAL] = new_interval
-        group_whitelist[chat_id] = group_config
-        save_json(GROUP_LIST_FILE, group_whitelist)
-        return await safe_reply(
-            update, context, f"✅ 已设置主动说话频率：每 {new_interval} 分钟"
-        )
-
-    await safe_reply(
-        update,
-        context,
-        "❗参数错误。用法：群主动说话 开启/关闭 或 群主动说话 频率 30",
     )
 
 
@@ -1202,209 +746,6 @@ async def navigation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=markup,
         )
         return
-
-
-def _build_active_speak_pool(memory: dict, ad_keywords: list[str]) -> tuple[list[str], list[str], list[int]]:
-    """Build reusable candidate pools once for one scheduled-send run."""
-    if not isinstance(memory, dict) or not memory:
-        return [], [], []
-
-    keyword_pattern = None
-    unique_keywords = sorted({kw for kw in ad_keywords if kw}, key=len, reverse=True)
-    if unique_keywords:
-        keyword_pattern = re.compile("|".join(re.escape(kw) for kw in unique_keywords))
-
-    def is_ad_text(text: str) -> bool:
-        return bool(keyword_pattern and keyword_pattern.search((text or "").lower()))
-
-    question_pool = []
-    answer_pool = {}
-    for q, info in memory.items():
-        if isinstance(q, str) and looks_ok(q) and not is_ad_text(q):
-            question_pool.append(q)
-
-        answers = info.get("answers", {}) if isinstance(info, dict) else {}
-        if not isinstance(answers, dict):
-            continue
-        for ans, cnt in answers.items():
-            if not (
-                isinstance(ans, str)
-                and looks_ok(ans)
-                and not is_ad_text(ans)
-            ):
-                continue
-            try:
-                cnt_num = int(cnt or 0)
-            except Exception:
-                cnt_num = 1
-            answer_pool[ans] = answer_pool.get(ans, 0) + max(1, cnt_num)
-
-    answers = list(answer_pool)
-    weights = [max(1, answer_pool[answer]) for answer in answers]
-    return question_pool, answers, weights
-
-
-def _get_active_speak_pool(
-    context: ContextTypes.DEFAULT_TYPE,
-    memory: dict,
-    raw_ad_keywords,
-    ad_keywords: list[str],
-) -> tuple[list[str], list[str], list[int]]:
-    """Cache the expensive learned-pairs scan until memory or ad rules change."""
-    bot_name = get_runtime_bot_name() or str(
-        context.application.bot_data.get("name", "default")
-    )
-    cache_key = (
-        id(memory),
-        id(raw_ad_keywords),
-        active_speak_memory_version.get(bot_name, 0),
-    )
-    cached = active_speak_pool_cache.get(bot_name)
-    if cached and cached.get("key") == cache_key:
-        return cached["pool"]
-
-    started = time.perf_counter()
-    pool = _build_active_speak_pool(memory, ad_keywords)
-    active_speak_pool_cache[bot_name] = {"key": cache_key, "pool": pool}
-    print(
-        f"[定时发送] 候选内容缓存已构建: bot={bot_name} "
-        f"questions={len(pool[0])} answers={len(pool[1])} "
-        f"cost={time.perf_counter() - started:.3f}s"
-    )
-    return pool
-
-
-def _pick_active_speak_text(candidate_pool: tuple[list[str], list[str], list[int]]) -> Optional[str]:
-    question_pool, answers, weights = candidate_pool
-    if not question_pool and not answers:
-        return None
-    choose_question = bool(question_pool) and (not answers or random.random() < 0.5)
-    if choose_question:
-        return random.choice(question_pool)
-    return random.choices(answers, weights=weights, k=1)[0]
-
-
-def _active_speak_offset_min(runtime_chat_key: str, interval_min: int) -> int:
-    interval_min = max(1, int(interval_min))
-    return abs(hash(runtime_chat_key)) % interval_min
-
-
-def _active_speak_jitter_sec(runtime_chat_key: str) -> int:
-    # 错峰发送：不同机器人/群延迟不同秒数，避免同秒说话
-    return abs(hash(f"{runtime_chat_key}:jitter")) % 15
-
-
-def _set_group_bot_muted_flag(chat_id: str, muted: bool):
-    groups = load_json(GROUP_LIST_FILE)
-    if not isinstance(groups, dict):
-        groups = {}
-    cfg = groups.get(str(chat_id), {})
-    if not isinstance(cfg, dict):
-        cfg = {}
-    if bool(cfg.get("bot_muted", False)) == bool(muted):
-        return
-    cfg["bot_muted"] = bool(muted)
-    groups[str(chat_id)] = cfg
-    save_json(GROUP_LIST_FILE, groups)
-
-
-async def _send_active_speak_with_delay(bot, chat_id: int, text: str, delay_sec: int):
-    if delay_sec > 0:
-        await asyncio.sleep(delay_sec)
-    await bot.send_message(chat_id=chat_id, text=text)
-
-
-# ---------------- 定时群发 ----------------
-async def speaking_to(context: ContextTypes.DEFAULT_TYPE):
-    # 定时任务每分钟运行一次。仅在配置文件被手动修改时失效缓存，避免
-    # 直接编辑 JSON 后还要等待五分钟 CACHE_TTL 才读取到新的开关/频率/文案。
-    refreshed = any(
-        refresh_json_cache_if_changed(path)
-        for path in (GROUP_LIST_FILE, DATA_FILE, AD_KEYWORDS_FILE)
-    )
-    if refreshed:
-        print(f"[定时发送] 检测到配置已更新: bot={get_runtime_bot_name()}")
-    groups = load_json(GROUP_LIST_FILE)
-    memory = get_memory()
-    raw_ad_keywords = load_json(AD_KEYWORDS_FILE)
-    ad_keywords = _normalize_keywords(raw_ad_keywords)
-    now_ts = time.time()
-
-    if not isinstance(groups, dict) or not groups:
-        return
-
-    # 先筛选本分钟真正到期的群。旧实现会为每一个到期群重复遍历全部
-    # learned_pairs；小雅等机器人有数万条记忆，会显著拖慢定时任务。
-    due_groups = []
-    for chat_id, cfg in list(groups.items()):
-        if not isinstance(cfg, dict):
-            continue
-        if not cfg.get("enabled", True):
-            continue
-        if not cfg.get("bot_enabled", True):
-            continue
-        if not cfg.get("bot_in_group", True):
-            continue
-        if bool(cfg.get("bot_muted", False)):
-            continue
-        if not bool(cfg.get(GROUP_KEY_ACTIVE_SPEAK, False)):
-            continue
-
-        interval_min = cfg.get(
-            GROUP_KEY_ACTIVE_INTERVAL, ACTIVE_SPEAK_DEFAULT_INTERVAL_MIN
-        )
-        if not isinstance(interval_min, int):
-            interval_min = ACTIVE_SPEAK_DEFAULT_INTERVAL_MIN
-        interval_min = max(
-            ACTIVE_SPEAK_MIN_INTERVAL_MIN,
-            min(ACTIVE_SPEAK_MAX_INTERVAL_MIN, interval_min),
-        )
-
-        runtime_chat_key = get_runtime_chat_key(context, str(chat_id))
-        current_minute = int(now_ts // 60)
-        offset_min = _active_speak_offset_min(runtime_chat_key, interval_min)
-        if current_minute % interval_min != offset_min:
-            continue
-        if now_ts - last_active_speak_ts.get(runtime_chat_key, 0) < interval_min * 60:
-            continue
-        due_groups.append((chat_id, cfg, interval_min, runtime_chat_key))
-
-    if not due_groups:
-        return
-
-    # 只扫描一次记忆库，随后为每个群从同一候选池随机选择内容。
-    candidate_pool = _get_active_speak_pool(
-        context, memory, raw_ad_keywords, ad_keywords
-    )
-    if not _pick_active_speak_text(candidate_pool):
-        print(
-            f"[定时发送] 无可用主动说话内容: bot={get_runtime_bot_name()} "
-            f"memory={len(memory) if isinstance(memory, dict) else 0}"
-        )
-        return
-
-    for chat_id, cfg, interval_min, runtime_chat_key in due_groups:
-        title = cfg.get("title", "Unknown")
-        try:
-            text = _pick_active_speak_text(candidate_pool)
-            if not text:
-                continue
-            last_active_speak_ts[runtime_chat_key] = now_ts
-            jitter_sec = _active_speak_jitter_sec(runtime_chat_key)
-            await _send_active_speak_with_delay(
-                context.bot,
-                int(chat_id),
-                text,
-                jitter_sec,
-            )
-        except Exception as e:
-            if isinstance(e, telegram.error.Forbidden) or (
-                isinstance(e, telegram.error.BadRequest)
-                and "Not enough rights" in str(e)
-            ):
-                _set_group_bot_muted_flag(str(chat_id), True)
-            bot_name = get_runtime_bot_name() or getattr(context.bot, "username", "")
-            print(f"⚠️ 主动说话发送失败: bot={bot_name} chat={chat_id}, title={title} {e}")
 
 
 def _parse_fixed_slots(raw: str) -> list[str]:

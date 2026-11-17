@@ -122,7 +122,6 @@ AD_PUSH_MESSAGE_KEY = "ad_push_message"
 GLOBAL_AD_PUSH_MESSAGE_KEY = "global_ad_push_message"
 TOGGLE_FIELDS = [
     ("bot_enabled", "启用机器人"),
-    ("reply_enabled", "开启回复"),
     ("custom_qa_enabled", "自定义问答"),
     ("voice_reply_enabled", "语音回复"),
     ("verify", "身份验证"),
@@ -134,7 +133,6 @@ TOGGLE_FIELDS = [
     ("recommend", "群推荐"),
     ("name_change_notice", "用户名变更提示"),
     ("invite_approval_enabled", "邀请审核"),
-    ("active_speak_enabled", "主动说话"),
     ("online_baby_auto_enabled", "在线宝宝定时调用"),
     ("teacher_auto_enabled", "老师定时调用"),
 ]
@@ -169,9 +167,6 @@ BOT_ADMIN_REQUIRED_FIELDS = {
     "force_subscribe",
     "force_subscribe_new_only",
 }
-ACTIVE_SPEAK_MIN_INTERVAL = 1
-ACTIVE_SPEAK_MAX_INTERVAL = 1440
-ACTIVE_SPEAK_DEFAULT_INTERVAL = 2
 ONLINE_BABY_MIN_INTERVAL = 1
 ONLINE_BABY_MAX_INTERVAL = 1440
 ONLINE_BABY_DEFAULT_INTERVAL = 30
@@ -2412,7 +2407,6 @@ def _build_group_category_keyboard(
     if category == "basic":
         fields = [
             ("bot_enabled", "启用机器人"),
-            ("reply_enabled", "开启回复"),
             ("custom_qa_enabled", "自定义问答"),
             ("voice_reply_enabled", "语音回复"),
             ("welcome", "入群欢迎"),
@@ -2447,7 +2441,6 @@ def _build_group_category_keyboard(
             rows.append([InlineKeyboardButton("🧹 清理冻结账号", callback_data=f"{CALLBACK_PREFIX}:clean_frozen:{chat_id}")])
     elif category == "automation":
         intervals = [
-            ("active_speak_enabled", "主动说话", "active_speak_interval", "active_speak_interval_min", ACTIVE_SPEAK_DEFAULT_INTERVAL),
             ("online_baby_auto_enabled", "在线宝宝", "online_baby_interval", "online_baby_interval_min", ONLINE_BABY_DEFAULT_INTERVAL),
             ("teacher_auto_enabled", "老师调用", "teacher_interval", "teacher_interval_min", TEACHER_DEFAULT_INTERVAL),
         ]
@@ -4720,23 +4713,6 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
             query, context, chat_id_str, user_id
         )
 
-    if action == "active_speak_interval" and len(parts) >= 3:
-        chat_id_str = parts[2]
-        chat_id = _parse_chat_id(chat_id_str)
-        if chat_id is None:
-            return
-        if not await _can_manage_group(context, user_id, chat_id):
-            return await query.answer("你不是该群管理员，无法修改。", show_alert=True)
-        context.user_data["group_setting_stage"] = "active_speak_interval"
-        context.user_data["group_setting_chat_id"] = chat_id_str
-        await query.answer()
-        return await query.edit_message_text(
-            f"请输入主动说话频率（分钟，{ACTIVE_SPEAK_MIN_INTERVAL}-{ACTIVE_SPEAK_MAX_INTERVAL}）。",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅️ 返回", callback_data=f"{CALLBACK_PREFIX}:active_speak_interval_back")]]
-            ),
-        )
-
     if action == "online_baby_interval" and len(parts) >= 3:
         chat_id_str = parts[2]
         chat_id = _parse_chat_id(chat_id_str)
@@ -4900,7 +4876,7 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer()
         return await query.edit_message_text(
             "请输入要添加的频道/群组：\n"
-            "• 公开目标：@laoshibangdan 或 t.me/zhaolaoshiqun\n"
+            "• 公开目标：@xxx 或 t.me/xxx \n"
             "• 私有目标：发送频道/群组 ID，例如 -1001234567890\n\n"
             "添加私有目标时，机器人必须在目标中拥有创建邀请链接的管理员权限。\n"
             "只会新增这一个目标，不会覆盖已有设置。",
@@ -5413,7 +5389,6 @@ async def group_setting_callback(update: Update, context: ContextTypes.DEFAULT_T
         return await _open_group_panel(query, context, chat_id_str, user_id)
 
     if action in {
-        "active_speak_interval_back",
         "online_baby_interval_back",
         "teacher_interval_back",
         "teacher_parameter_back",
@@ -5958,7 +5933,6 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
     if stage not in {
         "force_channel",
         "force_channel_add",
-        "active_speak_interval",
         "online_baby_interval",
         "teacher_interval",
         "teacher_parameter",
@@ -6194,20 +6168,6 @@ async def handle_group_setting_text(update: Update, context: ContextTypes.DEFAUL
                 return await update.message.reply_text("❗ 模式仅支持：间隔 或 定时")
             cfg["ad_push_mode"] = "interval" if text == "间隔" else "fixed"
             await update.message.reply_text(f"✅ 已切换广告推送模式为：{text}")
-        elif stage == "active_speak_interval":
-            if not text:
-                return await update.message.reply_text("❗ 请输入数字分钟。")
-            interval = _parse_positive_int(text)
-            if interval is None:
-                return await update.message.reply_text("❗ 请输入数字分钟。")
-            if interval < ACTIVE_SPEAK_MIN_INTERVAL or interval > ACTIVE_SPEAK_MAX_INTERVAL:
-                return await update.message.reply_text(
-                    f"❗ 频率范围：{ACTIVE_SPEAK_MIN_INTERVAL}-{ACTIVE_SPEAK_MAX_INTERVAL} 分钟"
-                )
-            cfg["active_speak_interval_min"] = interval
-            await update.message.reply_text(
-                f"✅ 已设置主动说话频率：每 {interval} 分钟"
-            )
         elif stage == "online_baby_interval":
             if not text:
                 return await update.message.reply_text("❗ 请输入数字分钟。")

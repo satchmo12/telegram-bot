@@ -229,5 +229,13 @@
         "join_time": 1794778128,
         "last_active": 1794778128,
         "blocked": false
+    },
+    "8482229959": {
+        "name": "Anand",
+        "username": "",
+        "join_time": 1794861641,
+        "last_active": 1794861656,
+        "blocked": true,
+        "blocked_at": 1794861679
     }
 }

@@ -72,7 +72,6 @@ from start_welcome_settings import (
 from command_router import get_matched_command
 from admin_permissions import has_admin_permission, is_owner_or_super_admin
 
-from chat.my_bot import cleaned_word
 from multi_bot_manager import input_search_enabled_for_bot
 from chat.gemini_chat import handle_gemini_ai
 from run_daily import (
@@ -819,10 +818,6 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update, context, context.args[0]
         ):
             return
-        # The bottom ReplyKeyboard is optional. The inline start panel below
-        # remains available regardless of this setting.
-        if start_reply_keyboard_enabled():
-            await show_menu(update, context)
     else:
         return
 
@@ -861,6 +856,8 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text, entities = _start_welcome_payload(bot_name)
     
 
+    # Send the welcome card before the optional ReplyKeyboard. This keeps the
+    # visible /start response fast even if the secondary menu send is delayed.
     await update.message.reply_text(
         text,
         # f"当前启用功能：{feature_text}\n\n",
@@ -869,6 +866,13 @@ async def start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # parse_mode="HTML",
         disable_web_page_preview=True,
     )
+    if start_reply_keyboard_enabled():
+        try:
+            await show_menu(update, context)
+        except Exception as exc:
+            # The welcome card has already reached the user; a reply-keyboard
+            # failure must not make /start appear unresponsive.
+            print(f"[start] 发送底部菜单失败: {exc}")
 
 
 async def start_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1532,8 +1536,6 @@ async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print("♻️ 正在重启机器人...", flush=True)
     logging.warning("♻️ 正在重启机器人...")
 
-    # 重启前清理广告词
-    await cleaned_word()
     await asyncio.sleep(0.8)
     # # 1️⃣ 先结束所有正在进行的成语接龙
     # for chat_id in group_list.keys():

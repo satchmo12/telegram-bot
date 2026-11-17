@@ -18,7 +18,6 @@ from group.grouplist import record_user
 from game.qa_game import handle_qa_message
 from group.talk_stats import count_message
 from game.chengyu_game import handle_chengyu
-from chat.my_bot import on_text
 from chat.gemini_chat import handle_gemini_ai
 from info.economy import my_points, top_points, top_richest
 from translate.my_deep_translator import auto_translate
@@ -164,8 +163,6 @@ async def handle_text_dispatcher(update: Update, context: ContextTypes.DEFAULT_T
         await handle_text_private_message(update, context)  # 聊天记录 (只记录私聊)
        
         # 会中断后面的
-
-        # await on_text(update, context)
 
     except Exception as e:
         print(f"[文本调度出错] {e}")

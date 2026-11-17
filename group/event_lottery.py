@@ -2675,7 +2675,7 @@ async def event_lottery_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer()
         return await query.edit_message_text(
             "请输入要关注的频道/群组：\n"
-            "• 公开目标：@laoshibangdan 或 t.me/zhaolaoshiqun\n"
+            "• 公开目标：@xxx 或 t.me/xxx \n"
             "• 私有目标：发送频道/群组 ID，例如 -1001234567890\n\n"
             "机器人必须是目标管理员；私有目标还需要创建邀请链接的权限。",
             reply_markup=InlineKeyboardMarkup([[

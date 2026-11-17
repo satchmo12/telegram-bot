@@ -204,7 +204,7 @@
             "id": 2,
             "name": "福利频道",
             "channel_id": -1004479704526,
-            "enabled": true
+            "enabled": false
         }
     ],
     "submission_target_next_id": 4,

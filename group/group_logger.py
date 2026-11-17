@@ -98,11 +98,7 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "manor": False,
             "chengyu_game": False,
             "welcome": False,
-            "learning_enabled": False,   # 默认启用学习
-            "reply_enabled": False,     # 默认不自动回复
             "voice_reply_enabled": False,
-            "active_speak_enabled": False,  # 默认不主动说话
-            "active_speak_interval_min": 2,
             "online_baby_auto_enabled": False,
             "online_baby_interval_min": 30,
             "ai_reply_enabled": True,
@@ -144,23 +140,11 @@ async def log_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "bot_muted" not in group:
             group["bot_muted"] = False
             changed = True
-        if "learning_enabled" not in group:
-            group["learning_enabled"] = False
-            changed = True
         if "bot_enabled" not in group:
             group["bot_enabled"] = True
             changed = True
-        if "reply_enabled" not in group:
-            group["reply_enabled"] = False
-            changed = True
         if "voice_reply_enabled" not in group:
             group["voice_reply_enabled"] = False
-            changed = True
-        if "active_speak_enabled" not in group:
-            group["active_speak_enabled"] = False
-            changed = True
-        if "active_speak_interval_min" not in group:
-            group["active_speak_interval_min"] = 2
             changed = True
         if "online_baby_auto_enabled" not in group:
             group["online_baby_auto_enabled"] = False

@@ -1,5 +1,5 @@
 {
-    "next_id": 14,
+    "next_id": 15,
     "rules": [
         {
             "id": 1,
@@ -623,6 +623,54 @@
                 },
                 {
                     "id": 5,
+                    "from": "水费",
+                    "to": "课费"
+                }
+            ]
+        },
+        {
+            "id": 14,
+            "enabled": true,
+            "channel_id": "-1002735775952",
+            "note": "南京必刷红榜",
+            "output_template": "✨城市： #南京{content}",
+            "output_entities": [
+                {
+                    "custom_emoji_id": "5775917048097939066",
+                    "length": 1,
+                    "offset": 0,
+                    "type": "custom_emoji"
+                }
+            ],
+            "cut_words": [
+                "🔰【格语 】"
+            ],
+            "cut_includes_word": false,
+            "personal_report_link_enabled": false,
+            "personal_report_link_field": "",
+            "replacements": [
+                {
+                    "id": 1,
+                    "from": "圈界NO.1",
+                    "to": ""
+                },
+                {
+                    "id": 2,
+                    "from": "昵称",
+                    "to": "艺名"
+                },
+                {
+                    "id": 3,
+                    "from": "地区",
+                    "to": "区域"
+                },
+                {
+                    "id": 4,
+                    "from": "电报",
+                    "to": "联系"
+                },
+                {
+                    "id": 6,
                     "from": "水费",
                     "to": "课费"
                 }
